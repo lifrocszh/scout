@@ -1,0 +1,15 @@
+/target/
+/.scratch/
+
+# Local runtime artifacts
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local configuration and editor/OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+*.swp
