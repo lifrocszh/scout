@@ -17,23 +17,17 @@ data/config/index.toml
 ## Technical implementation
 
 ```mermaid
-flowchart LR
-    CFG["sources.toml"] --> CRAWL["Crawler<br/>reqwest + robots/sitemaps<br/>bounded frontier and retries"]
-    CRAWL --> RAW["Crawl artifacts<br/>bodies + manifest"]
-    RAW --> MAT["Corpus materializer<br/>normalize, deduplicate, assign IDs"]
-    MAT --> SNAP["Corpus snapshot<br/>Pages + aliases + Passages"]
-    PROF["data/config/index.toml"] --> BUILD["Generation builder"]
+flowchart TB
+    CFG["Sources<br/>sources.toml"] --> CRAWL["Crawl<br/>robots + sitemaps<br/>bounded requests"]
+    CRAWL --> SNAP["Corpus snapshot<br/>Pages, aliases, Passages"]
+    PROF["Index profile<br/>index.toml"] --> BUILD["Build + validate"]
     SNAP --> BUILD
-    BUILD --> KW["Tantivy<br/>keyword index"]
-    BUILD --> SEM["FastEmbed/BGE or deterministic<br/>USearch cosine index"]
-    KW --> GEN["Validated Generation<br/>catalog + manifest + SHA-256"]
-    SEM --> GEN
-    GEN --> ACT["Activation<br/>CURRENT / PREVIOUS"]
-    ACT --> SVC["Minimal HTTP service"]
-    Q["Search request"] --> SVC
-    SVC --> SEARCH["keyword / semantic / RRF hybrid"]
-    SEARCH --> RES["Page results<br/>winning Passage evidence"]
-    EVENTS["Structured JSONL events"] -.-> CRAWL
+    BUILD --> GEN["Index Generation<br/>keyword + semantic indexes"]
+    GEN --> ACT["Seal + activate<br/>CURRENT / PREVIOUS"]
+    ACT --> SVC["HTTP search service"]
+    Q["Query"] --> SVC
+    SVC --> RES["Page results<br/>Passage evidence"]
+    EVENTS["Operational events"] -.-> CRAWL
     EVENTS -.-> BUILD
     EVENTS -.-> SVC
 ```
