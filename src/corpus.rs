@@ -476,15 +476,30 @@ pub(crate) fn validate_snapshot_records(
             ));
         };
         if alias.alias_url.is_empty()
-            || alias.alias_page_id.is_empty()
             || !matches!(alias.alias_kind, "exact-alias" | "redirect-alias")
-            || alias.alias_page_id == alias.representative_page_id
-            || alias.alias_page_id != page_id(&alias.alias_url)
             || alias.source_id != representative.source_id
-            || alias.alias_url == representative.normalized_final_url
-            || pages_by_id.contains_key(alias.alias_page_id.as_str())
-            || !alias_ids.insert(alias.alias_page_id.as_str())
-            || !alias_urls.insert((&alias.source_id, &alias.alias_url))
+        {
+            return Err(Error::invalid(
+                "Corpus alias identity or reference mismatch",
+            ));
+        }
+        let Some(identity_url) = alias_identity_url(alias) else {
+            continue;
+        };
+        let derived_alias_id = page_id(identity_url);
+        let inserted_id = alias_ids.insert(derived_alias_id.clone());
+        let inserted_url = alias_urls.insert((&alias.source_id, identity_url));
+        if inserted_id != inserted_url {
+            return Err(Error::invalid(
+                "Corpus alias identity or reference mismatch",
+            ));
+        }
+        if !inserted_id {
+            continue;
+        }
+        if (alias.alias_kind == "exact-alias" && alias.alias_page_id != derived_alias_id)
+            || derived_alias_id == alias.representative_page_id
+            || pages_by_id.contains_key(derived_alias_id.as_str())
         {
             return Err(Error::invalid(
                 "Corpus alias identity or reference mismatch",
@@ -514,6 +529,21 @@ pub(crate) fn validate_snapshot_records(
         }
     }
     Ok(())
+}
+
+fn alias_identity_url(alias: &AliasRecord) -> Option<&str> {
+    match alias.alias_kind {
+        "exact-alias" => Some(alias.alias_url.as_str()),
+        "redirect-alias" => {
+            let requested_url = if alias.requested_url.is_empty() {
+                alias.alias_url.as_str()
+            } else {
+                alias.requested_url.as_str()
+            };
+            (requested_url != alias.alias_url).then_some(requested_url)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) struct IncompleteCrawl<'a> {

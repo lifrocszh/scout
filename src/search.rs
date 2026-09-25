@@ -1,6 +1,6 @@
 use super::generation::{
-    embed_query, open_semantic_index, read_pointer, read_semantic_index, validate_generation,
-    validate_pointer,
+    embed_query, open_semantic_index, read_pointer, read_semantic_index, register_keyword_analyzer,
+    validate_generation, validate_pointer,
 };
 use super::storage::parse_jsonl;
 use super::{
@@ -129,18 +129,6 @@ pub(crate) fn keyword_hits<'a>(
         }
     }
     Ok(hits)
-}
-
-pub(crate) fn register_keyword_analyzer(
-    index: &mut Index,
-    profile: &BuildProfile,
-) -> Result<(), Error> {
-    let analyzer = index
-        .tokenizers()
-        .get("default")
-        .ok_or_else(|| Error::not_ready("Tantivy default analyzer unavailable"))?;
-    index.tokenizers().register(&profile.analyzer_id, analyzer);
-    Ok(())
 }
 
 pub(crate) fn semantic_hits_for_query<'a>(

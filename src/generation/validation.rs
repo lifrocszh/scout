@@ -1,0 +1,234 @@
+use super::checksums::{collect_files, directory_digest, directory_or_file_digest};
+use super::keyword::register_keyword_analyzer;
+use super::semantic::{open_semantic_index, validate_usearch_index};
+use super::semantic_storage::{read_semantic_bytes, validate_semantic_index};
+use crate::storage::parse_jsonl;
+use crate::storage::sha256_hex;
+use crate::{
+    BTreeMap, BTreeSet, BuildProfile, CatalogRecord, Error, GenerationManifest, Path,
+    SEMANTIC_ARTIFACT, SEMANTIC_VECTOR_ARTIFACT, SemanticEvidence, fs,
+};
+use tantivy::Index;
+
+pub(super) fn load_generation_manifest(generation: &Path) -> Result<GenerationManifest, Error> {
+    let path = generation.join("generation-manifest.json");
+    let bytes = fs::read(&path)
+        .map_err(|e| Error::invalid(format!("read Generation manifest {}: {e}", path.display())))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::invalid(format!("parse Generation manifest: {e}")))
+}
+
+pub(super) fn manifest_digest(manifest: &GenerationManifest) -> Result<String, Error> {
+    let mut unsigned = manifest.clone();
+    unsigned.manifest_sha256.clear();
+    let bytes = serde_json::to_vec_pretty(&unsigned)
+        .map_err(|e| Error::storage(format!("serialize Generation manifest: {e}")))?;
+    // Normalize floating-point evidence through the same serde round-trip used by
+    // validation so the digest is stable after a manifest is reopened.
+    let canonical: GenerationManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::storage(format!("normalize Generation manifest: {e}")))?;
+    let canonical_bytes = serde_json::to_vec_pretty(&canonical)
+        .map_err(|e| Error::storage(format!("serialize normalized Generation manifest: {e}")))?;
+    Ok(sha256_hex(&canonical_bytes))
+}
+
+pub(super) fn write_generation_manifest(
+    path: &Path,
+    manifest: &mut GenerationManifest,
+) -> Result<(), Error> {
+    manifest.manifest_sha256 = manifest_digest(manifest)?;
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| Error::storage(format!("serialize Generation manifest: {e}")))?;
+    fs::write(path, bytes)
+        .map_err(|e| Error::storage(format!("write Generation manifest {}: {e}", path.display())))
+}
+
+pub(crate) fn validate_generation(
+    generation: &Path,
+    expected_status: &str,
+) -> Result<GenerationManifest, Error> {
+    if !generation.is_dir() {
+        return Err(Error::invalid(format!(
+            "Generation directory {} is missing",
+            generation.display()
+        )));
+    }
+    let manifest = load_generation_manifest(generation)?;
+    if manifest.status != expected_status {
+        return Err(Error::invalid(format!(
+            "Generation status {:?} is not {expected_status:?}",
+            manifest.status
+        )));
+    }
+    if manifest.manifest_sha256 != manifest_digest(&manifest)? {
+        return Err(Error::invalid("Generation manifest checksum mismatch"));
+    }
+    if manifest.catalog_file != "catalog.jsonl"
+        || manifest.keyword_artifact != "keyword"
+        || manifest.semantic_artifact != SEMANTIC_ARTIFACT
+        || manifest.checksums_file != "checksums.sha256"
+    {
+        return Err(Error::invalid("Generation artifact layout mismatch"));
+    }
+
+    let profile_bytes = fs::read(generation.join("build-profile.json"))
+        .map_err(|e| Error::invalid(format!("read Generation build profile: {e}")))?;
+    let profile: BuildProfile = serde_json::from_slice(&profile_bytes)
+        .map_err(|e| Error::invalid(format!("parse Generation build profile: {e}")))?;
+    if profile.snapshot_id != manifest.corpus_snapshot_id
+        || profile.key_map.as_deref() != Some(manifest.vector_key_map.as_str())
+    {
+        return Err(Error::invalid("Generation profile compatibility mismatch"));
+    }
+
+    let catalog_path = generation.join(&manifest.catalog_file);
+    let catalog_bytes = fs::read(&catalog_path)
+        .map_err(|e| Error::invalid(format!("read Generation catalog: {e}")))?;
+    if sha256_hex(&catalog_bytes) != manifest.catalog_sha256 {
+        return Err(Error::invalid("Generation catalog checksum mismatch"));
+    }
+    let catalog = parse_jsonl::<CatalogRecord>(&catalog_bytes, "catalog.jsonl")?;
+    if catalog.len() != manifest.passage_count || catalog.len() != manifest.vector_key_count {
+        return Err(Error::invalid("Generation catalog count mismatch"));
+    }
+    let mut passage_ids = BTreeSet::new();
+    let mut vector_keys = BTreeSet::new();
+    let mut page_ids = BTreeSet::new();
+    let mut page_shapes = BTreeMap::<String, (String, String)>::new();
+    let mut passage_ordinals = BTreeSet::new();
+    let mut alias_ids = BTreeSet::new();
+    for record in &catalog {
+        if record.page_id.is_empty()
+            || record.passage_id.is_empty()
+            || record.source_id.is_empty()
+            || record.normalized_final_url.is_empty()
+            || !passage_ids.insert(record.passage_id.clone())
+            || !vector_keys.insert(record.vector_key)
+            || !passage_ordinals.insert((record.page_id.clone(), record.passage_ordinal))
+            || record.alias_page_ids.windows(2).any(|ids| ids[0] >= ids[1])
+        {
+            return Err(Error::invalid("Generation catalog identity mismatch"));
+        }
+        if let Some(shape) = page_shapes.get(&record.page_id)
+            && (shape.0 != record.source_id || shape.1 != record.normalized_final_url)
+        {
+            return Err(Error::invalid("Generation catalog Page reference mismatch"));
+        }
+        page_shapes.insert(
+            record.page_id.clone(),
+            (
+                record.source_id.clone(),
+                record.normalized_final_url.clone(),
+            ),
+        );
+        page_ids.insert(record.page_id.clone());
+        alias_ids.extend(record.alias_page_ids.iter().cloned());
+    }
+    if alias_ids
+        .iter()
+        .any(|alias_id| alias_id.is_empty() || page_ids.contains(alias_id))
+    {
+        return Err(Error::invalid("Generation catalog alias identity mismatch"));
+    }
+    let expected_keys = (1..=catalog.len() as u64).collect::<BTreeSet<_>>();
+    if vector_keys != expected_keys
+        || page_ids.len() != manifest.page_count
+        || alias_ids.len() != manifest.alias_count
+    {
+        return Err(Error::invalid(
+            "Generation catalog key, Page, or alias count mismatch",
+        ));
+    }
+
+    let keyword_path = generation.join(&manifest.keyword_artifact);
+    if directory_digest(&keyword_path)? != manifest.keyword_sha256 {
+        return Err(Error::invalid("keyword artifact checksum mismatch"));
+    }
+    let mut keyword_index = Index::open_in_dir(&keyword_path)
+        .map_err(|e| Error::invalid(format!("reopen keyword artifact: {e}")))?;
+    register_keyword_analyzer(&mut keyword_index, &profile)?;
+    let keyword_reader = keyword_index
+        .reader()
+        .map_err(|e| Error::invalid(format!("read keyword artifact: {e}")))?;
+    let keyword_count = keyword_reader.searcher().num_docs() as usize;
+    if keyword_count != manifest.keyword_count || keyword_count != catalog.len() {
+        return Err(Error::invalid("keyword/catalog count mismatch"));
+    }
+
+    let semantic_path = generation.join(&manifest.semantic_artifact);
+    if directory_or_file_digest(&semantic_path)? != manifest.semantic_sha256 {
+        return Err(Error::invalid("semantic artifact checksum mismatch"));
+    }
+    let vector_bytes = fs::read(generation.join(SEMANTIC_VECTOR_ARTIFACT))
+        .map_err(|e| Error::invalid(format!("read semantic vector artifact: {e}")))?;
+    let semantic_index = read_semantic_bytes(&vector_bytes)?;
+    let dimensions = profile
+        .dimensions
+        .ok_or_else(|| Error::invalid("semantic dimensions missing from profile"))?;
+    validate_semantic_index(&semantic_index, &catalog, dimensions)?;
+    let usearch_index = open_semantic_index(&semantic_path, &profile)?;
+    validate_usearch_index(&usearch_index, &catalog, dimensions, &profile)?;
+    let semantic_manifest_bytes = fs::read(generation.join("semantic-manifest.json"))
+        .map_err(|e| Error::invalid(format!("read semantic manifest: {e}")))?;
+    let semantic_evidence: SemanticEvidence = serde_json::from_slice(&semantic_manifest_bytes)
+        .map_err(|e| Error::invalid(format!("parse semantic manifest: {e}")))?;
+    if semantic_evidence.artifact != manifest.semantic_artifact
+        || semantic_evidence.artifact_sha256 != manifest.semantic_sha256
+        || semantic_evidence.catalog_count != catalog.len()
+        || semantic_evidence.vector_count != semantic_index.vectors.len()
+        || semantic_evidence.dimensions != dimensions
+        || !semantic_evidence.reopened
+    {
+        return Err(Error::invalid(
+            "semantic evidence does not match persisted artifacts",
+        ));
+    }
+    if manifest.semantic_count != catalog.len()
+        || manifest.semantic.vector_count != catalog.len()
+        || manifest.semantic.catalog_count != catalog.len()
+        || manifest.semantic.dimensions != dimensions
+        || manifest.semantic.artifact_sha256 != manifest.semantic_sha256
+    {
+        return Err(Error::invalid("semantic/catalog compatibility mismatch"));
+    }
+    verify_checksums(generation)?;
+    Ok(manifest)
+}
+
+fn verify_checksums(generation: &Path) -> Result<(), Error> {
+    let path = generation.join("checksums.sha256");
+    let text = fs::read_to_string(&path)
+        .map_err(|e| Error::invalid(format!("read Generation checksums: {e}")))?;
+    let mut listed = BTreeSet::new();
+    for line in text.lines() {
+        let Some((expected, relative)) = line.split_once("  ") else {
+            return Err(Error::invalid("invalid Generation checksum line"));
+        };
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(Error::invalid("invalid Generation checksum path"));
+        }
+        let bytes = fs::read(generation.join(relative_path))
+            .map_err(|e| Error::invalid(format!("read checksummed artifact {relative}: {e}")))?;
+        if sha256_hex(&bytes) != expected || !listed.insert(relative.to_string()) {
+            return Err(Error::invalid(format!(
+                "Generation checksum mismatch for {relative}"
+            )));
+        }
+    }
+    let mut files = Vec::new();
+    collect_files(generation, generation, &mut files)?;
+    let actual = files
+        .into_iter()
+        .map(|(relative, _)| relative)
+        .filter(|relative| relative != "checksums.sha256")
+        .collect::<BTreeSet<_>>();
+    if listed != actual {
+        return Err(Error::invalid("Generation checksum coverage mismatch"));
+    }
+    Ok(())
+}

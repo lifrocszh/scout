@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ::url::Url;
 use chrono::{SecondsFormat, Utc};
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER};
 use reqwest::redirect::Policy;
@@ -23,12 +22,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{
-    IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
-    Value as TantivyValue,
-};
+use tantivy::schema::Value as TantivyValue;
 use tantivy::{Index, TantivyDocument};
-use usearch::{Index as UsearchIndex, IndexOptions as UsearchIndexOptions, MetricKind, ScalarKind};
+use usearch::{Index as UsearchIndex, MetricKind};
 
 const CRAWL_SCHEMA: &str = "scout.crawl-manifest.v1";
 const SNAPSHOT_SCHEMA: &str = "scout.corpus-snapshot.v1";
