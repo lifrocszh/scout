@@ -135,7 +135,7 @@ pub(super) fn document_embedding_fingerprint(
         "runtime_sha256": runtime_sha256,
         "embedding_backend": profile.embedding_backend.as_str(),
         "execution_provider": profile.embedding_execution_provider.as_deref(),
-        "provider_device": if profile.embedding_execution_provider.as_deref() == Some("openvino_gpu") { "GPU" } else { "default" },
+        "provider_device": if profile.embedding_execution_provider.as_deref() == Some("openvino_gpu") || profile.embedding_execution_provider.as_deref() == Some("apple_coreml_gpu") { "GPU" } else { "default" },
         "model_max_tokens": profile.model_max_tokens,
         "pooling": profile.pooling.as_deref(),
         "normalization": profile.normalization.as_deref(),
@@ -373,6 +373,24 @@ fn fastembed_options(
             {
                 Err(Error::invalid(
                     "openvino_gpu embedding requires the openvino-gpu Cargo feature and an OpenVINO-enabled ONNX Runtime",
+                ))
+            }
+        }
+        "apple_coreml_gpu" => {
+            #[cfg(all(feature = "apple-coreml", target_os = "macos"))]
+            {
+                Ok(options.with_execution_providers(vec![
+                    ort::ep::CoreML::default()
+                        .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndGPU)
+                        .with_model_cache_dir(cache_dir.join("coreml").to_string_lossy())
+                        .build()
+                        .error_on_failure(),
+                ]))
+            }
+            #[cfg(not(all(feature = "apple-coreml", target_os = "macos")))]
+            {
+                Err(Error::invalid(
+                    "apple_coreml_gpu embedding requires the apple-coreml Cargo feature on macOS",
                 ))
             }
         }

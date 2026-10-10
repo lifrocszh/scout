@@ -446,7 +446,12 @@ fn read_source_run_summary(
 }
 
 fn run_index_build(cli: &Cli) -> i32 {
-    let Operation::IndexBuild { corpus, resume } = &cli.operation else {
+    let Operation::IndexBuild {
+        corpus,
+        resume,
+        mode,
+    } = &cli.operation
+    else {
         unreachable!("index build operation required")
     };
     let invocation_id = new_run_id();
@@ -465,22 +470,23 @@ fn run_index_build(cli: &Cli) -> i32 {
             "corpus_snapshot_id": corpus,
             "build_run_id": build_run_id,
             "resume": resume.is_some(),
+            "mode": mode.as_str(),
             "data_dir": cli.data_dir
         }),
     );
     let index = IndexGeneration::at(&cli.data_dir);
     let result = if resume.is_some() {
-        index.resume_build(corpus, build_run_id)
+        index.resume_build(corpus, build_run_id, *mode)
     } else {
-        index.build(corpus, build_run_id)
+        index.build(corpus, build_run_id, *mode)
     };
     match result {
         Ok(summary) => {
-            if let Some(keyword) = summary.get("keyword").cloned() {
-                events.emit("keyword.completed", "success", keyword);
+            if let Some(keyword) = summary.get("keyword").filter(|value| !value.is_null()) {
+                events.emit("keyword.completed", "success", keyword.clone());
             }
-            if let Some(semantic) = summary.get("semantic").cloned() {
-                events.emit("semantic.completed", "success", semantic);
+            if let Some(semantic) = summary.get("semantic").filter(|value| !value.is_null()) {
+                events.emit("semantic.completed", "success", semantic.clone());
             }
             events.emit("index.completed", "success", json!(summary));
             println!(

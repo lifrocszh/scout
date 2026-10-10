@@ -33,19 +33,36 @@ pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration
             continue;
         };
         drop(catalog_bytes);
-        let Ok(mut keyword_index) = Index::open_in_dir(path.join(&manifest.keyword_artifact))
-        else {
-            continue;
+        let components = manifest.components();
+        let keyword_index = if components.keyword {
+            let Some(artifact) = manifest.keyword_artifact.as_deref() else {
+                continue;
+            };
+            let Ok(mut index) = Index::open_in_dir(path.join(artifact)) else {
+                continue;
+            };
+            if register_keyword_analyzer(&mut index, &profile).is_err() {
+                continue;
+            }
+            Some(index)
+        } else {
+            None
         };
-        if register_keyword_analyzer(&mut keyword_index, &profile).is_err() {
-            continue;
-        }
-        let Ok(semantic_index) =
-            open_semantic_index(&path.join(&manifest.semantic_artifact), &profile)
-        else {
-            continue;
+        let semantic_index = if components.semantic {
+            let Some(artifact) = manifest.semantic_artifact.as_deref() else {
+                continue;
+            };
+            let Ok(index) = open_semantic_index(&path.join(artifact), &profile) else {
+                continue;
+            };
+            Some(index)
+        } else {
+            None
         };
-        let semantic_dimensions = manifest.semantic.dimensions;
+        let semantic_dimensions = manifest
+            .semantic
+            .as_ref()
+            .map(|evidence| evidence.dimensions);
         return Ok(LoadedGeneration {
             manifest,
             profile,
@@ -67,7 +84,11 @@ pub(crate) fn keyword_hits<'a>(
     query: &str,
     source: Option<&str>,
 ) -> Result<Vec<(f32, &'a CatalogRecord)>, Error> {
-    let schema = generation.keyword_index.schema();
+    let keyword_index = generation
+        .keyword_index
+        .as_ref()
+        .ok_or_else(|| Error::not_ready("keyword search is unavailable in this Generation"))?;
+    let schema = keyword_index.schema();
     let title = schema
         .get_field("title")
         .map_err(|_| Error::not_ready("keyword title field unavailable"))?;
@@ -83,7 +104,7 @@ pub(crate) fn keyword_hits<'a>(
     let source_id = schema
         .get_field("source_id")
         .map_err(|_| Error::not_ready("keyword source field unavailable"))?;
-    let mut parser = QueryParser::for_index(&generation.keyword_index, vec![title, heading, body]);
+    let mut parser = QueryParser::for_index(keyword_index, vec![title, heading, body]);
     parser.set_field_boost(title, generation.profile.title_boost as f32);
     parser.set_field_boost(heading, generation.profile.heading_boost as f32);
     parser.set_field_boost(body, generation.profile.body_boost as f32);
@@ -95,8 +116,7 @@ pub(crate) fn keyword_hits<'a>(
         .iter()
         .map(|record| (record.passage_id.as_str(), record))
         .collect::<HashMap<_, _>>();
-    let searcher = generation
-        .keyword_index
+    let searcher = keyword_index
         .reader()
         .map_err(|e| Error::not_ready(format!("open keyword reader: {e}")))?
         .searcher();
@@ -136,7 +156,13 @@ pub(crate) fn semantic_hits_for_query<'a>(
     query: &str,
     source: Option<&str>,
 ) -> Result<Vec<(f32, &'a CatalogRecord)>, Error> {
-    let dimensions = generation.semantic_dimensions;
+    let dimensions = generation
+        .semantic_dimensions
+        .ok_or_else(|| Error::not_ready("semantic search is unavailable in this Generation"))?;
+    let semantic_index = generation
+        .semantic_index
+        .as_ref()
+        .ok_or_else(|| Error::not_ready("semantic search is unavailable in this Generation"))?;
     let query_vector = generation.query_embedder.embed(
         query,
         &generation.profile,
@@ -149,8 +175,7 @@ pub(crate) fn semantic_hits_for_query<'a>(
         .map(|record| (record.vector_key, record))
         .collect::<HashMap<_, _>>();
     let mut hits = Vec::new();
-    let matches = generation
-        .semantic_index
+    let matches = semantic_index
         .search(&query_vector, generation.profile.candidate_depth.max(1))
         .map_err(|error| Error::not_ready(format!("semantic search failed: {error}")))?;
     for (key, distance) in matches.keys.iter().zip(matches.distances.iter()) {

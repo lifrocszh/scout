@@ -64,11 +64,7 @@ pub(crate) fn validate_generation(
     if manifest.manifest_sha256 != manifest_digest(&manifest)? {
         return Err(Error::invalid("Generation manifest checksum mismatch"));
     }
-    if manifest.catalog_file != "catalog.jsonl"
-        || manifest.keyword_artifact != "keyword"
-        || manifest.semantic_artifact != SEMANTIC_ARTIFACT
-        || manifest.checksums_file != "checksums.sha256"
-    {
+    if manifest.catalog_file != "catalog.jsonl" || manifest.checksums_file != "checksums.sha256" {
         return Err(Error::invalid("Generation artifact layout mismatch"));
     }
 
@@ -76,10 +72,32 @@ pub(crate) fn validate_generation(
         .map_err(|e| Error::invalid(format!("read Generation build profile: {e}")))?;
     let profile: BuildProfile = serde_json::from_slice(&profile_bytes)
         .map_err(|e| Error::invalid(format!("parse Generation build profile: {e}")))?;
+    match manifest.schema_version.as_str() {
+        "scout.generation-manifest.v1"
+            if manifest.components.is_none() && profile.build_mode == crate::BuildMode::Hybrid => {}
+        "scout.generation-manifest.v2" if manifest.components.is_some() => {}
+        "scout.generation-manifest.v1" => {
+            return Err(Error::invalid(
+                "legacy Generation manifest must describe a hybrid Generation",
+            ));
+        }
+        "scout.generation-manifest.v2" => {
+            return Err(Error::invalid(
+                "Generation manifest component declaration is missing",
+            ));
+        }
+        _ => return Err(Error::invalid("unsupported Generation manifest schema")),
+    }
     if profile.snapshot_id != manifest.corpus_snapshot_id
         || profile.key_map.as_deref() != Some(manifest.vector_key_map.as_str())
     {
         return Err(Error::invalid("Generation profile compatibility mismatch"));
+    }
+    let components = manifest.components();
+    if components != crate::GenerationComponents::for_mode(profile.build_mode) {
+        return Err(Error::invalid(
+            "Generation component declaration does not match build profile",
+        ));
     }
     validate_model_metadata(&profile)?;
 
@@ -155,72 +173,118 @@ pub(crate) fn validate_generation(
         alias_ids,
     ));
 
-    let keyword_path = generation.join(&manifest.keyword_artifact);
-    if directory_digest(&keyword_path)? != manifest.keyword_sha256 {
-        return Err(Error::invalid("keyword artifact checksum mismatch"));
-    }
-    let mut keyword_index = Index::open_in_dir(&keyword_path)
-        .map_err(|e| Error::invalid(format!("reopen keyword artifact: {e}")))?;
-    register_keyword_analyzer(&mut keyword_index, &profile)?;
-    let keyword_reader = keyword_index
-        .reader()
-        .map_err(|e| Error::invalid(format!("read keyword artifact: {e}")))?;
-    let keyword_count = keyword_reader.searcher().num_docs() as usize;
-    if keyword_count != manifest.keyword_count || keyword_count != catalog.len() {
-        return Err(Error::invalid("keyword/catalog count mismatch"));
-    }
-
-    let semantic_path = generation.join(&manifest.semantic_artifact);
-    if directory_or_file_digest(&semantic_path)? != manifest.semantic_sha256 {
-        return Err(Error::invalid("semantic artifact checksum mismatch"));
-    }
-    let dimensions = profile
-        .dimensions
-        .ok_or_else(|| Error::invalid("semantic dimensions missing from profile"))?;
-    let vector_count = validate_semantic_file(
-        &generation.join(SEMANTIC_VECTOR_ARTIFACT),
-        &mut vector_keys,
-        dimensions,
-    )?;
-    let usearch_index = open_semantic_index(&semantic_path, &profile)?;
-    validate_usearch_index(&usearch_index, &catalog, dimensions, &profile)?;
-    let semantic_manifest_bytes = fs::read(generation.join("semantic-manifest.json"))
-        .map_err(|e| Error::invalid(format!("read semantic manifest: {e}")))?;
-    let semantic_evidence: SemanticEvidence = serde_json::from_slice(&semantic_manifest_bytes)
-        .map_err(|e| Error::invalid(format!("parse semantic manifest: {e}")))?;
-    if semantic_evidence.artifact != manifest.semantic_artifact
-        || semantic_evidence.artifact_sha256 != manifest.semantic_sha256
-        || semantic_evidence.catalog_count != catalog.len()
-        || semantic_evidence.vector_count != vector_count
-        || semantic_evidence.dimensions != dimensions
-        || semantic_evidence.embedding_fingerprint != manifest.semantic.embedding_fingerprint
-        || !model_metadata_matches(&semantic_evidence, &profile)
-        || !model_metadata_matches(&manifest.semantic, &profile)
-        || !semantic_evidence.reopened
+    if components.keyword {
+        let artifact = manifest
+            .keyword_artifact
+            .as_deref()
+            .filter(|artifact| *artifact == "keyword")
+            .ok_or_else(|| Error::invalid("keyword artifact declaration is missing"))?;
+        let expected_digest = manifest
+            .keyword_sha256
+            .as_deref()
+            .ok_or_else(|| Error::invalid("keyword artifact checksum is missing"))?;
+        let keyword_path = generation.join(artifact);
+        if directory_digest(&keyword_path)? != expected_digest {
+            return Err(Error::invalid("keyword artifact checksum mismatch"));
+        }
+        let mut keyword_index = Index::open_in_dir(&keyword_path)
+            .map_err(|e| Error::invalid(format!("reopen keyword artifact: {e}")))?;
+        register_keyword_analyzer(&mut keyword_index, &profile)?;
+        let keyword_reader = keyword_index
+            .reader()
+            .map_err(|e| Error::invalid(format!("read keyword artifact: {e}")))?;
+        let keyword_count = keyword_reader.searcher().num_docs() as usize;
+        if keyword_count != manifest.keyword_count || keyword_count != catalog.len() {
+            return Err(Error::invalid("keyword/catalog count mismatch"));
+        }
+    } else if manifest.keyword_artifact.is_some()
+        || manifest.keyword_sha256.is_some()
+        || manifest.keyword_count != 0
+        || generation.join("keyword").exists()
     {
         return Err(Error::invalid(
-            "semantic evidence does not match persisted artifacts",
+            "keyword artifacts exist for an unavailable Generation component",
         ));
     }
-    if semantic_evidence
-        .embedding_fingerprint
-        .as_deref()
-        .is_some_and(|fingerprint| {
-            fingerprint.len() != 64
-                || !fingerprint
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
+
+    if components.semantic {
+        let artifact = manifest
+            .semantic_artifact
+            .as_deref()
+            .filter(|artifact| *artifact == SEMANTIC_ARTIFACT)
+            .ok_or_else(|| Error::invalid("semantic artifact declaration is missing"))?;
+        let expected_digest = manifest
+            .semantic_sha256
+            .as_deref()
+            .ok_or_else(|| Error::invalid("semantic artifact checksum is missing"))?;
+        let semantic_path = generation.join(artifact);
+        if directory_or_file_digest(&semantic_path)? != expected_digest {
+            return Err(Error::invalid("semantic artifact checksum mismatch"));
+        }
+        let dimensions = profile
+            .dimensions
+            .ok_or_else(|| Error::invalid("semantic dimensions missing from profile"))?;
+        let vector_count = validate_semantic_file(
+            &generation.join(SEMANTIC_VECTOR_ARTIFACT),
+            &mut vector_keys,
+            dimensions,
+        )?;
+        let usearch_index = open_semantic_index(&semantic_path, &profile)?;
+        validate_usearch_index(&usearch_index, &catalog, dimensions, &profile)?;
+        let semantic_manifest_bytes = fs::read(generation.join("semantic-manifest.json"))
+            .map_err(|e| Error::invalid(format!("read semantic manifest: {e}")))?;
+        let semantic_evidence: SemanticEvidence = serde_json::from_slice(&semantic_manifest_bytes)
+            .map_err(|e| Error::invalid(format!("parse semantic manifest: {e}")))?;
+        let manifest_evidence = manifest
+            .semantic
+            .as_ref()
+            .ok_or_else(|| Error::invalid("semantic evidence is missing from Generation"))?;
+        if semantic_evidence.artifact != artifact
+            || semantic_evidence.artifact_sha256 != expected_digest
+            || semantic_evidence.catalog_count != catalog.len()
+            || semantic_evidence.vector_count != vector_count
+            || semantic_evidence.dimensions != dimensions
+            || semantic_evidence.embedding_fingerprint != manifest_evidence.embedding_fingerprint
+            || !model_metadata_matches(&semantic_evidence, &profile)
+            || !model_metadata_matches(manifest_evidence, &profile)
+            || !semantic_evidence.reopened
+        {
+            return Err(Error::invalid(
+                "semantic evidence does not match persisted artifacts",
+            ));
+        }
+        if semantic_evidence
+            .embedding_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| {
+                fingerprint.len() != 64
+                    || !fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        {
+            return Err(Error::invalid("semantic embedding fingerprint is invalid"));
+        }
+        if manifest.semantic_count != catalog.len()
+            || manifest_evidence.vector_count != catalog.len()
+            || manifest_evidence.catalog_count != catalog.len()
+            || manifest_evidence.dimensions != dimensions
+            || manifest_evidence.artifact_sha256 != expected_digest
+        {
+            return Err(Error::invalid("semantic/catalog compatibility mismatch"));
+        }
+    } else if manifest.semantic_artifact.is_some()
+        || manifest.semantic_sha256.is_some()
+        || manifest.semantic.is_some()
+        || manifest.semantic_count != 0
+        || generation.join(SEMANTIC_ARTIFACT).exists()
+        || generation.join(SEMANTIC_VECTOR_ARTIFACT).exists()
+        || generation.join("semantic-manifest.json").exists()
+        || generation.join("semantic-build-progress.jsonl").exists()
     {
-        return Err(Error::invalid("semantic embedding fingerprint is invalid"));
-    }
-    if manifest.semantic_count != catalog.len()
-        || manifest.semantic.vector_count != catalog.len()
-        || manifest.semantic.catalog_count != catalog.len()
-        || manifest.semantic.dimensions != dimensions
-        || manifest.semantic.artifact_sha256 != manifest.semantic_sha256
-    {
-        return Err(Error::invalid("semantic/catalog compatibility mismatch"));
+        return Err(Error::invalid(
+            "semantic artifacts exist for an unavailable Generation component",
+        ));
     }
     verify_checksums(generation)?;
     Ok(manifest)

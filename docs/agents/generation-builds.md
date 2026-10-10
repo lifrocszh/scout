@@ -70,18 +70,32 @@ downloaded files.
 `embedding_execution_provider = "cpu"` is the default. Set it to
 `"openvino_gpu"` in `config/index.toml` to request Intel GPU execution. The
 provider is sealed in the Generation profile and reused for semantic queries.
-GPU mode requires compiling both the index and serving binary with
+OpenVINO GPU mode requires compiling both the index and serving binary with
 `--features openvino-gpu`, an OpenVINO-enabled ONNX Runtime supplied through
 `ORT_LIB_PATH`, and the OpenVINO GPU runtime and WSL GPU driver. The bundled
 Linux ONNX Runtime does not include OpenVINO. GPU mode fails if the requested
 provider is unavailable or falls back to CPU.
 
+On macOS, Apple Core ML can be requested with
+`embedding_execution_provider = "apple_coreml_gpu"` in `config/index.toml` and
+`cargo build --release --features apple-coreml`. The provider selects Core ML
+`CPUAndGPU` compute units and keeps ONNX Runtime's CPU fallback for unsupported
+operators. This path is macOS-only; verify acceleration on the target Mac, as
+Core ML may delegate only supported model operations to the GPU.
+
+For a one-command fresh Crawl-to-verified-Generation run, use
+`scripts/crawl-build-coreml.sh <sources.toml> <index-profile-template.toml> <data-dir>`.
+The supplied profile template must match the model selected by the Crawl config;
+the script updates its snapshot ID and provider, then builds, activates, and
+verifies the Generation.
+
 ## Resume and embedding reuse
 
-For an interrupted build, resume only with the original `run-<sha256>` ID:
+For an interrupted build, resume only with the original `run-<sha256>` ID and the same
+`--mode` used for that build. The example resumes a hybrid build:
 
 ```sh
-scout index build --corpus <snapshot-id> --resume <run-id> --data-dir data
+scout index build --corpus <snapshot-id> --resume <run-id> --data-dir data --mode hybrid
 ```
 
 Resume verifies that the exact Corpus snapshot, build profile, catalog,
@@ -105,8 +119,8 @@ recorded runtime fingerprint are not valid cache sources by label alone.
 1. Build reports the complete page, passage, alias, and vector counts.
 2. Activate the Generation and run `index verify` against the same project-local
    `data/` tree.
-3. Smoke-test health, readiness, generation metadata, and one hybrid search
-   against that tree.
+3. Smoke-test health, readiness, Generation metadata, and a search mode supported
+   by that Generation (hybrid for a hybrid build) against that tree.
 4. Record the Generation ID, counts, profile, and manifest/artifact hashes in
    `docs/runs/`.
 

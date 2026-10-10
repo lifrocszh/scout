@@ -22,6 +22,7 @@ pub(crate) fn build_generation(
     corpus_id: &str,
     run_id: &str,
     resume: bool,
+    mode: crate::BuildMode,
 ) -> Result<Value, Error> {
     if !valid_build_run_id(run_id) {
         return Err(Error::invalid(
@@ -85,7 +86,7 @@ pub(crate) fn build_generation(
         .embedding_model
         .as_deref()
         .unwrap_or(crate::DEFAULT_EMBEDDING_MODEL);
-    let profile = build_profile(raw, corpus_id, corpus_model)?;
+    let profile = build_profile(raw, corpus_id, corpus_model, mode)?;
     let profile_bytes = serde_json::to_vec_pretty(&profile)
         .map_err(|e| Error::storage(format!("serialize build profile: {e}")))?;
     let profile_digest = sha256_hex(&profile_bytes);
@@ -196,22 +197,35 @@ pub(crate) fn build_generation(
         write_if_absent(&staging.join("catalog.jsonl"), &catalog_bytes)?;
         drop(catalog_bytes);
     }
-    let (keyword_digest, keyword_count, keyword_duration_ms, keyword_artifact_bytes) =
-        build_keyword_index(&staging, &catalog, &profile)?;
-    let (semantic, checkpoint_stats) = build_semantic_index(
-        &staging,
-        &checkpoint_root,
-        &embedding_cache_root,
-        run_id,
-        &snapshot_digest,
-        &profile_digest,
-        &catalog_digest,
-        resume,
-        &catalog,
-        &profile,
-    )?;
+    let keyword = if mode.has_keyword() {
+        Some(build_keyword_index(&staging, &catalog, &profile)?)
+    } else {
+        None
+    };
+    let semantic = if mode.has_semantic() {
+        Some(build_semantic_index(
+            &staging,
+            &checkpoint_root,
+            &embedding_cache_root,
+            run_id,
+            &snapshot_digest,
+            &profile_digest,
+            &catalog_digest,
+            resume,
+            &catalog,
+            &profile,
+        )?)
+    } else {
+        None
+    };
+    let keyword_digest = keyword.as_ref().map(|result| result.0.clone());
+    let keyword_count = keyword.as_ref().map_or(0, |result| result.1);
+    let keyword_duration_ms = keyword.as_ref().map(|result| result.2);
+    let keyword_artifact_bytes = keyword.as_ref().map(|result| result.3);
+    let semantic_evidence = semantic.as_ref().map(|result| result.0.clone());
+    let checkpoint_stats = semantic.as_ref().map(|result| &result.1);
     let mut generation = GenerationManifest {
-        schema_version: "scout.generation-manifest.v1".into(),
+        schema_version: "scout.generation-manifest.v2".into(),
         generation_id: generation_id.clone(),
         status: "validated".into(),
         build_run_id: run_id.into(),
@@ -224,13 +238,18 @@ pub(crate) fn build_generation(
         build_config_sha256: profile_digest,
         catalog_sha256: catalog_digest,
         catalog_file: "catalog.jsonl".into(),
-        keyword_artifact: "keyword".into(),
+        keyword_artifact: mode.has_keyword().then(|| "keyword".into()),
         keyword_sha256: keyword_digest,
         keyword_count,
-        semantic_artifact: SEMANTIC_ARTIFACT.into(),
-        semantic_sha256: semantic.artifact_sha256.clone(),
-        semantic_count: semantic.vector_count,
-        semantic: semantic.clone(),
+        semantic_artifact: mode.has_semantic().then(|| SEMANTIC_ARTIFACT.into()),
+        semantic_sha256: semantic_evidence
+            .as_ref()
+            .map(|evidence| evidence.artifact_sha256.clone()),
+        semantic_count: semantic_evidence
+            .as_ref()
+            .map_or(0, |evidence| evidence.vector_count),
+        semantic: semantic_evidence,
+        components: Some(crate::GenerationComponents::for_mode(mode)),
         checksums_file: "checksums.sha256".into(),
         page_count,
         passage_count: catalog.len(),
@@ -255,27 +274,27 @@ pub(crate) fn build_generation(
         "page_count": validated.page_count,
         "passage_count": validated.passage_count,
         "catalog_sha256": validated.catalog_sha256,
-        "keyword": {
-            "artifact": generation.keyword_artifact.clone(),
-            "artifact_bytes": keyword_artifact_bytes,
-            "build_duration_ms": keyword_duration_ms,
+        "keyword": keyword_duration_ms.map(|duration| json!({
+            "artifact": "keyword",
+            "artifact_bytes": keyword_artifact_bytes.unwrap_or_default(),
+            "build_duration_ms": duration,
             "count": keyword_count,
-        },
+        })),
         "semantic": validated.semantic,
-        "build_checkpoints": {
-            "schema": checkpoint_stats.schema,
-            "identity_sha256": checkpoint_stats.identity_sha256,
-            "chunks_reused": checkpoint_stats.chunks_reused,
-            "chunks_created": checkpoint_stats.chunks_created,
-        },
-        "embedding_reuse": {
+        "build_checkpoints": checkpoint_stats.map(|stats| json!({
+            "schema": stats.schema,
+            "identity_sha256": stats.identity_sha256,
+            "chunks_reused": stats.chunks_reused,
+            "chunks_created": stats.chunks_created,
+        })),
+        "embedding_reuse": checkpoint_stats.map(|stats| json!({
             "schema": "scout.embedding-reuse.v1",
-            "embedding_fingerprint": checkpoint_stats.embedding_fingerprint,
-            "cache_vectors_reused": checkpoint_stats.cache_vectors_reused,
-            "cache_vectors_created": checkpoint_stats.cache_vectors_created,
-            "build_checkpoint_vectors_reused": checkpoint_stats.checkpoint_vectors_reused,
-            "local_duplicate_vectors_reused": checkpoint_stats.local_duplicate_vectors_reused,
-        },
+            "embedding_fingerprint": stats.embedding_fingerprint,
+            "cache_vectors_reused": stats.cache_vectors_reused,
+            "cache_vectors_created": stats.cache_vectors_created,
+            "build_checkpoint_vectors_reused": stats.checkpoint_vectors_reused,
+            "local_duplicate_vectors_reused": stats.local_duplicate_vectors_reused,
+        })),
         "checksums_sha256": checksums_sha256,
     }))
 }
@@ -332,17 +351,24 @@ fn remove_incomplete_artifacts(staging: &Path) -> Result<(), Error> {
 fn completed_build_summary(staging: &Path, manifest: &GenerationManifest) -> Result<Value, Error> {
     let checksums = fs::read(staging.join("checksums.sha256"))
         .map_err(|error| Error::storage(format!("read completed Generation checksums: {error}")))?;
+    let keyword = manifest
+        .keyword_artifact
+        .as_ref()
+        .map(|artifact| {
+            Ok::<_, Error>(json!({
+                "artifact": artifact,
+                "artifact_bytes": super::checksums::directory_bytes(&staging.join(artifact))?,
+                "count": manifest.keyword_count,
+            }))
+        })
+        .transpose()?;
     Ok(json!({
         "generation_id": manifest.generation_id,
         "staging_path": staging,
         "page_count": manifest.page_count,
         "passage_count": manifest.passage_count,
         "catalog_sha256": manifest.catalog_sha256,
-        "keyword": {
-            "artifact": manifest.keyword_artifact,
-            "artifact_bytes": super::checksums::directory_bytes(&staging.join("keyword"))?,
-            "count": manifest.keyword_count,
-        },
+        "keyword": keyword,
         "semantic": manifest.semantic,
         "checksums_sha256": sha256_hex(&checksums),
         "resumed_complete": true,

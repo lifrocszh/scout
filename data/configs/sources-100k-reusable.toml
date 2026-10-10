@@ -1,0 +1,249 @@
+# Reusable broad-crawl profile derived from run 94 policy.
+# Unlike the frozen run config, this uses a small set of section-root seeds and
+# path allowlists instead of enumerated seeds/allowed_urls. Crawl scope can differ.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
+page_target = 100000
+embedding_model = "BAAI/bge-small-en-v1.5"
+global_concurrency = 8
+origin_concurrency = 1
+min_start_spacing_ms = 500
+max_frontier = 150000
+max_decoded_body_bytes = 8388608
+max_extraction_bytes = 8388608
+max_extraction_millis = 5000
+request_timeout_seconds = 30
+max_attempts = 2
+retry_backoff_ms = 1000
+retry_max_delay_ms = 10000
+max_total_attempts = 260000
+max_duration_seconds = 86400
+robots_cache_seconds = 86400
+max_passage_tokens = 384
+
+[[sources]]
+source_id = "dotnet-api-docs"
+name = ".NET System.Collections.Generic API documentation"
+seeds = ["https://learn.microsoft.com/en-us/dotnet/api/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/dotnet/api/", "/en-us/dotnet/api/system.collections.generic."]
+license_urls = ["https://github.com/dotnet/AspNetApiDocs/blob/8da2dbec6a321b5fe808a5714ca0d2321ad4f37c/LICENSE", "https://github.com/dotnet/AspNetApiDocs/blob/8da2dbec6a321b5fe808a5714ca0d2321ad4f37c/LICENSE-CODE", "https://github.com/dotnet/AspNetApiDocs/blob/main/LICENSE", "https://github.com/dotnet/AspNetApiDocs/blob/main/LICENSE-CODE", "https://github.com/dotnet/dotnet-api-docs/blob/main/LICENSE", "https://github.com/dotnet/dotnet-api-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 12670
+
+[[sources]]
+source_id = "dotnet-docs"
+name = ".NET conceptual documentation from dotnet/docs"
+seeds = ["https://learn.microsoft.com/en-us/dotnet/agents/", "https://learn.microsoft.com/en-us/dotnet/core/", "https://learn.microsoft.com/en-us/dotnet/navigate/", "https://learn.microsoft.com/en-us/dotnet/samples-and-tutorials/", "https://learn.microsoft.com/en-us/dotnet/welcome/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/dotnet/agents", "/en-us/dotnet/core/", "/en-us/dotnet/navigate", "/en-us/dotnet/samples-and-tutorials", "/en-us/dotnet/welcome"]
+license_urls = ["https://github.com/dotnet/docs/blob/main/LICENSE", "https://github.com/dotnet/docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 2
+
+[[sources]]
+source_id = "kubernetes"
+name = "Kubernetes documentation"
+seeds = ["https://kubernetes.io/docs/"]
+allowed_origins = ["https://kubernetes.io"]
+path_prefixes = ["/docs/"]
+license_urls = ["https://github.com/kubernetes/website/blob/main/LICENSE"]
+minimum_page_quota = 952
+
+[[sources]]
+source_id = "learn-azure-ai-services"
+name = "Azure AI Services documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/ai-services/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/ai-services/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-ai-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-ai-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 613
+
+[[sources]]
+source_id = "learn-azure-aks"
+name = "Azure Kubernetes Service documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/aks/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/aks/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-aks-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-aks-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 503
+
+[[sources]]
+source_id = "learn-azure-data-factory"
+name = "Azure Data Factory documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/data-factory/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/data-factory/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 458
+
+[[sources]]
+source_id = "learn-azure-devops"
+name = "Azure DevOps documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/devops/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/devops/", "/en-us/azure/devops/release-notes/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-devops-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-devops-docs/blob/main/LICENSE-CODE", "https://github.com/MicrosoftDocs/azure-devops-yaml-schema/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-devops-yaml-schema/blob/main/LICENSE-CODE"]
+minimum_page_quota = 1428
+
+[[sources]]
+source_id = "learn-azure-docs-products"
+name = "Microsoft Learn Azure Docs product references"
+seeds = ["https://learn.microsoft.com/en-us/azure/active-directory-b2c/", "https://learn.microsoft.com/en-us/azure/api-management/", "https://learn.microsoft.com/en-us/azure/app-service/", "https://learn.microsoft.com/en-us/azure/application-gateway/", "https://learn.microsoft.com/en-us/azure/automation/", "https://learn.microsoft.com/en-us/azure/azure-app-configuration/", "https://learn.microsoft.com/en-us/azure/azure-functions/", "https://learn.microsoft.com/en-us/azure/azure-maps/", "https://learn.microsoft.com/en-us/azure/azure-netapp-files/", "https://learn.microsoft.com/en-us/azure/azure-resource-manager/", "https://learn.microsoft.com/en-us/azure/backup/", "https://learn.microsoft.com/en-us/azure/communication-services/", "https://learn.microsoft.com/en-us/azure/container-apps/", "https://learn.microsoft.com/en-us/azure/cost-management-billing/", "https://learn.microsoft.com/en-us/azure/cyclecloud/", "https://learn.microsoft.com/en-us/azure/databox-online/", "https://learn.microsoft.com/en-us/azure/event-grid/", "https://learn.microsoft.com/en-us/azure/governance/", "https://learn.microsoft.com/en-us/azure/hdinsight/", "https://learn.microsoft.com/en-us/azure/healthcare-apis/", "https://learn.microsoft.com/en-us/azure/load-balancer/", "https://learn.microsoft.com/en-us/azure/logic-apps/", "https://learn.microsoft.com/en-us/azure/migrate/", "https://learn.microsoft.com/en-us/azure/resource-mover/", "https://learn.microsoft.com/en-us/azure/sap/", "https://learn.microsoft.com/en-us/azure/security/", "https://learn.microsoft.com/en-us/azure/site-recovery/", "https://learn.microsoft.com/en-us/azure/spring-apps/", "https://learn.microsoft.com/en-us/azure/stream-analytics/", "https://learn.microsoft.com/en-us/azure/synapse-analytics/", "https://learn.microsoft.com/en-us/azure/virtual-network/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/active-directory-b2c/",  "/en-us/azure/api-management/", "/en-us/azure/app-service/", "/en-us/azure/application-gateway/", "/en-us/azure/automation/", "/en-us/azure/azure-app-configuration/", "/en-us/azure/azure-functions/", "/en-us/azure/azure-maps/", "/en-us/azure/azure-netapp-files/", "/en-us/azure/azure-resource-manager/", "/en-us/azure/backup/", "/en-us/azure/communication-services/", "/en-us/azure/container-apps/", "/en-us/azure/cost-management-billing/", "/en-us/azure/cyclecloud/", "/en-us/azure/databox-online/", "/en-us/azure/event-grid/", "/en-us/azure/governance/", "/en-us/azure/hdinsight/", "/en-us/azure/healthcare-apis/", "/en-us/azure/load-balancer/", "/en-us/azure/logic-apps/", "/en-us/azure/migrate/", "/en-us/azure/resource-mover/", "/en-us/azure/sap/", "/en-us/azure/security/", "/en-us/azure/site-recovery/", "/en-us/azure/spring-apps/", "/en-us/azure/stream-analytics/", "/en-us/azure/synapse-analytics/", "/en-us/azure/virtual-network/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 6737
+
+[[sources]]
+source_id = "learn-azure-monitor"
+name = "Azure Monitor documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/azure-monitor/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/azure-monitor/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-monitor-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-monitor-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 2278
+
+[[sources]]
+source_id = "learn-azure-storage"
+name = "Azure Storage documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/storage/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/storage/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 572
+
+[[sources]]
+source_id = "learn-azure-virtual-machines"
+name = "Azure Virtual Machines documentation"
+seeds = ["https://learn.microsoft.com/en-us/azure/virtual-machines/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/azure/virtual-machines/"]
+license_urls = ["https://github.com/MicrosoftDocs/azure-compute-docs/blob/main/LICENSE", "https://github.com/MicrosoftDocs/azure-compute-docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 604
+
+[[sources]]
+source_id = "learn-exchange-powershell"
+name = "Exchange PowerShell reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/exchangepowershell/"]
+license_urls = ["https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 921
+
+[[sources]]
+source_id = "learn-graph-powershell-beta"
+name = "Microsoft Graph PowerShell beta reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.beta.users/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/microsoft.graph.beta."]
+license_urls = ["https://github.com/MicrosoftDocs/microsoftgraph-docs-powershell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/microsoftgraph-docs-powershell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 15152
+
+[[sources]]
+source_id = "learn-graph-powershell-v1.0"
+name = "Microsoft Graph PowerShell v1.0 reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.applications/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.authentication/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.backuprestore/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.bookings/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.calendar/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.changenotifications/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.cloudcommunications/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.compliance/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.configurationmanagement/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.crossdeviceexperiences/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devicemanagement.administration/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devicemanagement.enrollment/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devicemanagement.functions/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devicemanagement/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devices.cloudprint/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devices.corporatemanagement/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.devices.serviceannouncement/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.directoryobjects/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.education/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.files/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.groups/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.identity.directorymanagement/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.identity.governance/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.identity.partner/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.identity.signins/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.mail/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.notes/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.people/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.personalcontacts/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.planner/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.reports/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.schemaextensions/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.search/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.security/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.sites/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.teams/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.users.actions/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.users.functions/", "https://learn.microsoft.com/en-us/powershell/module/microsoft.graph.users/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/microsoft.graph.applications/", "/en-us/powershell/module/microsoft.graph.authentication/", "/en-us/powershell/module/microsoft.graph.backuprestore/", "/en-us/powershell/module/microsoft.graph.bookings/", "/en-us/powershell/module/microsoft.graph.calendar/", "/en-us/powershell/module/microsoft.graph.changenotifications/", "/en-us/powershell/module/microsoft.graph.cloudcommunications/", "/en-us/powershell/module/microsoft.graph.compliance/", "/en-us/powershell/module/microsoft.graph.configurationmanagement/", "/en-us/powershell/module/microsoft.graph.crossdeviceexperiences/", "/en-us/powershell/module/microsoft.graph.devicemanagement.administration/", "/en-us/powershell/module/microsoft.graph.devicemanagement.enrollment/", "/en-us/powershell/module/microsoft.graph.devicemanagement.functions/", "/en-us/powershell/module/microsoft.graph.devicemanagement/", "/en-us/powershell/module/microsoft.graph.devices.cloudprint/", "/en-us/powershell/module/microsoft.graph.devices.corporatemanagement/", "/en-us/powershell/module/microsoft.graph.devices.serviceannouncement/", "/en-us/powershell/module/microsoft.graph.directoryobjects/", "/en-us/powershell/module/microsoft.graph.education/", "/en-us/powershell/module/microsoft.graph.files/", "/en-us/powershell/module/microsoft.graph.groups/", "/en-us/powershell/module/microsoft.graph.identity.directorymanagement/", "/en-us/powershell/module/microsoft.graph.identity.governance/", "/en-us/powershell/module/microsoft.graph.identity.partner/", "/en-us/powershell/module/microsoft.graph.identity.signins/", "/en-us/powershell/module/microsoft.graph.mail/", "/en-us/powershell/module/microsoft.graph.notes/", "/en-us/powershell/module/microsoft.graph.people/", "/en-us/powershell/module/microsoft.graph.personalcontacts/", "/en-us/powershell/module/microsoft.graph.planner/", "/en-us/powershell/module/microsoft.graph.reports/", "/en-us/powershell/module/microsoft.graph.schemaextensions/", "/en-us/powershell/module/microsoft.graph.search/", "/en-us/powershell/module/microsoft.graph.security/", "/en-us/powershell/module/microsoft.graph.sites/", "/en-us/powershell/module/microsoft.graph.teams/", "/en-us/powershell/module/microsoft.graph.users.actions/", "/en-us/powershell/module/microsoft.graph.users.functions/", "/en-us/powershell/module/microsoft.graph.users/"]
+license_urls = ["https://github.com/MicrosoftDocs/microsoftgraph-docs-powershell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/microsoftgraph-docs-powershell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 9280
+
+[[sources]]
+source_id = "learn-powershell-builtin-modules"
+name = "PowerShell built-in module reference documentation"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/microsoft.powershell."]
+license_urls = ["https://github.com/MicrosoftDocs/PowerShell-Docs/blob/main/LICENSE-CODE.md", "https://github.com/MicrosoftDocs/PowerShell-Docs/blob/main/LICENSE.md"]
+minimum_page_quota = 430
+
+[[sources]]
+source_id = "learn-sharepoint-powershell"
+name = "SharePoint PowerShell reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/microsoft.sharepoint.powershell/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/microsoft.sharepoint.powershell/"]
+license_urls = ["https://github.com/MicrosoftDocs/OfficeDocs-Sharepoint-PowerShell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/OfficeDocs-Sharepoint-PowerShell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 680
+
+[[sources]]
+source_id = "learn-sharepoint-server-powershell"
+name = "SharePoint Server PowerShell reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/sharepointserver/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/sharepointserver/"]
+license_urls = ["https://github.com/MicrosoftDocs/OfficeDocs-Sharepoint-PowerShell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/OfficeDocs-Sharepoint-PowerShell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 632
+
+[[sources]]
+source_id = "learn-skype-powershell"
+name = "Skype for Business PowerShell reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/skypeforbusiness/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/skypeforbusiness/"]
+license_urls = ["https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 652
+
+[[sources]]
+source_id = "learn-sql-jdbc"
+name = "SQL Server JDBC documentation"
+seeds = ["https://learn.microsoft.com/en-us/sql/connect/jdbc/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/sql/connect/jdbc/"]
+license_urls = ["https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE", "https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE-CODE"]
+minimum_page_quota = 1005
+
+[[sources]]
+source_id = "learn-sql-mixed-residual"
+name = "SQL Server mapped residual documentation"
+seeds = ["https://learn.microsoft.com/en-us/sql/connect/ado-net/", "https://learn.microsoft.com/en-us/sql/connect/golang/", "https://learn.microsoft.com/en-us/sql/connect/odbc/", "https://learn.microsoft.com/en-us/sql/connect/oledb/", "https://learn.microsoft.com/en-us/sql/connect/php/", "https://learn.microsoft.com/en-us/sql/database-engine/", "https://learn.microsoft.com/en-us/sql/integration-services/", "https://learn.microsoft.com/en-us/sql/odbc/", "https://learn.microsoft.com/en-us/sql/reporting-services/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/sql/connect/ado-net/", "/en-us/sql/connect/golang/", "/en-us/sql/connect/odbc/", "/en-us/sql/connect/oledb/", "/en-us/sql/connect/php/", "/en-us/sql/database-engine/", "/en-us/sql/integration-services/", "/en-us/sql/odbc/", "/en-us/sql/reporting-services/"]
+license_urls = ["https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE", "https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE-CODE"]
+minimum_page_quota = 3207
+
+[[sources]]
+source_id = "learn-sql-relational"
+name = "SQL Server relational databases documentation"
+seeds = ["https://learn.microsoft.com/en-us/sql/relational-databases/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/sql/relational-databases/"]
+license_urls = ["https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE", "https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE-CODE"]
+minimum_page_quota = 2674
+
+[[sources]]
+source_id = "learn-sql-t-sql"
+name = "SQL Server T-SQL documentation"
+seeds = ["https://learn.microsoft.com/en-us/sql/t-sql/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/sql/t-sql/"]
+license_urls = ["https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE", "https://github.com/MicrosoftDocs/sql-docs/blob/live/LICENSE-CODE"]
+minimum_page_quota = 796
+
+[[sources]]
+source_id = "learn-teams-powershell"
+name = "Teams PowerShell reference"
+seeds = ["https://learn.microsoft.com/en-us/powershell/module/microsoftteams/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/powershell/module/microsoftteams/"]
+license_urls = ["https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE", "https://github.com/MicrosoftDocs/office-docs-powershell/blob/main/LICENSE-CODE"]
+minimum_page_quota = 513
+
+[[sources]]
+source_id = "postgresql"
+name = "PostgreSQL documentation"
+seeds = ["https://www.postgresql.org/docs/current/"]
+allowed_origins = ["https://www.postgresql.org"]
+path_prefixes = ["/docs/"]
+deny_path_prefixes = ["/docs/devel/"]
+license_urls = ["https://www.postgresql.org/about/licence/"]
+minimum_page_quota = 18784
+
+[[sources]]
+source_id = "rust"
+name = "Rust official documentation"
+seeds = ["https://doc.rust-lang.org/book/", "https://doc.rust-lang.org/cargo/", "https://doc.rust-lang.org/edition-guide/", "https://doc.rust-lang.org/embedded-book/", "https://doc.rust-lang.org/nomicon/", "https://doc.rust-lang.org/reference/", "https://doc.rust-lang.org/rust-by-example/", "https://doc.rust-lang.org/std/"]
+allowed_origins = ["https://doc.rust-lang.org"]
+path_prefixes = ["/book/", "/cargo/", "/edition-guide/", "/embedded-book/", "/nomicon/", "/reference/", "/rust-by-example/", "/std/"]
+license_urls = ["https://www.rust-lang.org/policies/licenses"]
+minimum_page_quota = 1739

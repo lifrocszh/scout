@@ -1,4 +1,4 @@
-use super::{Cli, Operation, OsStr, OsString, PathBuf};
+use super::{BuildMode, Cli, Operation, OsStr, OsString, PathBuf};
 
 pub(crate) fn parse_cli<I>(args: I) -> Result<Cli, String>
 where
@@ -18,6 +18,7 @@ where
     let mut materialize_spool = None;
     let mut corpus = None;
     let mut resume = None;
+    let mut build_mode = None;
     let mut generation = None;
     let mut retain = Vec::new();
     let mut bind = None;
@@ -63,6 +64,20 @@ where
                         .into(),
                 )
             }
+            Some("--mode") => {
+                let value = args
+                    .next()
+                    .ok_or("--mode needs hybrid, semantic-only, or keyword-only")?;
+                build_mode = Some(match value.to_str() {
+                    Some("hybrid") => BuildMode::Hybrid,
+                    Some("semantic-only") => BuildMode::SemanticOnly,
+                    Some("keyword-only") => BuildMode::KeywordOnly,
+                    Some(_) => {
+                        return Err("--mode must be hybrid, semantic-only, or keyword-only".into());
+                    }
+                    None => return Err("--mode is not valid UTF-8".into()),
+                });
+            }
             Some("--generation") => {
                 generation = Some(
                     args.next()
@@ -101,7 +116,7 @@ where
             Some("--json") => json_errors = true,
             Some("--help") | Some("-h") => {
                 println!(
-                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
+                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] (default: semantic-only) [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
                 );
                 return Err(String::new());
             }
@@ -115,6 +130,12 @@ where
     {
         return Err("--resume is only valid for index build".into());
     }
+    if build_mode.is_some()
+        && !(command == "index"
+            && index_command.as_deref().and_then(OsStr::to_str) == Some("build"))
+    {
+        return Err("--mode is only valid for index build".into());
+    }
     if materialize_spool.is_some() && command != "crawl" {
         return Err("--materialize-spool is only valid for crawl".into());
     }
@@ -127,6 +148,7 @@ where
             Some("build") => Operation::IndexBuild {
                 corpus: corpus.ok_or("missing --corpus")?,
                 resume,
+                mode: build_mode.unwrap_or(BuildMode::SemanticOnly),
             },
             Some("activate") => Operation::IndexActivate {
                 generation: generation.ok_or("missing --generation")?,

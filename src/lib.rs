@@ -74,6 +74,33 @@ struct Cli {
     json_errors: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum BuildMode {
+    #[default]
+    Hybrid,
+    SemanticOnly,
+    KeywordOnly,
+}
+
+impl BuildMode {
+    fn has_keyword(self) -> bool {
+        !matches!(self, Self::SemanticOnly)
+    }
+
+    fn has_semantic(self) -> bool {
+        !matches!(self, Self::KeywordOnly)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hybrid => "hybrid",
+            Self::SemanticOnly => "semantic-only",
+            Self::KeywordOnly => "keyword-only",
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Operation {
     Crawl {
@@ -83,6 +110,7 @@ enum Operation {
     IndexBuild {
         corpus: String,
         resume: Option<String>,
+        mode: BuildMode,
     },
     IndexActivate {
         generation: String,
@@ -668,6 +696,8 @@ struct RawBuildProfile {
 struct BuildProfile {
     schema_version: String,
     snapshot_id: String,
+    #[serde(default)]
+    build_mode: BuildMode,
     extraction_schema: String,
     passage_schema: String,
     max_passage_tokens: usize,
@@ -730,6 +760,21 @@ struct CatalogRecord {
     vector_key: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GenerationComponents {
+    keyword: bool,
+    semantic: bool,
+}
+
+impl GenerationComponents {
+    fn for_mode(mode: BuildMode) -> Self {
+        Self {
+            keyword: mode.has_keyword(),
+            semantic: mode.has_semantic(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GenerationManifest {
     schema_version: String,
@@ -745,13 +790,18 @@ struct GenerationManifest {
     build_config_sha256: String,
     catalog_sha256: String,
     catalog_file: String,
-    keyword_artifact: String,
-    keyword_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keyword_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keyword_sha256: Option<String>,
     keyword_count: usize,
-    semantic_artifact: String,
-    semantic_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_sha256: Option<String>,
     semantic_count: usize,
-    semantic: SemanticEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic: Option<SemanticEvidence>,
     checksums_file: String,
     page_count: usize,
     passage_count: usize,
@@ -760,6 +810,17 @@ struct GenerationManifest {
     vector_key_map: String,
     created_at_utc: String,
     manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    components: Option<GenerationComponents>,
+}
+
+impl GenerationManifest {
+    fn components(&self) -> GenerationComponents {
+        self.components.clone().unwrap_or(GenerationComponents {
+            keyword: true,
+            semantic: true,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1110,9 +1171,9 @@ struct LoadedGeneration {
     manifest: GenerationManifest,
     profile: BuildProfile,
     catalog: Vec<CatalogRecord>,
-    semantic_dimensions: usize,
-    keyword_index: Index,
-    semantic_index: UsearchIndex,
+    semantic_dimensions: Option<usize>,
+    keyword_index: Option<Index>,
+    semantic_index: Option<UsearchIndex>,
     model_cache_dir: PathBuf,
     query_embedder: generation::QueryEmbedder,
 }

@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 openvino-gpu = ["dep:ort", "ort/openvino", "ort/load-dynamic"]
+apple-coreml = ["dep:ort", "ort/coreml"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

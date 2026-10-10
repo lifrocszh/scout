@@ -1758,6 +1758,7 @@ fn benchmark_fresh_index(
     let summary = IndexGeneration::at(&workspace).build(
         snapshot_id,
         &format!("benchmark-index-run-{run}-workers-{worker_count}"),
+        crate::BuildMode::Hybrid,
     )?;
     let staging = PathBuf::from(
         summary["staging_path"]

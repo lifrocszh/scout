@@ -697,3 +697,186 @@ fn usage_contract_covers_crawl_snapshot_index_activation_verification_and_search
     assert_eq!(status, 404);
     assert_error(&not_found, "not_found", "route not found");
 }
+
+#[test]
+fn partial_generation_modes_build_verify_and_reject_unavailable_searches() {
+    let help = Command::new(env!("CARGO_BIN_EXE_scout"))
+        .args(["index", "build", "--help"])
+        .output()
+        .expect("read CLI help");
+    assert!(
+        String::from_utf8_lossy(&help.stdout)
+            .contains("--mode <hybrid|semantic-only|keyword-only>"),
+        "index build help must list the build modes"
+    );
+
+    let data_dir = TempDir::new("generation-modes");
+    let (origin, fixture) = fixture_server();
+    let source_config = write_source_config(data_dir.path(), &origin);
+    let crawl = run_scout(
+        data_dir.path(),
+        [
+            "crawl".to_owned(),
+            "--config".to_owned(),
+            source_config.display().to_string(),
+        ],
+    );
+    assert!(
+        crawl.status.success(),
+        "crawl failed: {}",
+        String::from_utf8_lossy(&crawl.stderr)
+    );
+    fixture.join().expect("join fixture server");
+    let crawl_dir = one_directory(&data_dir.path().join("crawls"));
+    let crawl_manifest: Value = serde_json::from_slice(
+        &fs::read(crawl_dir.join("crawl-manifest.json")).expect("read crawl manifest"),
+    )
+    .expect("parse crawl manifest");
+    let snapshot_id = crawl_manifest["snapshot_id"]
+        .as_str()
+        .expect("snapshot ID")
+        .to_owned();
+    write_index_profile(data_dir.path(), &snapshot_id);
+
+    let address = free_address();
+    let mut serve = None;
+    let mut generation_ids = Vec::new();
+    for (build_mode, available) in [
+        ("keyword-only", [true, false, false]),
+        ("semantic-only", [false, true, false]),
+        ("hybrid", [true, true, true]),
+    ] {
+        let build = run_scout(
+            data_dir.path(),
+            [
+                "index".to_owned(),
+                "build".to_owned(),
+                "--corpus".to_owned(),
+                snapshot_id.clone(),
+                "--mode".to_owned(),
+                build_mode.to_owned(),
+            ],
+        );
+        assert!(
+            build.status.success(),
+            "{build_mode} build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let staging = one_directory(&data_dir.path().join("generations/.staging"));
+        let manifest: Value = serde_json::from_slice(
+            &fs::read(staging.join("generation-manifest.json")).expect("read Generation manifest"),
+        )
+        .expect("parse Generation manifest");
+        assert_eq!(manifest["schema_version"], "scout.generation-manifest.v2");
+        assert_eq!(manifest["components"]["keyword"], available[0]);
+        assert_eq!(manifest["components"]["semantic"], available[1]);
+        let profile: Value = serde_json::from_slice(
+            &fs::read(staging.join("build-profile.json")).expect("read build profile"),
+        )
+        .expect("parse build profile");
+        assert_eq!(profile["build_mode"], build_mode);
+        assert_eq!(staging.join("keyword").is_dir(), available[0]);
+        for artifact in [
+            "semantic.usearch",
+            "semantic-vectors.f32",
+            "semantic-manifest.json",
+        ] {
+            assert_eq!(staging.join(artifact).exists(), available[1], "{artifact}");
+        }
+        if build_mode == "keyword-only" {
+            assert!(!staging.join("semantic-build-progress.jsonl").exists());
+            assert!(!data_dir.path().join("models").exists());
+            assert!(
+                !data_dir
+                    .path()
+                    .join("generation-build-checkpoints")
+                    .exists()
+            );
+            assert!(!data_dir.path().join("generation-embedding-cache").exists());
+        }
+        let generation_id = manifest["generation_id"]
+            .as_str()
+            .expect("Generation ID")
+            .to_owned();
+        assert!(
+            !generation_ids.contains(&generation_id),
+            "build mode must participate in Generation identity"
+        );
+        generation_ids.push(generation_id.clone());
+        if build_mode == "keyword-only" {
+            let run_id = staging
+                .file_name()
+                .expect("staging run ID")
+                .to_string_lossy()
+                .into_owned();
+            let mismatched_resume = run_scout(
+                data_dir.path(),
+                [
+                    "index".to_owned(),
+                    "build".to_owned(),
+                    "--corpus".to_owned(),
+                    snapshot_id.clone(),
+                    "--mode".to_owned(),
+                    "semantic-only".to_owned(),
+                    "--resume".to_owned(),
+                    run_id,
+                ],
+            );
+            assert!(!mismatched_resume.status.success());
+            assert!(
+                String::from_utf8_lossy(&mismatched_resume.stderr)
+                    .contains("resume input build-profile.json does not match the original Corpus and build profile")
+            );
+        }
+        let activate = run_scout(
+            data_dir.path(),
+            [
+                "index".to_owned(),
+                "activate".to_owned(),
+                "--generation".to_owned(),
+                generation_id.clone(),
+            ],
+        );
+        assert!(
+            activate.status.success(),
+            "{build_mode} activation failed: {}",
+            String::from_utf8_lossy(&activate.stderr)
+        );
+        let verify = run_scout(data_dir.path(), ["index", "verify"]);
+        assert!(
+            verify.status.success(),
+            "{build_mode} verification failed: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        if serve.is_none() {
+            serve = Some(ServeProcess::start(data_dir.path(), &address));
+            assert_eq!(wait_for_health(&address).0, 200);
+        }
+        for (index, search_mode) in ["keyword", "semantic", "hybrid"].into_iter().enumerate() {
+            let request = serde_json::to_vec(&json!({
+                "query": "retrieval",
+                "mode": search_mode,
+                "limit": 10,
+            }))
+            .expect("serialize search request");
+            let (status, response) =
+                http_json(&address, "POST", "/v1/search", &request).expect("search response");
+            if available[index] {
+                assert_eq!(status, 200, "{build_mode}/{search_mode}: {response}");
+                assert!(
+                    response["results"]
+                        .as_array()
+                        .is_some_and(|results| !results.is_empty()),
+                    "{build_mode}/{search_mode} should return evidence"
+                );
+            } else {
+                assert_eq!(status, 503, "{build_mode}/{search_mode}: {response}");
+                assert_eq!(response["error"]["code"], "not_ready");
+                assert_eq!(
+                    response["error"]["message"],
+                    format!("{search_mode} search is unavailable in this Generation")
+                );
+            }
+        }
+    }
+}

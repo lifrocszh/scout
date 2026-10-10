@@ -221,6 +221,8 @@ path_prefixes = ["/"]
             "build".into(),
             "--corpus".into(),
             snapshot_id.clone(),
+            "--mode".into(),
+            "hybrid".into(),
         ],
     );
     assert!(

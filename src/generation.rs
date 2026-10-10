@@ -22,5 +22,4 @@ pub(crate) use reader::{
     ActiveGeneration, IndexGeneration, LifecycleAction, PageQuery, SearchMode,
 };
 pub(crate) use semantic::open_semantic_index;
-pub(crate) use semantic_storage::read_semantic_index;
 pub(crate) use validation::validate_generation;

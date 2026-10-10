@@ -1,15 +1,15 @@
 # Scout
 
 Scout is a single-node Rust search service for explicitly allowlisted technical documentation.
-It crawls Sources, publishes immutable Corpus snapshots, builds validated keyword and semantic
-Index Generations, then serves Page-level results with Passage evidence.
+It crawls Sources, publishes immutable Corpus snapshots, builds validated keyword-only,
+semantic-only, or hybrid Index Generations, then serves Page-level results with Passage evidence.
 
 ```text
 sources.toml
   crawl + robots.txt/sitemap discovery + bounded retries
   -> immutable Corpus snapshot: Pages, aliases, Passages
 data/config/index.toml
-  -> Index Generation: Tantivy keyword index + USearch vector index
+  -> Index Generation: selected Tantivy keyword and/or USearch vector indexes
   -> atomic activation through CURRENT
   -> HTTP search
 ```
@@ -22,7 +22,7 @@ flowchart TB
     CRAWL --> SNAP["Corpus snapshot<br/>Pages, aliases, Passages"]
     PROF["Index profile<br/>index.toml"] --> BUILD["Build + validate"]
     SNAP --> BUILD
-    BUILD --> GEN["Index Generation<br/>keyword + semantic indexes"]
+    BUILD --> GEN["Index Generation<br/>selected keyword and/or semantic indexes"]
     GEN --> ACT["Seal + activate<br/>CURRENT / PREVIOUS"]
     ACT --> SVC["HTTP search service"]
     Q["Query"] --> SVC
@@ -63,7 +63,7 @@ DATA=data
 
 $BIN crawl --config sources.toml --data-dir "$DATA"
 # Copy snapshot_id from the crawl output into data/config/index.toml.
-$BIN index build --corpus <snapshot-id> --data-dir "$DATA"
+$BIN index build --corpus <snapshot-id> --data-dir "$DATA" --mode hybrid
 $BIN index activate --generation <generation-id> --data-dir "$DATA"
 $BIN serve --data-dir "$DATA" --bind 127.0.0.1:8080
 ```
@@ -124,7 +124,7 @@ For speed work, measure each phase first. Roadmap section 6 proposes per-Origin 
 
 ```text
 scout crawl --config <sources.toml> --data-dir <dir> [--json]
-scout index build --corpus <snapshot-id> --data-dir <dir> [--json]
+scout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] [--json]
 scout index activate --generation <generation-id> --data-dir <dir> [--json]
 scout index recover --data-dir <dir> [--json]
 scout index verify --data-dir <dir>
@@ -134,9 +134,16 @@ scout evaluate --package <dir> --data-dir <dir>
 scout benchmark --config <benchmark.toml> --data-dir <dir>
 ```
 
-`index build` writes a validated Generation under staging. `index activate` seals it, verifies
+`index build` defaults to `semantic-only` and writes a validated Generation under staging. Use
+`--mode hybrid` to build both indexes. `keyword-only` Generations support keyword search;
+`semantic-only` Generations support semantic search. Requests for unavailable search modes fail
+explicitly. `index activate` seals a Generation, verifies
 checksums/counts/identity, and atomically updates `CURRENT`; the previous valid Generation is
 kept through `PREVIOUS`. `recover`, `verify`, and `prune` manage that lifecycle.
+
+The crawl/build scripts accept the same three arguments (`sources.toml`, index profile template,
+data directory): `scripts/crawl-build-coreml.sh` builds hybrid, `scripts/crawl-build-semantic-only-coreml.sh`
+builds semantic-only, and `scripts/crawl-build-keyword-only.sh` builds keyword-only without CoreML.
 
 ## HTTP API
 

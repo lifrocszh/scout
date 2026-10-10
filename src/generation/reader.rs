@@ -1,6 +1,8 @@
 use super::super::search::load_active_generation;
 use super::super::storage::trim_snippet;
-use super::super::{BTreeMap, CatalogRecord, Error, LoadedGeneration, Ordering, Path, Value};
+use super::super::{
+    BTreeMap, BuildMode, CatalogRecord, Error, LoadedGeneration, Ordering, Path, Value,
+};
 use super::{activate_generation, build_generation, prune_generations, recover_generation};
 
 pub(crate) struct IndexGeneration {
@@ -88,12 +90,22 @@ impl IndexGeneration {
         }
     }
 
-    pub(crate) fn build(&self, corpus_id: &str, run_id: &str) -> Result<Value, Error> {
-        build_generation(&self.data_dir, corpus_id, run_id, false)
+    pub(crate) fn build(
+        &self,
+        corpus_id: &str,
+        run_id: &str,
+        mode: BuildMode,
+    ) -> Result<Value, Error> {
+        build_generation(&self.data_dir, corpus_id, run_id, false, mode)
     }
 
-    pub(crate) fn resume_build(&self, corpus_id: &str, run_id: &str) -> Result<Value, Error> {
-        build_generation(&self.data_dir, corpus_id, run_id, true)
+    pub(crate) fn resume_build(
+        &self,
+        corpus_id: &str,
+        run_id: &str,
+        mode: BuildMode,
+    ) -> Result<Value, Error> {
+        build_generation(&self.data_dir, corpus_id, run_id, true, mode)
     }
 
     pub(crate) fn lifecycle(&self, action: LifecycleAction<'_>) -> Result<Value, Error> {
@@ -141,6 +153,25 @@ impl ActiveGeneration {
             return Err(Error::invalid("limit must be between 1 and 100"));
         }
 
+        let components = self.inner.manifest.components();
+        match request.mode {
+            SearchMode::Keyword if !components.keyword => {
+                return Err(Error::not_ready(
+                    "keyword search is unavailable in this Generation",
+                ));
+            }
+            SearchMode::Semantic if !components.semantic => {
+                return Err(Error::not_ready(
+                    "semantic search is unavailable in this Generation",
+                ));
+            }
+            SearchMode::Hybrid if !components.keyword || !components.semantic => {
+                return Err(Error::not_ready(
+                    "hybrid search is unavailable in this Generation",
+                ));
+            }
+            _ => {}
+        }
         let hits = match request.mode {
             SearchMode::Keyword => {
                 super::super::search::keyword_hits(&self.inner, query, request.source)?

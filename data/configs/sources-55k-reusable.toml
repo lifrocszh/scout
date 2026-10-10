@@ -1,0 +1,81 @@
+# Reusable broad-crawl profile derived from run 34 policy.
+# Frozen run config enumerates tens of thousands of URLs; this profile uses
+# section-root seeds and source path allowlists instead. Crawl scope can differ.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
+page_target = 55000
+embedding_model = "BAAI/bge-small-en-v1.5"
+global_concurrency = 8
+origin_concurrency = 1
+min_start_spacing_ms = 500
+max_frontier = 140000
+max_decoded_body_bytes = 8388608
+max_extraction_bytes = 8388608
+max_extraction_millis = 5000
+request_timeout_seconds = 30
+max_attempts = 2
+retry_backoff_ms = 1000
+retry_max_delay_ms = 10000
+max_total_attempts = 140000
+max_duration_seconds = 43200
+robots_cache_seconds = 86400
+max_passage_tokens = 384
+
+[[sources]]
+source_id = "dotnet-docs"
+name = ".NET conceptual documentation mapped to dotnet/docs"
+seeds = ["https://learn.microsoft.com/en-us/dotnet/ai/", "https://learn.microsoft.com/en-us/dotnet/architecture/", "https://learn.microsoft.com/en-us/dotnet/azure/", "https://learn.microsoft.com/en-us/dotnet/core/", "https://learn.microsoft.com/en-us/dotnet/csharp/", "https://learn.microsoft.com/en-us/dotnet/devops/", "https://learn.microsoft.com/en-us/dotnet/framework/", "https://learn.microsoft.com/en-us/dotnet/fsharp/", "https://learn.microsoft.com/en-us/dotnet/fundamentals/", "https://learn.microsoft.com/en-us/dotnet/includes/", "https://learn.microsoft.com/en-us/dotnet/iot/", "https://learn.microsoft.com/en-us/dotnet/machine-learning/", "https://learn.microsoft.com/en-us/dotnet/orleans/", "https://learn.microsoft.com/en-us/dotnet/standard/", "https://learn.microsoft.com/en-us/dotnet/visual-basic/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/dotnet/ai/", "/en-us/dotnet/architecture/", "/en-us/dotnet/azure/", "/en-us/dotnet/core/", "/en-us/dotnet/csharp/", "/en-us/dotnet/devops/", "/en-us/dotnet/framework/", "/en-us/dotnet/fsharp/", "/en-us/dotnet/fundamentals/", "/en-us/dotnet/includes/", "/en-us/dotnet/iot/", "/en-us/dotnet/machine-learning/", "/en-us/dotnet/orleans/", "/en-us/dotnet/standard/", "/en-us/dotnet/visual-basic/"]
+sitemap_url_prefixes = ["https://learn.microsoft.com/_sitemaps/ticket25-scale-seeds-only.xml"]
+license_urls = ["https://github.com/dotnet/docs/blob/main/LICENSE", "https://github.com/dotnet/docs/blob/main/LICENSE-CODE"]
+minimum_page_quota = 5000
+
+[[sources]]
+source_id = "dotnet-api-docs"
+name = "Learn API pages mapped by page metadata to dotnet/dotnet-api-docs or dotnet/AspNetApiDocs"
+seeds = ["https://learn.microsoft.com/en-us/dotnet/api/"]
+allowed_origins = ["https://learn.microsoft.com"]
+path_prefixes = ["/en-us/dotnet/api/"]
+sitemap_url_prefixes = ["https://learn.microsoft.com/_sitemaps/ticket25-scale-seeds-only.xml"]
+license_urls = ["https://github.com/dotnet/dotnet-api-docs/blob/main/LICENSE", "https://github.com/dotnet/dotnet-api-docs/blob/main/LICENSE-CODE", "https://github.com/dotnet/AspNetApiDocs/blob/main/LICENSE", "https://github.com/dotnet/AspNetApiDocs/blob/main/LICENSE-CODE", "https://github.com/dotnet/aspnetcore/blob/main/LICENSE.txt"]
+minimum_page_quota = 2000
+
+[[sources]]
+source_id = "php-manual"
+name = "PHP current English Manual"
+seeds = ["https://www.php.net/manual/en/"]
+allowed_origins = ["https://www.php.net"]
+path_prefixes = ["/manual/en/"]
+sitemap_url_prefixes = ["https://www.php.net/manual/en/ticket25-scale-seeds-only.xml"]
+license_urls = ["https://www.php.net/license/"]
+minimum_page_quota = 1500
+
+[[sources]]
+source_id = "rust"
+name = "Rust official documentation"
+seeds = ["https://doc.rust-lang.org/book/", "https://doc.rust-lang.org/reference/", "https://doc.rust-lang.org/std/", "https://doc.rust-lang.org/cargo/", "https://doc.rust-lang.org/edition-guide/", "https://doc.rust-lang.org/nomicon/", "https://doc.rust-lang.org/embedded-book/", "https://doc.rust-lang.org/rust-by-example/"]
+allowed_origins = ["https://doc.rust-lang.org"]
+path_prefixes = ["/book/", "/reference/", "/std/", "/cargo/", "/edition-guide/", "/nomicon/", "/embedded-book/", "/rust-by-example/"]
+license_urls = ["https://www.rust-lang.org/policies/licenses"]
+minimum_page_quota = 1500
+
+[[sources]]
+source_id = "kubernetes"
+name = "Kubernetes documentation"
+seeds = ["https://kubernetes.io/docs/"]
+allowed_origins = ["https://kubernetes.io"]
+path_prefixes = ["/docs/"]
+license_urls = ["https://github.com/kubernetes/website/blob/main/LICENSE"]
+minimum_page_quota = 800
+
+[[sources]]
+source_id = "postgresql"
+name = "PostgreSQL documentation"
+seeds = ["https://www.postgresql.org/docs/current/"]
+allowed_origins = ["https://www.postgresql.org"]
+path_prefixes = ["/docs/"]
+deny_path_prefixes = ["/docs/devel/"]
+license_urls = ["https://www.postgresql.org/about/licence/"]
+minimum_page_quota = 4000

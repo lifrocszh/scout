@@ -1,10 +1,11 @@
 use super::embeddings::fastembed_model_spec;
-use crate::{BuildProfile, Error, MAX_MODEL_PASSAGE_TOKENS, RawBuildProfile};
+use crate::{BuildMode, BuildProfile, Error, MAX_MODEL_PASSAGE_TOKENS, RawBuildProfile};
 
 pub(super) fn build_profile(
     raw: RawBuildProfile,
     corpus_id: &str,
     corpus_model: &str,
+    build_mode: BuildMode,
 ) -> Result<BuildProfile, Error> {
     macro_rules! required {
         ($field:ident) => {
@@ -73,9 +74,12 @@ pub(super) fn build_profile(
     let embedding_batch_size = required!(embedding_batch_size);
     let embedding_workers = required!(embedding_workers);
     let embedding_intra_op_threads = required!(embedding_intra_op_threads);
-    let embedding_execution_provider = raw
-        .embedding_execution_provider
-        .unwrap_or_else(|| "cpu".into());
+    let embedding_execution_provider = if build_mode == BuildMode::KeywordOnly {
+        "cpu".into()
+    } else {
+        raw.embedding_execution_provider
+            .unwrap_or_else(|| "cpu".into())
+    };
     let metric = required!(metric);
     let scalar_kind = required!(scalar_kind);
     let connectivity = required!(connectivity);
@@ -122,10 +126,10 @@ pub(super) fn build_profile(
     }
     if !matches!(
         embedding_execution_provider.as_str(),
-        "cpu" | "openvino_gpu"
+        "cpu" | "openvino_gpu" | "apple_coreml_gpu"
     ) {
         return Err(Error::invalid(
-            "embedding_execution_provider must be cpu or openvino_gpu",
+            "embedding_execution_provider must be cpu, openvino_gpu, or apple_coreml_gpu",
         ));
     }
     if embedding_backend == "deterministic" && embedding_execution_provider != "cpu" {
@@ -137,6 +141,18 @@ pub(super) fn build_profile(
     if embedding_execution_provider == "openvino_gpu" {
         return Err(Error::invalid(
             "embedding_execution_provider=openvino_gpu requires the openvino-gpu Cargo feature and an OpenVINO-enabled ONNX Runtime",
+        ));
+    }
+    #[cfg(not(feature = "apple-coreml"))]
+    if embedding_execution_provider == "apple_coreml_gpu" {
+        return Err(Error::invalid(
+            "embedding_execution_provider=apple_coreml_gpu requires the apple-coreml Cargo feature and Core ML",
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    if embedding_execution_provider == "apple_coreml_gpu" {
+        return Err(Error::invalid(
+            "embedding_execution_provider=apple_coreml_gpu is only supported on macOS",
         ));
     }
     if !matches!(pooling.as_str(), "cls" | "mean")
@@ -154,6 +170,7 @@ pub(super) fn build_profile(
     let profile = BuildProfile {
         schema_version,
         snapshot_id: corpus_id.into(),
+        build_mode,
         extraction_schema,
         passage_schema,
         max_passage_tokens,
