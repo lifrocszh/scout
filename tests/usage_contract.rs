@@ -491,6 +491,8 @@ fn usage_contract_covers_crawl_snapshot_index_activation_verification_and_search
             "build".to_owned(),
             "--corpus".to_owned(),
             snapshot_id.clone(),
+            "--mode".to_owned(),
+            "hybrid".to_owned(),
         ],
     );
     assert!(

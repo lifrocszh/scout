@@ -32,6 +32,8 @@ where
         }
     };
     match &cli.operation {
+        Operation::Coordinator { .. } => return super::distributed::run_coordinator(&cli),
+        Operation::Worker { .. } => return super::distributed::run_worker(&cli),
         Operation::IndexBuild { .. } => return run_index_build(&cli),
         Operation::IndexActivate { .. } => return run_index_activate(&cli),
         Operation::IndexRecover => return run_index_recover(&cli),
@@ -52,6 +54,9 @@ where
     };
     let config_path = match &cli.operation {
         Operation::Crawl { config, .. } => config,
+        Operation::Coordinator { .. } | Operation::Worker { .. } => {
+            unreachable!("distributed operation returned above")
+        }
         Operation::IndexBuild { .. }
         | Operation::IndexActivate { .. }
         | Operation::IndexRecover

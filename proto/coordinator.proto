@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+package scout.distributed.v1;
+
+service Coordinator {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc Heartbeat(WorkerRequest) returns (WorkerResponse);
+  rpc ClaimOne(ClaimOneRequest) returns (ClaimOneResponse);
+  rpc RenewLease(LeaseRequest) returns (LeaseResponse);
+  rpc AcquireRequestPermit(AcquireRequestPermitRequest) returns (AcquireRequestPermitResponse);
+  rpc CancelRequestWait(CancelRequestWaitRequest) returns (BoolResponse);
+  rpc ReleaseRequestPermit(ReleaseRequestPermitRequest) returns (BoolResponse);
+  rpc RobotsDecision(RobotsDecisionRequest) returns (RobotsDecisionResponse);
+  rpc CommitRobotsRefresh(CommitRobotsRefreshRequest) returns (BoolResponse);
+  rpc FailRobotsRefresh(FailRobotsRefreshRequest) returns (BoolResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+  rpc FailTask(FailTaskRequest) returns (FailTaskResponse);
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  repeated uint32 supported_protocol_versions = 2;
+}
+
+message RegisterWorkerResponse {
+  uint32 protocol_version = 1;
+  string crawl_run_id = 2;
+  uint64 request_timeout_ms = 3;
+  uint64 lease_for_ms = 4;
+  uint64 renew_after_ms = 5;
+  uint64 max_body_bytes = 6;
+  uint64 max_extraction_bytes = 7;
+  uint64 max_extraction_millis = 8;
+  uint64 max_attempts = 9;
+  uint64 retry_backoff_ms = 10;
+  uint64 retry_max_delay_ms = 11;
+  uint64 max_frontier = 12;
+  string user_agent = 13;
+  uint64 min_content_chars = 14;
+  repeated SourcePolicy sources = 15;
+}
+
+message SourcePolicy {
+  string source_id = 1;
+  repeated string allowed_origins = 2;
+  repeated string path_prefixes = 3;
+  repeated string deny_path_prefixes = 4;
+  repeated string sitemap_url_prefixes = 5;
+  repeated string allowed_urls = 6;
+  bool explicit_allowed_urls = 7;
+}
+
+message WorkerRequest {
+  uint32 protocol_version = 1;
+  string worker_id = 2;
+}
+
+message WorkerResponse {
+  uint32 protocol_version = 1;
+  string crawl_run_id = 2;
+  uint64 server_time_unix_ms = 3;
+}
+
+message Lease {
+  int64 task_id = 1;
+  string crawl_run_id = 2;
+  string source_id = 3;
+  string origin = 4;
+  string normalized_url = 5;
+  string schedule_key = 6;
+  int32 task_attempt_count = 7;
+  string lease_owner = 8;
+  int64 lease_epoch = 9;
+  int64 lease_deadline_unix_ms = 10;
+  string idempotency_key = 11;
+}
+
+message ClaimOneRequest {
+  uint32 protocol_version = 1;
+  string worker_id = 2;
+}
+
+message ClaimOneResponse {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  bool target_reached = 3;
+  uint64 retry_after_ms = 4;
+}
+
+message LeaseRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+}
+
+message LeaseResponse {
+  uint32 protocol_version = 1;
+  bool renewed = 2;
+  int64 lease_deadline_unix_ms = 3;
+}
+
+message AcquireRequestPermitRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string request_id = 3;
+  string url = 4;
+  string request_kind = 5;
+}
+
+message AcquireRequestPermitResponse {
+  uint32 protocol_version = 1;
+  enum Decision {
+    WAITING = 0;
+    ACQUIRED = 1;
+    ALREADY_COMPLETED = 2;
+  }
+  Decision decision = 2;
+  int64 permit_id = 3;
+  int64 expires_at_unix_ms = 4;
+  uint64 retry_after_ms = 5;
+}
+
+message CancelRequestWaitRequest {
+  uint32 protocol_version = 1;
+  string crawl_run_id = 2;
+  string worker_id = 3;
+  string request_id = 4;
+}
+
+message ReleaseRequestPermitRequest {
+  uint32 protocol_version = 1;
+  string crawl_run_id = 2;
+  string worker_id = 3;
+  int64 permit_id = 4;
+  string outcome = 5;
+}
+
+message BoolResponse {
+  uint32 protocol_version = 1;
+  bool success = 2;
+}
+
+message RobotsDecisionRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string origin = 3;
+  string path = 4;
+}
+
+message RobotsDecisionResponse {
+  uint32 protocol_version = 1;
+  enum Decision {
+    WAITING = 0;
+    CACHED = 1;
+    REFRESH = 2;
+  }
+  Decision decision = 2;
+  bool allowed = 3;
+  int64 refresh_epoch = 4;
+  uint64 retry_after_ms = 5;
+  string body_sha256 = 6;
+  repeated string sitemaps = 7;
+  repeated RobotsGroup groups = 8;
+}
+
+message RobotsGroup {
+  repeated string agents = 1;
+  repeated RobotsRule rules = 2;
+}
+
+message RobotsRule {
+  bool allow = 1;
+  string path = 2;
+}
+
+message CommitRobotsRefreshRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string origin = 3;
+  int64 refresh_epoch = 4;
+  RobotsPolicy policy = 5;
+  string body_sha256 = 6;
+}
+
+message RobotsPolicy {
+  repeated RobotsGroup groups = 1;
+  repeated string sitemaps = 2;
+}
+
+message FailRobotsRefreshRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string origin = 3;
+  int64 refresh_epoch = 4;
+}
+
+message ContentBlock {
+  oneof block {
+    Heading heading = 1;
+    string prose = 2;
+    string code = 3;
+  }
+}
+
+message Heading {
+  uint32 level = 1;
+  string text = 2;
+}
+
+message CaptureData {
+  string requested_url = 1;
+  string final_url = 2;
+  repeated string redirects = 3;
+  string source_id = 4;
+  string title = 5;
+  optional string description = 6;
+  optional string language = 7;
+  optional string canonical_url = 8;
+  string extraction_method = 9;
+  string content = 10;
+  string identity = 11;
+  string content_hash = 12;
+  repeated ContentBlock blocks = 13;
+  uint64 content_bytes = 14;
+  string body_hash = 15;
+  string content_type = 16;
+  uint32 status_code = 17;
+  bytes body = 18;
+}
+
+message CompleteTaskRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  CaptureData capture = 3;
+  repeated string discovered_urls = 4;
+  string rejection_reason = 5;
+}
+
+message CompleteTaskResponse {
+  uint32 protocol_version = 1;
+  bool completed = 2;
+  uint64 accepted_discovered_count = 3;
+  uint64 rejected_discovered_count = 4;
+  bool capture_received = 5;
+  bool target_reached = 6;
+}
+
+message FailTaskRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string error_code = 3;
+  string error_message = 4;
+  uint64 retry_delay_ms = 5;
+}
+
+message FailTaskResponse {
+  uint32 protocol_version = 1;
+  string status = 2;
+}

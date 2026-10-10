@@ -124,6 +124,8 @@ For speed work, measure each phase first. Roadmap section 6 proposes per-Origin 
 
 ```text
 scout crawl --config <sources.toml> --data-dir <dir> [--json]
+scout coordinator --config <sources.toml> --data-dir <dir> [--bind <private-address>] [--run-id <crawl-run-id>]
+scout worker --coordinator <http://address:port> --data-dir <dir> [--worker-id <id>]
 scout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] [--json]
 scout index activate --generation <generation-id> --data-dir <dir> [--json]
 scout index recover --data-dir <dir> [--json]
@@ -134,7 +136,7 @@ scout evaluate --package <dir> --data-dir <dir>
 scout benchmark --config <benchmark.toml> --data-dir <dir>
 ```
 
-`index build` defaults to `semantic-only` and writes a validated Generation under staging. Use
+`index build` defaults to `keyword-only` and writes a validated Generation under staging. Use
 `--mode hybrid` to build both indexes. `keyword-only` Generations support keyword search;
 `semantic-only` Generations support semantic search. Requests for unavailable search modes fail
 explicitly. `index activate` seals a Generation, verifies
@@ -144,6 +146,21 @@ kept through `PREVIOUS`. `recover`, `verify`, and `prune` manage that lifecycle.
 The crawl/build scripts accept the same three arguments (`sources.toml`, index profile template,
 data directory): `scripts/crawl-build-coreml.sh` builds hybrid, `scripts/crawl-build-semantic-only-coreml.sh`
 builds semantic-only, and `scripts/crawl-build-keyword-only.sh` builds keyword-only without CoreML.
+
+Distributed crawl uses PostgreSQL only on `scout coordinator`; set `SCOUT_DATABASE_URL` in that
+process environment. Bind coordinator to a loopback, private, link-local, or Tailscale address.
+Workers receive no database connection settings and connect over the private network:
+
+```bash
+SCOUT_DATABASE_URL='postgresql://…' scout coordinator --config data/configs/sources-500.toml --data-dir ./data/distributed --bind 100.64.0.10:50051
+scout worker --coordinator http://100.64.0.10:50051 --data-dir ./data/worker-a
+```
+
+Coordinator and worker negotiate protocol version 1 at registration. Tailnet ACLs control access;
+the RPC service has no application credentials. Each worker processes one leased URL at a time,
+renews its fenced lease, and obtains shared request permits for page, redirect, robots, and sitemap
+requests. Captures are validated and reported to the coordinator; durable capture acceptance and
+Corpus materialization are Ticket 4 work.
 
 ## HTTP API
 

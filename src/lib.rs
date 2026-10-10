@@ -77,9 +77,9 @@ struct Cli {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum BuildMode {
-    #[default]
     Hybrid,
     SemanticOnly,
+    #[default]
     KeywordOnly,
 }
 
@@ -106,6 +106,16 @@ enum Operation {
     Crawl {
         config: PathBuf,
         materialize_spool: Option<String>,
+    },
+    Coordinator {
+        config: PathBuf,
+        bind: String,
+        run_id: Option<String>,
+    },
+    Worker {
+        coordinator: String,
+        worker_id: Option<String>,
+        max_tasks: Option<usize>,
     },
     IndexBuild {
         corpus: String,
@@ -1184,8 +1194,10 @@ mod cli;
 mod config;
 mod corpus;
 mod crawl;
+mod distributed;
 mod evaluation;
 mod extract;
+mod frontier;
 mod generation;
 mod http;
 mod observability;

@@ -1,69 +1,22 @@
-use super::extract::extract;
-use super::observability::Events;
 use super::corpus::capture_selection_key;
+use super::extract::extract;
+use super::frontier::{RobotsGroup, RobotsPolicy, RobotsRule};
+use super::observability::Events;
 use super::spool::CaptureSpool;
 use super::storage::{read_bounded, sha256_hex, write_if_absent};
 use super::url::{normalize_url, origin_key};
 use super::{
     Arc, BTreeMap, BTreeSet, CONTENT_LENGTH, CONTENT_TYPE, Capture, Client, Condvar, Config,
-    CrawlResult, Duration, Error, Extracted, FetchOutcome, HashMap, HashSet, Instant, LOCATION, MAX_REDIRECTS,
-    MAX_ROBOTS_BYTES, Mutex, Path, Policy, RETRY_AFTER, Source, Url, Value, VecDeque, json, thread,
+    CrawlResult, Duration, Error, Extracted, FetchOutcome, HashMap, HashSet, Instant, LOCATION,
+    MAX_REDIRECTS, MAX_ROBOTS_BYTES, Mutex, Path, Policy, RETRY_AFTER, Source, Url, Value,
+    VecDeque, json, thread,
 };
 
 const MAX_SITEMAP_DEPTH: usize = 5;
 const MAX_SITEMAP_INDEX_LOCATIONS: usize = 100_000;
 
-#[derive(Debug, Default)]
-struct Robots {
-    groups: Vec<RobotsGroup>,
-    sitemaps: Vec<String>,
-}
-
-#[derive(Debug, Default)]
-struct RobotsGroup {
-    agents: Vec<String>,
-    rules: Vec<RobotsRule>,
-}
-
-#[derive(Debug)]
-struct RobotsRule {
-    allow: bool,
-    path: String,
-}
-
-impl Robots {
-    fn allows(&self, path: &str) -> bool {
-        let has_specific_group = self
-            .groups
-            .iter()
-            .any(|group| group.agents.iter().any(|agent| agent == "scout"));
-        let mut rules = self
-            .groups
-            .iter()
-            .filter(|group| {
-                group.agents.iter().any(|agent| {
-                    if has_specific_group {
-                        agent == "scout"
-                    } else {
-                        agent == "*"
-                    }
-                })
-            })
-            .flat_map(|group| group.rules.iter())
-            .filter(|rule| !rule.path.is_empty() && path.starts_with(&rule.path))
-            .collect::<Vec<_>>();
-        rules.sort_by(|a, b| {
-            b.path
-                .len()
-                .cmp(&a.path.len())
-                .then_with(|| b.allow.cmp(&a.allow))
-        });
-        rules.first().map(|rule| rule.allow).unwrap_or(true)
-    }
-}
-
 struct CachedRobots {
-    rules: Robots,
+    rules: RobotsPolicy,
     fetched_at: Instant,
     body_sha256: String,
     sitemap_page_count: usize,
@@ -798,7 +751,7 @@ impl<'a> CrawlWorker<'a> {
                     .insert(
                         origin.clone(),
                         CachedRobots {
-                            rules: Robots::default(),
+                            rules: RobotsPolicy::default(),
                             fetched_at: Instant::now(),
                             body_sha256: sha256_hex(&[]),
                             sitemap_page_count: 0,
@@ -1230,9 +1183,12 @@ fn owner_for<'a>(config: &'a Config, url: &str) -> Option<&'a Source> {
     config.sources.iter().find(|source| source.owns(url))
 }
 
-fn sitemap_url_allowed(config: &Config, origin: &str, url: &str) -> bool {
+pub(crate) fn sitemap_url_allowed(config: &Config, origin: &str, url: &str) -> bool {
     config.sources.iter().any(|source| {
-        source.allowed_origins.iter().any(|allowed| allowed == origin)
+        source
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed == origin)
             && (source.sitemap_url_prefixes.is_empty()
                 || source
                     .sitemap_url_prefixes
@@ -1241,7 +1197,7 @@ fn sitemap_url_allowed(config: &Config, origin: &str, url: &str) -> bool {
     })
 }
 
-fn schedule_key(config: &Config, url: &Url) -> String {
+pub(crate) fn schedule_key(config: &Config, url: &Url) -> String {
     let origin = origin_key(url);
     config
         .sources
@@ -1309,7 +1265,7 @@ fn retry_delay_without_response(attempt: usize, config: &Config) -> u64 {
         .min(config.retry_max_delay_ms)
 }
 
-fn parse_robots(body: &[u8]) -> Robots {
+pub(crate) fn parse_robots(body: &[u8]) -> RobotsPolicy {
     let mut groups = Vec::new();
     let mut current = RobotsGroup::default();
     let mut sitemaps = BTreeSet::new();
@@ -1352,13 +1308,13 @@ fn parse_robots(body: &[u8]) -> Robots {
     if !current.agents.is_empty() {
         groups.push(current);
     }
-    Robots {
+    RobotsPolicy {
         groups,
         sitemaps: sitemaps.into_iter().collect(),
     }
 }
 
-fn extract_sitemap_locations(xml: &str) -> Vec<String> {
+pub(crate) fn extract_sitemap_locations(xml: &str) -> Vec<String> {
     let lowercase = xml.to_ascii_lowercase();
     let mut locations = BTreeSet::new();
     let mut offset = 0;
@@ -1387,13 +1343,13 @@ fn decode_xml_entities(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn normalize_sitemap_url(value: &str) -> Option<String> {
+pub(crate) fn normalize_sitemap_url(value: &str) -> Option<String> {
     Url::parse(value)
         .ok()
         .and_then(|url| normalize_url(url).ok())
 }
 
-fn is_sitemap_index(xml: &str) -> bool {
+pub(crate) fn is_sitemap_index(xml: &str) -> bool {
     xml.to_ascii_lowercase().contains("<sitemapindex")
 }
 

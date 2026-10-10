@@ -22,12 +22,18 @@ where
     let mut generation = None;
     let mut retain = Vec::new();
     let mut bind = None;
+    let mut run_id = None;
+    let mut coordinator = None;
+    let mut worker_id = None;
+    let mut max_tasks = None;
     let mut access_log = None;
     let mut package = None;
     let mut data_dir = None;
     let mut json_errors = false;
     let command = match command.to_str() {
         Some("crawl") => "crawl",
+        Some("coordinator") => "coordinator",
+        Some("worker") => "worker",
         Some("index") => "index",
         Some("serve") => "serve",
         Some("evaluate") => "evaluate",
@@ -100,6 +106,42 @@ where
                         .into(),
                 )
             }
+            Some("--run-id") => {
+                run_id = Some(
+                    args.next()
+                        .ok_or("--run-id needs an ID")?
+                        .to_string_lossy()
+                        .into(),
+                )
+            }
+            Some("--coordinator") => {
+                coordinator = Some(
+                    args.next()
+                        .ok_or("--coordinator needs an address")?
+                        .to_string_lossy()
+                        .into(),
+                )
+            }
+            Some("--worker-id") => {
+                worker_id = Some(
+                    args.next()
+                        .ok_or("--worker-id needs an ID")?
+                        .to_string_lossy()
+                        .into(),
+                )
+            }
+            Some("--max-tasks") => {
+                let value = args.next().ok_or("--max-tasks needs a positive integer")?;
+                let parsed = value
+                    .to_str()
+                    .ok_or("--max-tasks is not valid UTF-8")?
+                    .parse::<usize>()
+                    .map_err(|_| "--max-tasks needs a positive integer")?;
+                if parsed == 0 {
+                    return Err("--max-tasks needs a positive integer".into());
+                }
+                max_tasks = Some(parsed);
+            }
             Some("--access-log") => {
                 access_log = Some(PathBuf::from(
                     args.next().ok_or("--access-log needs a path")?,
@@ -116,7 +158,7 @@ where
             Some("--json") => json_errors = true,
             Some("--help") | Some("-h") => {
                 println!(
-                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] (default: semantic-only) [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
+                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout coordinator --config <sources.toml> --data-dir <dir> [--bind <private-address>] [--run-id <crawl-run-id>]\nscout worker --coordinator <http://address:port> --data-dir <dir> [--worker-id <id>] [--max-tasks <count>]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] (default: keyword-only) [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
                 );
                 return Err(String::new());
             }
@@ -139,16 +181,38 @@ where
     if materialize_spool.is_some() && command != "crawl" {
         return Err("--materialize-spool is only valid for crawl".into());
     }
+    if coordinator.is_some() && command != "worker" {
+        return Err("--coordinator is only valid for worker".into());
+    }
+    if worker_id.is_some() && command != "worker" {
+        return Err("--worker-id is only valid for worker".into());
+    }
+    if max_tasks.is_some() && command != "worker" {
+        return Err("--max-tasks is only valid for worker".into());
+    }
+    if run_id.is_some() && command != "coordinator" {
+        return Err("--run-id is only valid for coordinator".into());
+    }
     let operation = match command {
         "crawl" => Operation::Crawl {
             config: config.ok_or("missing --config")?,
             materialize_spool,
         },
+        "coordinator" => Operation::Coordinator {
+            config: config.ok_or("missing --config")?,
+            bind: bind.unwrap_or_else(|| "127.0.0.1:50051".into()),
+            run_id,
+        },
+        "worker" => Operation::Worker {
+            coordinator: coordinator.ok_or("missing --coordinator")?,
+            worker_id,
+            max_tasks,
+        },
         "index" => match index_command.as_deref().and_then(OsStr::to_str) {
             Some("build") => Operation::IndexBuild {
                 corpus: corpus.ok_or("missing --corpus")?,
                 resume,
-                mode: build_mode.unwrap_or(BuildMode::SemanticOnly),
+                mode: build_mode.unwrap_or(BuildMode::KeywordOnly),
             },
             Some("activate") => Operation::IndexActivate {
                 generation: generation.ok_or("missing --generation")?,

@@ -568,6 +568,8 @@ fn index_build_persists_reopened_semantic_fixture_artifact() {
             snapshot_id,
             "--data-dir",
             data_dir.to_str().expect("data path"),
+            "--mode",
+            "semantic-only",
         ])
         .output()
         .expect("run index build");
@@ -700,6 +702,9 @@ fn index_activation_recovery_and_pinned_retention_fixture() {
                 .expect("read staged Generation manifest"),
         )
         .expect("parse staged Generation manifest");
+        assert_eq!(manifest["components"]["keyword"], true);
+        assert_eq!(manifest["components"]["semantic"], false);
+        assert!(!staging.join("semantic.usearch").exists());
         let generation_id = manifest["generation_id"]
             .as_str()
             .expect("generation id")
