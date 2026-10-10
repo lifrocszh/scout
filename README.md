@@ -90,6 +90,35 @@ path_prefixes = ["/book/"]
 Each Source needs seeds, allowed Origins, and absolute path boundaries. The crawler normalizes
 URLs, obeys robots policy, follows same-allowlist redirects, discovers same-Origin sitemaps,
 limits frontier/request/body/time budgets, and records structured JSONL events.
+Optional `allowed_urls` restricts page ownership to exact normalized URLs, including discovered
+links, sitemap entries, and redirect targets.
+
+## Observed 10k crawl and build
+
+Run19's narrow URL scopes stopped at 3,826 Pages. Run20 widened Python paths to versions 3.10–3.14
+and PostgreSQL scope to documentation pages, then created a 10,005-Page Corpus with 145,008
+Passages and activated a BGE Small Generation using the OpenVINO GPU provider. Run20 records wall
+time and RAM, but not CPU utilization, CPU time, GPU utilization, or GPU memory. Resource roles below
+describe the code path and selected provider; they do not prove a stage was CPU-bound or GPU-bound.
+
+| Stage | Work and resource role | Run20 evidence |
+|---|---|---|
+| Preflight | Check source/index profiles, snapshot identity, model assets, and available memory. CPU; no GPU inference. | Build launch gate: at least 6 GiB WSL `MemAvailable`; successful run started with about 6.3 GiB. |
+| Discover and fetch | Read robots/sitemaps and seeds, schedule URLs, fetch pages, extract text and links. Network plus CPU; no GPU. | Configured global concurrency 8, one request per Origin; actual peak was 4 requests across 4 Origins. Target reached 03:54:17 UTC; snapshot completion logged 03:56:35 UTC. Crawl recorded 12,976 captures, 10,005 Pages, 2,905 aliases, and 145,008 Passages. |
+| Materialize Corpus | Resolve duplicate captures, create and validate Pages/Aliases/Passages, serialize records, hash files, write manifests, and seal snapshot. CPU, RAM, and disk; no GPU. | Largest observed crawl RAM phase: about 2.6 GiB Scout RSS and 1.6 GiB WSL available; swap stayed unused. |
+| Read and build catalog | Read and validate snapshot JSONL, sort and normalize Passages, create catalog and vector keys. CPU, RAM, and disk; no GPU. | Final catalog is about 397 MiB. Per-stage RAM was not recorded. |
+| Build keyword index | Add each Passage to Tantivy and commit index. CPU and disk; no GPU. | One worker, 16,000,000-byte writer budget, 145,008 documents; artifact about 151 MiB. Exact stage time and RAM were not saved. |
+| Load model and embed | Prepare heading-plus-text input and embed Passages with BGE Small. OpenVINO GPU selected for inference; CPU handles surrounding preparation. | Model initialization 1.32s; batch size 4, one embedding worker, one intra-op thread, 384 dimensions. Embedding took 20m58s across 1,115 calls; full semantic stage took 22m36s at a reported 106.9 Passages/s. Other semantic work was 32.56s. GPU use and memory were not sampled. |
+| Write vectors and build semantic index | Write float vectors, add vectors to USearch, save and reopen index. CPU, RAM, and disk for writes/index work; no GPU inference. | Vector writes 19.36s; USearch insertion 40.28s; flush under 1ms; persistence 3.89s; reopen validation 0.014s. USearch artifact about 233 MiB. |
+| Validate semantic output | Check vectors and reopened index; embed one test query and run smoke search. CPU for checks/search; selected GPU provider for the test-query embedding. | Vector validation 0.53s; query embedding 0.02s; smoke search 0.08s; reopen validation 0.014s. |
+| Finalize Generation | Write manifest/checksums, then reopen catalog and indexes and check identities, counts, and hashes. CPU, RAM, and disk; no GPU inference. | Full validation caused late memory stops after Passage embedding had finished. This is a separate build phase, not another embedding pass. |
+| Activate and smoke-test | Activate validated Generation, run `index verify`, then check HTTP health, readiness, Generation metadata, and hybrid search. CPU and disk; hybrid search uses selected GPU provider for query embedding. | All four HTTP checks returned 200. Resource use was not sampled. |
+
+The builder's resource guard sampled process RSS, WSL available memory, swap, and disk every 2 seconds. It did not sample CPU or GPU. Attempts 1 and 2 stopped before the long embedding stage at 2 GiB and 2.5 GiB RSS caps; Attempt 1 was during keyword indexing. Attempt 3 ran for about 23m58s, peaked at 2.53 GiB RSS, and hit its 2.5 GiB guard during final validation. Attempts 4 and 5 retried validation and hit the 4 GiB available-memory floor. Attempt 6 released duplicate catalog data and validated the already-built artifacts in 68 seconds, peaking at 1.61 GiB RSS with 4.68 GiB minimum available and no swap-out. **That 68-second resume was not a fresh full build, so it does not establish full-build peak RAM after the fix.** Attempt-by-attempt evidence and exact limits: [Run20 report](docs/runs/run-20-10k-rebuild-v2-2026-09-30.md).
+
+For future 10k Generation builds, the reusable process-tree RSS ceiling is now 4 GiB; the existing available-memory and swap stops remain active. The earlier attempt caps above are historical and unchanged. See [Run22](docs/runs/run-22-ticket-23-evaluation-freeze-2026-10-01.md).
+
+For speed work, measure each phase first. Roadmap section 6 proposes per-Origin crawl canaries and controlled embedding batch-size comparisons; CPU/GPU telemetry is needed before deciding which resource limits throughput.
 
 ## CLI
 

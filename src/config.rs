@@ -1,12 +1,12 @@
 use super::{
-    CanonicalConfig, Config, DEFAULT_BODY_LIMIT, DEFAULT_CONTENT_MINIMUM, DEFAULT_FRONTIER_LIMIT,
-    DEFAULT_PASSAGE_MAX_TOKENS, DEFAULT_TIMEOUT_SECONDS, Error, HashSet, MAX_MODEL_PASSAGE_TOKENS,
-    Path, RawConfig, Source, Url, fs,
+    CanonicalConfig, Config, DEFAULT_BODY_LIMIT, DEFAULT_CONTENT_MINIMUM, DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_FRONTIER_LIMIT, DEFAULT_PASSAGE_MAX_TOKENS, DEFAULT_TIMEOUT_SECONDS, BTreeSet, Error,
+    HashSet, MAX_MODEL_PASSAGE_TOKENS, MINILM_EMBEDDING_MODEL, Path, RawConfig, Source, Url, fs,
 };
 use super::{
     crawl::sources_overlap,
     storage::sha256_hex,
-    url::{normalize_origin, normalize_url},
+    url::{normalize_origin, normalize_url, origin_key},
 };
 
 pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
@@ -37,6 +37,17 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         .unwrap_or_else(|| format!("Scout/{} (+{contact_url})", env!("CARGO_PKG_VERSION")));
     if user_agent.trim().is_empty() {
         return Err(Error::invalid("user_agent must not be empty"));
+    }
+    let embedding_model = raw
+        .embedding_model
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.into());
+    if !matches!(
+        embedding_model.as_str(),
+        DEFAULT_EMBEDDING_MODEL | MINILM_EMBEDDING_MODEL
+    ) {
+        return Err(Error::invalid(
+            "embedding_model must be BAAI/bge-small-en-v1.5 or sentence-transformers/all-MiniLM-L6-v2",
+        ));
     }
     if raw.sources.is_empty() {
         return Err(Error::invalid("at least one Source is required"));
@@ -71,6 +82,30 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
             .into_iter()
             .map(|origin| normalize_origin(&origin))
             .collect::<Result<Vec<_>, _>>()?;
+        let sitemap_url_prefixes = raw_source
+            .sitemap_url_prefixes
+            .into_iter()
+            .map(|prefix| {
+                let url = Url::parse(&prefix).map_err(|e| {
+                    Error::invalid(format!(
+                        "invalid sitemap_url_prefix {prefix:?} for Source {source_id}: {e}"
+                    ))
+                })?;
+                if url.query().is_some() || url.fragment().is_some() || url.path() == "/" {
+                    return Err(Error::invalid(
+                        "sitemap_url_prefixes must use a specific path without query or fragment",
+                    ));
+                }
+                let normalized = normalize_url(url).map_err(Error::invalid)?;
+                let parsed = Url::parse(&normalized).expect("normalized sitemap URL prefix");
+                if !allowed_origins.contains(&origin_key(&parsed)) {
+                    return Err(Error::invalid(format!(
+                        "sitemap_url_prefix {prefix:?} must belong to an allowed origin for Source {source_id}"
+                    )));
+                }
+                Ok(normalized)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let path_prefixes = raw_source.path_prefixes.ok_or_else(|| {
             Error::invalid(format!("path_prefixes are required for Source {source_id}"))
         })?;
@@ -96,19 +131,58 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
                     .and_then(|url| normalize_url(url).map_err(Error::invalid))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let allowed_urls = if let Some(urls) = raw_source.allowed_urls {
+            if urls.is_empty() {
+                return Err(Error::invalid(format!(
+                    "allowed_urls must not be empty for Source {source_id}"
+                )));
+            }
+            let input_count = urls.len();
+            let normalized = urls
+                .into_iter()
+                .map(|value| {
+                    Url::parse(&value)
+                        .map_err(|e| {
+                            Error::invalid(format!(
+                                "invalid allowed URL {value:?} for Source {source_id}: {e}"
+                            ))
+                        })
+                        .and_then(|url| normalize_url(url).map_err(Error::invalid))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if normalized.len() != input_count {
+                return Err(Error::invalid(format!(
+                    "allowed_urls must be unique after normalization for Source {source_id}"
+                )));
+            }
+            Some(normalized)
+        } else {
+            None
+        };
         let source = Source {
             source_id,
             name: raw_source.name,
             seeds,
+            allowed_urls,
             allowed_origins,
             path_prefixes,
             deny_path_prefixes: raw_source.deny_path_prefixes,
+            sitemap_url_prefixes,
             politeness_group: raw_source.politeness_group,
             license_urls: raw_source.license_urls.unwrap_or_default(),
             minimum_page_quota: raw_source.minimum_page_quota.unwrap_or(0),
         };
         if source.seeds.iter().any(|seed| !source.owns(seed)) {
             return Err(Error::invalid("every seed must belong to Source allowlist"));
+        }
+        if source
+            .allowed_urls
+            .as_ref()
+            .is_some_and(|urls| urls.iter().any(|url| !source.owns(url)))
+        {
+            return Err(Error::invalid(
+                "every allowed URL must belong to its Source origin and path allowlist",
+            ));
         }
         sources.push(source);
     }
@@ -234,6 +308,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         schema_version: &schema_version,
         contact_url: &contact_url,
         user_agent: &user_agent,
+        embedding_model: &embedding_model,
         page_target,
         min_content_chars,
         max_body_bytes,
@@ -261,6 +336,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         schema_version,
         contact_url,
         user_agent,
+        embedding_model,
         page_target,
         min_content_chars,
         max_body_bytes,

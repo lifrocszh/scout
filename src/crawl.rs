@@ -1,14 +1,17 @@
 use super::extract::extract;
 use super::observability::Events;
+use super::corpus::capture_selection_key;
+use super::spool::CaptureSpool;
 use super::storage::{read_bounded, sha256_hex, write_if_absent};
 use super::url::{normalize_url, origin_key};
 use super::{
     Arc, BTreeMap, BTreeSet, CONTENT_LENGTH, CONTENT_TYPE, Capture, Client, Condvar, Config,
-    CrawlResult, Duration, Error, FetchOutcome, HashMap, HashSet, Instant, LOCATION, MAX_REDIRECTS,
+    CrawlResult, Duration, Error, Extracted, FetchOutcome, HashMap, HashSet, Instant, LOCATION, MAX_REDIRECTS,
     MAX_ROBOTS_BYTES, Mutex, Path, Policy, RETRY_AFTER, Source, Url, Value, VecDeque, json, thread,
 };
 
 const MAX_SITEMAP_DEPTH: usize = 5;
+const MAX_SITEMAP_INDEX_LOCATIONS: usize = 100_000;
 
 #[derive(Debug, Default)]
 struct Robots {
@@ -63,7 +66,7 @@ struct CachedRobots {
     rules: Robots,
     fetched_at: Instant,
     body_sha256: String,
-    sitemap_pages: Vec<String>,
+    sitemap_page_count: usize,
 }
 
 #[derive(Default)]
@@ -72,8 +75,17 @@ struct RequestState {
     total_attempts: usize,
     active_requests: usize,
     active_by_key: HashMap<String, usize>,
+    active_by_origin: HashMap<String, usize>,
     max_active_requests: usize,
-    max_active_by_key: HashMap<String, usize>,
+    max_active_by_origin: HashMap<String, usize>,
+}
+
+#[derive(Clone, Copy)]
+struct RequestConcurrency {
+    active_global: usize,
+    active_origin: usize,
+    peak_global: usize,
+    peak_origin: usize,
 }
 
 struct RequestCoordinator {
@@ -112,7 +124,7 @@ impl RequestCoordinator {
             .clone()
     }
 
-    fn start_request(self: &Arc<Self>, key: &str) -> Result<RequestPermit, Error> {
+    fn start_request(self: &Arc<Self>, key: &str, origin: &str) -> Result<RequestPermit, Error> {
         let mut state = self.state.lock().expect("request coordinator lock");
         loop {
             if state.total_attempts >= self.max_total_attempts {
@@ -131,19 +143,33 @@ impl RequestCoordinator {
                 state.total_attempts += 1;
                 state.active_requests += 1;
                 *state.active_by_key.entry(key.to_owned()).or_default() += 1;
+                *state.active_by_origin.entry(origin.to_owned()).or_default() += 1;
                 state.max_active_requests = state.max_active_requests.max(state.active_requests);
-                let active_for_key = state.active_by_key.get(key).copied().unwrap_or(0);
+                let active_for_origin = state.active_by_origin.get(origin).copied().unwrap_or(0);
                 state
-                    .max_active_by_key
-                    .entry(key.to_owned())
-                    .and_modify(|maximum| *maximum = (*maximum).max(active_for_key))
-                    .or_insert(active_for_key);
+                    .max_active_by_origin
+                    .entry(origin.to_owned())
+                    .and_modify(|maximum| *maximum = (*maximum).max(active_for_origin))
+                    .or_insert(active_for_origin);
                 state
                     .next_start_by_key
                     .insert(key.to_owned(), now + self.min_start_spacing);
+                let active_origin = state.active_by_origin.get(origin).copied().unwrap_or(0);
+                let peak_origin = state
+                    .max_active_by_origin
+                    .get(origin)
+                    .copied()
+                    .unwrap_or(active_origin);
                 return Ok(RequestPermit {
                     coordinator: self.clone(),
                     key: key.to_owned(),
+                    origin: origin.to_owned(),
+                    concurrency: RequestConcurrency {
+                        active_global: state.active_requests,
+                        active_origin,
+                        peak_global: state.max_active_requests,
+                        peak_origin,
+                    },
                 });
             }
             let wait_for_spacing = next_start.saturating_duration_since(now);
@@ -160,7 +186,7 @@ impl RequestCoordinator {
         }
     }
 
-    fn release(&self, key: &str) {
+    fn release(&self, key: &str, origin: &str) {
         let mut state = self.state.lock().expect("request coordinator lock");
         state.active_requests = state.active_requests.saturating_sub(1);
         let remove_key = state
@@ -173,6 +199,17 @@ impl RequestCoordinator {
             .unwrap_or(false);
         if remove_key {
             state.active_by_key.remove(key);
+        }
+        let remove_origin = state
+            .active_by_origin
+            .get_mut(origin)
+            .map(|active| {
+                *active = active.saturating_sub(1);
+                *active == 0
+            })
+            .unwrap_or(false);
+        if remove_origin {
+            state.active_by_origin.remove(origin);
         }
         drop(state);
         self.wake.notify_all();
@@ -187,13 +224,18 @@ impl RequestCoordinator {
 
     fn stats(&self) -> (usize, HashMap<String, usize>) {
         let state = self.state.lock().expect("request coordinator lock");
-        (state.max_active_requests, state.max_active_by_key.clone())
+        (
+            state.max_active_requests,
+            state.max_active_by_origin.clone(),
+        )
     }
 }
 
 struct RequestPermit {
     coordinator: Arc<RequestCoordinator>,
     key: String,
+    origin: String,
+    concurrency: RequestConcurrency,
 }
 
 impl RequestPermit {
@@ -204,7 +246,111 @@ impl RequestPermit {
 
 impl Drop for RequestPermit {
     fn drop(&mut self) {
-        self.coordinator.release(&self.key);
+        self.coordinator.release(&self.key, &self.origin);
+    }
+}
+
+struct RequestAttempt {
+    url: String,
+    origin: String,
+    request_kind: &'static str,
+    attempt: usize,
+    started_at: Instant,
+    concurrency: RequestConcurrency,
+}
+
+impl RequestAttempt {
+    fn elapsed_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn emit(
+        &self,
+        events: &Arc<Mutex<Events>>,
+        request_elapsed_ms: u64,
+        status_code: Option<u16>,
+        transport_error: Option<&str>,
+        response_body_error: Option<&str>,
+        timed_out: bool,
+    ) {
+        let outcome = if transport_error.is_some()
+            || response_body_error.is_some()
+            || status_code.is_some_and(|status| status >= 400)
+        {
+            "failure"
+        } else {
+            "success"
+        };
+        events.lock().expect("crawl event log lock").emit(
+            "fetch.attempt",
+            outcome,
+            json!({
+                "schema_version": "scout.crawl-attempt.v1",
+                "request_kind": self.request_kind,
+                "url": self.url,
+                "origin": self.origin,
+                "attempt": self.attempt,
+                "request_elapsed_ms": request_elapsed_ms,
+                "request_elapsed_scope": "client_send_start_to_response_drop_or_transport_error",
+                "active_requests_global_at_start": self.concurrency.active_global,
+                "active_requests_origin_at_start": self.concurrency.active_origin,
+                "peak_active_requests_global_at_start": self.concurrency.peak_global,
+                "peak_active_requests_origin_at_start": self.concurrency.peak_origin,
+                "active_request_scope": "request_permit_through_response_drop_including_body_read",
+                "status_code": status_code,
+                "retryable_status": status_code.is_some_and(retryable_status),
+                "transport_error": transport_error,
+                "response_body_error": response_body_error,
+                "timed_out": timed_out,
+            }),
+        );
+    }
+}
+
+struct RequestResponse {
+    response: Option<reqwest::blocking::Response>,
+    _permit: Option<RequestPermit>,
+    attempt: RequestAttempt,
+    events: Arc<Mutex<Events>>,
+    status_code: u16,
+    response_body_error: Option<String>,
+    timed_out: bool,
+}
+
+impl RequestResponse {
+    fn read_bounded(&mut self, limit: usize) -> Result<Option<Vec<u8>>, Error> {
+        let response = self.response.take().expect("response body read once");
+        let result = read_bounded(response, limit);
+        if let Err(error) = &result {
+            let message = error.message.to_ascii_lowercase();
+            self.timed_out = message.contains("timed out") || message.contains("timeout");
+            self.response_body_error = Some(error.message.clone());
+        }
+        result
+    }
+}
+
+impl std::ops::Deref for RequestResponse {
+    type Target = reqwest::blocking::Response;
+
+    fn deref(&self) -> &Self::Target {
+        self.response.as_ref().expect("response body already read")
+    }
+}
+
+impl Drop for RequestResponse {
+    fn drop(&mut self) {
+        drop(self.response.take());
+        let request_elapsed_ms = self.attempt.elapsed_ms();
+        drop(self._permit.take());
+        self.attempt.emit(
+            &self.events,
+            request_elapsed_ms,
+            Some(self.status_code),
+            None,
+            self.response_body_error.as_deref(),
+            self.timed_out,
+        );
     }
 }
 
@@ -218,8 +364,9 @@ pub(crate) struct Crawler<'a> {
     frontier_by_schedule: BTreeMap<String, VecDeque<String>>,
     last_schedule_key: Option<String>,
     sitemap_origins_seen: HashSet<String>,
-    visited: HashSet<String>,
-    pub(crate) captures: Vec<Capture>,
+    spool: CaptureSpool,
+    unique_content_group_count: usize,
+    unique_groups_by_source: HashMap<String, usize>,
     pub(crate) rejected_count: usize,
     pub(crate) failed_count: usize,
     started_at: Instant,
@@ -231,6 +378,7 @@ impl<'a> Crawler<'a> {
         crawl_dir: &'a Path,
         events: Arc<Mutex<Events>>,
     ) -> Result<Self, Error> {
+        let spool = CaptureSpool::open(crawl_dir, config.max_frontier)?;
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(config.timeout_seconds))
@@ -247,8 +395,9 @@ impl<'a> Crawler<'a> {
             frontier_by_schedule: BTreeMap::new(),
             last_schedule_key: None,
             sitemap_origins_seen: HashSet::new(),
-            visited: HashSet::new(),
-            captures: Vec::new(),
+            spool,
+            unique_content_group_count: 0,
+            unique_groups_by_source: HashMap::new(),
             rejected_count: 0,
             failed_count: 0,
             started_at: Instant::now(),
@@ -280,7 +429,7 @@ impl<'a> Crawler<'a> {
                 let Some(url) = self.pop_frontier() else {
                     break;
                 };
-                if !self.visited.insert(url.clone()) {
+                if !self.spool.mark_visited(&url)? {
                     continue;
                 }
                 jobs.push(url);
@@ -312,8 +461,13 @@ impl<'a> Crawler<'a> {
         } else {
             "frontier_exhausted"
         };
+        self.frontier = BTreeSet::new();
+        self.frontier_by_schedule = BTreeMap::new();
+        self.last_schedule_key = None;
+        self.sitemap_origins_seen = HashSet::new();
+        self.unique_groups_by_source = HashMap::new();
         Ok(CrawlResult {
-            captures: self.captures.clone(),
+            captures: Vec::new(),
             rejected_count: self.rejected_count,
             failed_count: self.failed_count,
             stop_reason: stop_reason.into(),
@@ -326,6 +480,7 @@ impl<'a> Crawler<'a> {
             config: self.config,
             events: self.events.clone(),
             coordinator: self.coordinator.clone(),
+            spool: self.spool.clone(),
         }
     }
 
@@ -369,10 +524,50 @@ impl<'a> Crawler<'a> {
                 let body_file = format!("bodies/{body_hash}");
                 write_if_absent(&self.crawl_dir.join(&body_file), &body)?;
                 let id = page_id(&final_url);
-                self.emit("fetch.completed", "success", json!({"url": url, "final_url": final_url, "status_code": status_code, "content_bytes": body.len(), "body_sha256": body_hash, "user_agent": self.config.user_agent}));
-                self.emit("page.admitted", "success", json!({"page_id": id, "source_id": source_id, "final_url": final_url, "content_sha256": extracted.content_hash}));
-                for link in extracted.links {
-                    if owner_for(self.config, &link).is_some() && !self.visited.contains(&link) {
+                let Extracted {
+                    title,
+                    description,
+                    language,
+                    canonical_url,
+                    extraction_method,
+                    content,
+                    identity,
+                    content_hash,
+                    blocks,
+                    links,
+                } = *extracted;
+                let capture = Capture {
+                    requested_url: url,
+                    final_url,
+                    redirects,
+                    source_id,
+                    title,
+                    description,
+                    language,
+                    canonical_url,
+                    extraction_method,
+                    content,
+                    identity,
+                    content_hash,
+                    blocks,
+                    content_bytes: body.len(),
+                    body_hash,
+                    body_file,
+                    content_type,
+                    status_code,
+                };
+                let selection_key = capture_selection_key(&capture);
+                if self.spool.insert_capture(&capture, &selection_key)? {
+                    self.unique_content_group_count += 1;
+                    *self
+                        .unique_groups_by_source
+                        .entry(capture.source_id.clone())
+                        .or_default() += 1;
+                }
+                self.emit("fetch.completed", "success", json!({"url": capture.requested_url, "final_url": capture.final_url, "status_code": capture.status_code, "content_bytes": capture.content_bytes, "body_sha256": capture.body_hash, "user_agent": self.config.user_agent}));
+                self.emit("page.admitted", "success", json!({"page_id": id, "source_id": capture.source_id, "final_url": capture.final_url, "content_sha256": capture.content_hash}));
+                for link in links {
+                    if owner_for(self.config, &link).is_some() && !self.spool.is_visited(&link)? {
                         if !self.frontier.contains(&link)
                             && self.frontier.len() >= self.config.max_frontier
                         {
@@ -384,49 +579,22 @@ impl<'a> Crawler<'a> {
                         self.enqueue_frontier(link);
                     }
                 }
-                self.captures.push(Capture {
-                    requested_url: url,
-                    final_url,
-                    redirects,
-                    source_id,
-                    title: extracted.title,
-                    description: extracted.description,
-                    language: extracted.language,
-                    canonical_url: extracted.canonical_url,
-                    extraction_method: extracted.extraction_method,
-                    content: extracted.content,
-                    identity: extracted.identity,
-                    content_hash: extracted.content_hash,
-                    blocks: extracted.blocks,
-                    content_bytes: body.len(),
-                    body_hash,
-                    body_file,
-                    content_type,
-                    status_code,
-                });
             }
         }
         Ok(())
     }
 
     fn completion_reached(&self) -> bool {
-        let page_groups = self
-            .captures
-            .iter()
-            .map(|capture| (&capture.source_id, &capture.content_hash))
-            .collect::<HashSet<_>>();
-        if page_groups.len() < self.config.page_target {
+        if self.unique_content_group_count < self.config.page_target {
             return false;
         }
         self.config.sources.iter().all(|source| {
             source.minimum_page_quota == 0
                 || self
-                    .captures
-                    .iter()
-                    .filter(|capture| capture.source_id == source.source_id)
-                    .map(|capture| (&capture.source_id, &capture.content_hash))
-                    .collect::<HashSet<_>>()
-                    .len()
+                    .unique_groups_by_source
+                    .get(&source.source_id)
+                    .copied()
+                    .unwrap_or_default()
                     >= source.minimum_page_quota
         })
     }
@@ -485,16 +653,16 @@ impl<'a> Crawler<'a> {
             robots
                 .iter()
                 .filter(|(origin, _)| !self.sitemap_origins_seen.contains(*origin))
-                .map(|(origin, cached)| (origin.clone(), cached.sitemap_pages.clone()))
+                .map(|(origin, cached)| (origin.clone(), cached.sitemap_page_count))
                 .collect::<Vec<_>>()
         };
-        for (origin, urls) in pending {
+        for (origin, candidate_count) in pending {
             self.sitemap_origins_seen.insert(origin.clone());
             let mut enqueued_count = 0;
-            for url in &urls {
-                if owner_for(self.config, url).is_none()
-                    || self.visited.contains(url)
-                    || self.frontier.contains(url)
+            for url in self.spool.sitemap_pages(&origin)? {
+                if owner_for(self.config, &url).is_none()
+                    || self.spool.is_visited(&url)?
+                    || self.frontier.contains(&url)
                 {
                     continue;
                 }
@@ -504,16 +672,16 @@ impl<'a> Crawler<'a> {
                         self.config.max_frontier
                     )));
                 }
-                self.enqueue_frontier(url.clone());
+                self.enqueue_frontier(url);
                 enqueued_count += 1;
             }
-            if !urls.is_empty() {
+            if candidate_count > 0 {
                 self.emit(
                     "sitemap.discovered",
                     "success",
                     json!({
                         "origin": origin,
-                        "candidate_count": urls.len(),
+                        "candidate_count": candidate_count,
                         "enqueued_count": enqueued_count,
                     }),
                 );
@@ -532,6 +700,10 @@ impl<'a> Crawler<'a> {
     pub(crate) fn concurrency_stats(&self) -> (usize, HashMap<String, usize>) {
         self.coordinator.stats()
     }
+
+    pub(crate) fn spool(&self) -> &CaptureSpool {
+        &self.spool
+    }
 }
 
 struct PageResult {
@@ -544,6 +716,7 @@ struct CrawlWorker<'a> {
     config: &'a Config,
     events: Arc<Mutex<Events>>,
     coordinator: Arc<RequestCoordinator>,
+    spool: CaptureSpool,
 }
 
 impl<'a> CrawlWorker<'a> {
@@ -590,7 +763,7 @@ impl<'a> CrawlWorker<'a> {
         }
         let mut current = Url::parse(&format!("{origin}/robots.txt")).expect("robots URL parses");
         for _ in 0..=5 {
-            let response = match self.request(&current) {
+            let mut response = match self.request(&current, "robots") {
                 Ok(response) => response,
                 Err(error) => {
                     if let Some(cached) = self
@@ -628,7 +801,7 @@ impl<'a> CrawlWorker<'a> {
                             rules: Robots::default(),
                             fetched_at: Instant::now(),
                             body_sha256: sha256_hex(&[]),
-                            sitemap_pages: Vec::new(),
+                            sitemap_page_count: 0,
                         },
                     );
                 return Ok(true);
@@ -659,7 +832,7 @@ impl<'a> CrawlWorker<'a> {
                 );
                 return Ok(false);
             }
-            let Some(body) = (match read_bounded(response, MAX_ROBOTS_BYTES) {
+            let Some(body) = (match response.read_bounded(MAX_ROBOTS_BYTES) {
                 Ok(body) => body,
                 Err(error) if error.code == "safety_cap" => return Err(error),
                 Err(error) => {
@@ -678,9 +851,10 @@ impl<'a> CrawlWorker<'a> {
                 );
                 return Ok(false);
             };
+            drop(response);
             let body_sha256 = sha256_hex(&body);
             let rules = parse_robots(&body);
-            let sitemap_pages = self.expand_sitemaps(&origin, &rules.sitemaps)?;
+            let sitemap_page_count = self.expand_sitemaps(&origin, &rules.sitemaps)?;
             let allowed = rules.allows(parsed.path());
             self.coordinator
                 .robots
@@ -692,7 +866,7 @@ impl<'a> CrawlWorker<'a> {
                         rules,
                         fetched_at: Instant::now(),
                         body_sha256,
-                        sitemap_pages,
+                        sitemap_page_count,
                     },
                 );
             return Ok(allowed);
@@ -705,23 +879,28 @@ impl<'a> CrawlWorker<'a> {
         Ok(false)
     }
 
-    fn expand_sitemaps(&self, origin: &str, roots: &[String]) -> Result<Vec<String>, Error> {
+    fn expand_sitemaps(&self, origin: &str, roots: &[String]) -> Result<usize, Error> {
         let mut pending = roots
             .iter()
             .filter_map(|url| {
                 let parsed = Url::parse(url).ok()?;
-                (origin_key(&parsed) == origin).then(|| (url.clone(), 0))
+                (origin_key(&parsed) == origin && sitemap_url_allowed(self.config, origin, url))
+                    .then(|| (url.clone(), 0))
             })
             .collect::<VecDeque<_>>();
         let mut seen_sitemaps = HashSet::new();
-        let mut pages = BTreeSet::new();
+        let mut page_count = self.spool.sitemap_page_count(origin)?;
+        let mut index_locations_seen = pending.len();
+        if index_locations_seen > MAX_SITEMAP_INDEX_LOCATIONS {
+            return Err(Error::safety("sitemap index location cap exceeded"));
+        }
 
         while let Some((sitemap_url, depth)) = pending.pop_front() {
             if !seen_sitemaps.insert(sitemap_url.clone()) {
                 continue;
             }
             let sitemap = Url::parse(&sitemap_url).expect("normalized sitemap URL parses");
-            let response = match self.request(&sitemap) {
+            let mut response = match self.request(&sitemap, "sitemap") {
                 Ok(response) => response,
                 Err(error) if error.code == "safety_cap" => return Err(error),
                 Err(error) => {
@@ -742,7 +921,7 @@ impl<'a> CrawlWorker<'a> {
                 );
                 continue;
             }
-            let body = match read_bounded(response, self.config.max_body_bytes) {
+            let body = match response.read_bounded(self.config.max_body_bytes) {
                 Ok(Some(body)) => body,
                 Ok(None) => {
                     self.emit(
@@ -762,6 +941,7 @@ impl<'a> CrawlWorker<'a> {
                     continue;
                 }
             };
+            drop(response);
             let xml = String::from_utf8_lossy(&body);
             let locations = extract_sitemap_locations(&xml);
             if locations.is_empty() {
@@ -788,23 +968,31 @@ impl<'a> CrawlWorker<'a> {
                     let Ok(parsed) = Url::parse(&normalized) else {
                         continue;
                     };
-                    if origin_key(&parsed) == origin {
+                    if origin_key(&parsed) == origin
+                        && sitemap_url_allowed(self.config, origin, &normalized)
+                    {
+                        index_locations_seen += 1;
+                        if index_locations_seen > MAX_SITEMAP_INDEX_LOCATIONS {
+                            return Err(Error::safety("sitemap index location cap exceeded"));
+                        }
                         pending.push_back((normalized, depth + 1));
                     }
                 }
             } else {
+                let mut candidates = Vec::new();
                 for location in locations {
                     let Some(normalized) = normalize_sitemap_url(&location) else {
                         continue;
                     };
                     if owner_for(self.config, &normalized).is_some() {
-                        pages.insert(normalized);
+                        candidates.push(normalized);
                     }
                 }
+                page_count = self.spool.insert_sitemap_pages(origin, &candidates)?;
             }
         }
 
-        Ok(pages.into_iter().collect())
+        Ok(page_count)
     }
 
     fn fetch(&self, requested_url: &str) -> Result<FetchOutcome, Error> {
@@ -816,7 +1004,7 @@ impl<'a> CrawlWorker<'a> {
             .clone();
         let mut redirects = Vec::new();
         for _ in 0..=MAX_REDIRECTS {
-            let response = self.request(&current)?;
+            let mut response = self.request(&current, "page")?;
             if response.status().is_redirection() {
                 let Some(location) = response
                     .headers()
@@ -842,6 +1030,7 @@ impl<'a> CrawlWorker<'a> {
                 if next == requested_url || redirects.contains(&next) {
                     return Ok(FetchOutcome::Rejected("redirect_loop".into()));
                 }
+                drop(response);
                 if !self.ensure_robots(&next)? {
                     return Ok(FetchOutcome::Rejected("redirect_robots_denied".into()));
                 }
@@ -879,8 +1068,7 @@ impl<'a> CrawlWorker<'a> {
                 return Ok(FetchOutcome::Rejected("body_limit_exceeded".into()));
             }
             let status_code = response.status().as_u16();
-            let Some(body) = read_bounded(
-                response,
+            let Some(body) = response.read_bounded(
                 self.config
                     .max_body_bytes
                     .min(self.config.max_extraction_bytes),
@@ -888,6 +1076,7 @@ impl<'a> CrawlWorker<'a> {
             else {
                 return Ok(FetchOutcome::Rejected("body_limit_exceeded".into()));
             };
+            drop(response);
             if body.len() > self.config.max_body_bytes
                 || body.len() > self.config.max_extraction_bytes
             {
@@ -922,45 +1111,112 @@ impl<'a> CrawlWorker<'a> {
         Ok(FetchOutcome::Rejected("redirect_limit_exceeded".into()))
     }
 
-    fn request(&self, url: &Url) -> Result<reqwest::blocking::Response, Error> {
+    fn request(&self, url: &Url, request_kind: &'static str) -> Result<RequestResponse, Error> {
         for attempt in 1..=self.config.max_attempts {
             let schedule_key = schedule_key(self.config, url);
-            let permit = self.coordinator.start_request(&schedule_key)?;
+            let origin = origin_key(url);
+            let permit = self.coordinator.start_request(&schedule_key, &origin)?;
             permit.mark_started();
+            let request_attempt = RequestAttempt {
+                url: url.to_string(),
+                origin: origin.clone(),
+                request_kind,
+                attempt,
+                started_at: Instant::now(),
+                concurrency: permit.concurrency,
+            };
             let result = self.client.get(url.clone()).send();
-            drop(permit);
             match result {
-                Ok(response)
-                    if retryable_status(response.status().as_u16())
-                        && attempt < self.config.max_attempts =>
-                {
-                    let delay = retry_delay(&response, attempt, self.config);
-                    let status = response.status().as_u16();
-                    drop(response);
-                    self.emit("fetch.retry", "success", json!({"url": url.as_str(), "attempt": attempt, "next_attempt": attempt + 1, "status_code": status, "delay_ms": delay}));
-                    if delay > 0 {
-                        thread::sleep(Duration::from_millis(delay));
+                Ok(response) => {
+                    let status_code = response.status().as_u16();
+                    let response = RequestResponse {
+                        response: Some(response),
+                        _permit: Some(permit),
+                        attempt: request_attempt,
+                        events: self.events.clone(),
+                        status_code,
+                        response_body_error: None,
+                        timed_out: false,
+                    };
+                    if retryable_status(status_code) && attempt < self.config.max_attempts {
+                        let delay = retry_delay(&response, attempt, self.config);
+                        let request_elapsed_ms = response.attempt.elapsed_ms();
+                        drop(response);
+                        self.emit(
+                            "fetch.retry",
+                            "success",
+                            json!({
+                                "url": url.as_str(),
+                                "origin": origin,
+                                "request_kind": request_kind,
+                                "attempt": attempt,
+                                "next_attempt": attempt + 1,
+                                "status_code": status_code,
+                                "request_elapsed_ms": request_elapsed_ms,
+                                "delay_ms": delay,
+                            }),
+                        );
+                        if delay > 0 {
+                            thread::sleep(Duration::from_millis(delay));
+                        }
+                    } else if retryable_status(status_code) {
+                        return Err(Error::fetch(format!(
+                            "GET {url} exhausted {} attempts with HTTP {status_code}",
+                            self.config.max_attempts,
+                        )));
+                    } else {
+                        return Ok(response);
                     }
                 }
-                Ok(response) if retryable_status(response.status().as_u16()) => {
-                    return Err(Error::fetch(format!(
-                        "GET {url} exhausted {} attempts with HTTP {}",
-                        self.config.max_attempts,
-                        response.status()
-                    )));
-                }
-                Ok(response) => return Ok(response),
                 Err(error) if attempt < self.config.max_attempts => {
                     let delay = retry_delay_without_response(attempt, self.config);
-                    self.emit("fetch.retry", "success", json!({"url": url.as_str(), "attempt": attempt, "next_attempt": attempt + 1, "reason": "transport_error", "delay_ms": delay}));
+                    let timed_out = error.is_timeout();
+                    let message = error.to_string();
+                    let request_elapsed_ms = request_attempt.elapsed_ms();
+                    drop(permit);
+                    request_attempt.emit(
+                        &self.events,
+                        request_elapsed_ms,
+                        None,
+                        Some(&message),
+                        None,
+                        timed_out,
+                    );
+                    self.emit(
+                        "fetch.retry",
+                        "success",
+                        json!({
+                            "url": url.as_str(),
+                            "origin": origin,
+                            "request_kind": request_kind,
+                            "attempt": attempt,
+                            "next_attempt": attempt + 1,
+                            "reason": "transport_error",
+                            "error": message,
+                            "timed_out": timed_out,
+                            "request_elapsed_ms": request_elapsed_ms,
+                            "delay_ms": delay,
+                        }),
+                    );
                     if delay > 0 {
                         thread::sleep(Duration::from_millis(delay));
                     }
-                    let _ = error;
                 }
                 Err(error) => {
+                    let timed_out = error.is_timeout();
+                    let message = error.to_string();
+                    let request_elapsed_ms = request_attempt.elapsed_ms();
+                    drop(permit);
+                    request_attempt.emit(
+                        &self.events,
+                        request_elapsed_ms,
+                        None,
+                        Some(&message),
+                        None,
+                        timed_out,
+                    );
                     return Err(Error::fetch(format!(
-                        "GET {url} exhausted {} attempts: {error}",
+                        "GET {url} exhausted {} attempts: {message}",
                         self.config.max_attempts
                     )));
                 }
@@ -972,6 +1228,17 @@ impl<'a> CrawlWorker<'a> {
 
 fn owner_for<'a>(config: &'a Config, url: &str) -> Option<&'a Source> {
     config.sources.iter().find(|source| source.owns(url))
+}
+
+fn sitemap_url_allowed(config: &Config, origin: &str, url: &str) -> bool {
+    config.sources.iter().any(|source| {
+        source.allowed_origins.iter().any(|allowed| allowed == origin)
+            && (source.sitemap_url_prefixes.is_empty()
+                || source
+                    .sitemap_url_prefixes
+                    .iter()
+                    .any(|prefix| url.starts_with(prefix)))
+    })
 }
 
 fn schedule_key(config: &Config, url: &Url) -> String {
@@ -990,6 +1257,9 @@ impl Source {
         let Ok(url) = Url::parse(value) else {
             return false;
         };
+        let Ok(normalized) = normalize_url(url.clone()) else {
+            return false;
+        };
         self.allowed_origins.contains(&origin_key(&url))
             && self
                 .path_prefixes
@@ -999,6 +1269,10 @@ impl Source {
                 .deny_path_prefixes
                 .iter()
                 .any(|prefix| url.path().starts_with(prefix))
+            && self
+                .allowed_urls
+                .as_ref()
+                .map_or(true, |allowed| allowed.contains(&normalized))
     }
 }
 

@@ -1,3 +1,4 @@
+use super::checkpoint::remove_checkpoint_store;
 use super::checksums::write_checksums;
 use super::keyword::build_keyword_index;
 use super::profile::build_profile;
@@ -20,7 +21,13 @@ pub(crate) fn build_generation(
     data_dir: &Path,
     corpus_id: &str,
     run_id: &str,
+    resume: bool,
 ) -> Result<Value, Error> {
+    if !valid_build_run_id(run_id) {
+        return Err(Error::invalid(
+            "build run ID must be run- followed by 64 hexadecimal characters",
+        ));
+    }
     let corpus_dir = data_dir.join("corpora").join(corpus_id);
     let manifest_path = corpus_dir.join("snapshot-manifest.json");
     let manifest_bytes = fs::read(&manifest_path).map_err(|e| {
@@ -61,6 +68,8 @@ pub(crate) fn build_generation(
     {
         return Err(Error::invalid("Corpus snapshot count mismatch"));
     }
+    drop((pages_bytes, aliases_bytes, passages_bytes));
+    let page_count = pages.len();
     validate_stored_snapshot(&pages, &aliases, &passages)?;
 
     let profile_path = data_dir.join("config").join("index.toml");
@@ -72,7 +81,11 @@ pub(crate) fn build_generation(
     })?;
     let raw: RawBuildProfile = toml::from_str(&profile_text)
         .map_err(|e| Error::invalid(format!("parse build profile: {e}")))?;
-    let profile = build_profile(raw, corpus_id)?;
+    let corpus_model = snapshot
+        .embedding_model
+        .as_deref()
+        .unwrap_or(crate::DEFAULT_EMBEDDING_MODEL);
+    let profile = build_profile(raw, corpus_id, corpus_model)?;
     let profile_bytes = serde_json::to_vec_pretty(&profile)
         .map_err(|e| Error::storage(format!("serialize build profile: {e}")))?;
     let profile_digest = sha256_hex(&profile_bytes);
@@ -102,6 +115,8 @@ pub(crate) fn build_generation(
     {
         return Err(Error::invalid("Passage references unknown Page"));
     }
+    drop(page_ids);
+    drop((pages, aliases));
     let mut catalog = Vec::with_capacity(passages.len());
     for (index, passage) in passages.iter().enumerate() {
         let text = normalize_text(&passage.content);
@@ -123,6 +138,7 @@ pub(crate) fn build_generation(
             vector_key: (index + 1) as u64,
         });
     }
+    drop(passages);
     let catalog_bytes = jsonl(&catalog)?;
     let catalog_digest = sha256_hex(&catalog_bytes);
     let snapshot_digest = sha256_hex(&manifest_bytes);
@@ -143,13 +159,57 @@ pub(crate) fn build_generation(
     );
     let staging_root = data_dir.join("generations").join(".staging");
     let staging = staging_root.join(run_id);
-    fs::create_dir_all(&staging)
+    let checkpoint_root = data_dir.join("generation-build-checkpoints").join(run_id);
+    let embedding_cache_root = data_dir.join("generation-embedding-cache");
+    fs::create_dir_all(&staging_root)
         .map_err(|e| Error::storage(format!("create Generation staging directory: {e}")))?;
-    write_if_absent(&staging.join("build-profile.json"), &profile_bytes)?;
-    write_if_absent(&staging.join("catalog.jsonl"), &catalog_bytes)?;
+    if resume {
+        if !staging.is_dir() {
+            return Err(Error::invalid(format!(
+                "staging build {} does not exist; omit --resume to start a new build",
+                staging.display()
+            )));
+        }
+        verify_resume_input(&staging, "build-profile.json", &profile_bytes)?;
+        verify_resume_input(&staging, "catalog.jsonl", &catalog_bytes)?;
+        drop(catalog_bytes);
+        drop(catalog);
+        if let Ok(validated) = validate_generation(&staging, "validated") {
+            remove_checkpoint_store(&checkpoint_root)?;
+            return completed_build_summary(&staging, &validated);
+        }
+        remove_incomplete_artifacts(&staging)?;
+        let stored_catalog_bytes = fs::read(staging.join("catalog.jsonl"))
+            .map_err(|error| Error::storage(format!("read resumed catalog: {error}")))?;
+        catalog = parse_jsonl(&stored_catalog_bytes, "catalog.jsonl")?;
+        drop(stored_catalog_bytes);
+    } else {
+        if staging.exists() || checkpoint_root.exists() {
+            return Err(Error::storage(format!(
+                "build staging {} already exists; use --resume with this build run ID",
+                staging.display()
+            )));
+        }
+        fs::create_dir(&staging)
+            .map_err(|e| Error::storage(format!("create Generation staging directory: {e}")))?;
+        write_if_absent(&staging.join("build-profile.json"), &profile_bytes)?;
+        write_if_absent(&staging.join("catalog.jsonl"), &catalog_bytes)?;
+        drop(catalog_bytes);
+    }
     let (keyword_digest, keyword_count, keyword_duration_ms, keyword_artifact_bytes) =
         build_keyword_index(&staging, &catalog, &profile)?;
-    let semantic = build_semantic_index(&staging, &catalog, &profile)?;
+    let (semantic, checkpoint_stats) = build_semantic_index(
+        &staging,
+        &checkpoint_root,
+        &embedding_cache_root,
+        run_id,
+        &snapshot_digest,
+        &profile_digest,
+        &catalog_digest,
+        resume,
+        &catalog,
+        &profile,
+    )?;
     let mut generation = GenerationManifest {
         schema_version: "scout.generation-manifest.v1".into(),
         generation_id: generation_id.clone(),
@@ -172,7 +232,7 @@ pub(crate) fn build_generation(
         semantic_count: semantic.vector_count,
         semantic: semantic.clone(),
         checksums_file: "checksums.sha256".into(),
-        page_count: pages.len(),
+        page_count,
         passage_count: catalog.len(),
         alias_count,
         vector_key_count: catalog.len(),
@@ -183,10 +243,12 @@ pub(crate) fn build_generation(
     generation.manifest_sha256 = manifest_digest(&generation)?;
     write_json(&staging.join("generation-manifest.json"), &generation)?;
     let checksums_sha256 = write_checksums(&staging)?;
+    drop(catalog);
     // Build success is meaningful only after reopening every persisted artifact
     // through the same full validator activation uses. This also keeps a bad
     // staging directory from being reported as a usable Generation.
     let validated = validate_generation(&staging, "validated")?;
+    remove_checkpoint_store(&checkpoint_root)?;
     Ok(json!({
         "generation_id": validated.generation_id,
         "staging_path": staging,
@@ -200,7 +262,90 @@ pub(crate) fn build_generation(
             "count": keyword_count,
         },
         "semantic": validated.semantic,
+        "build_checkpoints": {
+            "schema": checkpoint_stats.schema,
+            "identity_sha256": checkpoint_stats.identity_sha256,
+            "chunks_reused": checkpoint_stats.chunks_reused,
+            "chunks_created": checkpoint_stats.chunks_created,
+        },
+        "embedding_reuse": {
+            "schema": "scout.embedding-reuse.v1",
+            "embedding_fingerprint": checkpoint_stats.embedding_fingerprint,
+            "cache_vectors_reused": checkpoint_stats.cache_vectors_reused,
+            "cache_vectors_created": checkpoint_stats.cache_vectors_created,
+            "build_checkpoint_vectors_reused": checkpoint_stats.checkpoint_vectors_reused,
+            "local_duplicate_vectors_reused": checkpoint_stats.local_duplicate_vectors_reused,
+        },
         "checksums_sha256": checksums_sha256,
+    }))
+}
+
+fn valid_build_run_id(run_id: &str) -> bool {
+    run_id.strip_prefix("run-").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn verify_resume_input(staging: &Path, name: &str, expected: &[u8]) -> Result<(), Error> {
+    let path = staging.join(name);
+    let existing = fs::read(&path).map_err(|error| {
+        Error::invalid(format!("read resume input {}: {error}", path.display()))
+    })?;
+    if existing != expected {
+        return Err(Error::invalid(format!(
+            "resume input {name} does not match the original Corpus and build profile"
+        )));
+    }
+    Ok(())
+}
+
+fn remove_incomplete_artifacts(staging: &Path) -> Result<(), Error> {
+    for name in [
+        "keyword",
+        SEMANTIC_ARTIFACT,
+        "semantic-vectors.f32",
+        "semantic-manifest.json",
+        "semantic-build-progress.jsonl",
+        "generation-manifest.json",
+        "checksums.sha256",
+    ] {
+        let path = staging.join(name);
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|error| {
+                Error::storage(format!(
+                    "remove incomplete artifact {}: {error}",
+                    path.display()
+                ))
+            })?;
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(|error| {
+                Error::storage(format!(
+                    "remove incomplete artifact {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn completed_build_summary(staging: &Path, manifest: &GenerationManifest) -> Result<Value, Error> {
+    let checksums = fs::read(staging.join("checksums.sha256"))
+        .map_err(|error| Error::storage(format!("read completed Generation checksums: {error}")))?;
+    Ok(json!({
+        "generation_id": manifest.generation_id,
+        "staging_path": staging,
+        "page_count": manifest.page_count,
+        "passage_count": manifest.passage_count,
+        "catalog_sha256": manifest.catalog_sha256,
+        "keyword": {
+            "artifact": manifest.keyword_artifact,
+            "artifact_bytes": super::checksums::directory_bytes(&staging.join("keyword"))?,
+            "count": manifest.keyword_count,
+        },
+        "semantic": manifest.semantic,
+        "checksums_sha256": sha256_hex(&checksums),
+        "resumed_complete": true,
     }))
 }
 

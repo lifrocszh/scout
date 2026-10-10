@@ -16,6 +16,7 @@ use chrono::{SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER};
 use reqwest::redirect::Policy;
+use rusqlite::Connection as SqlConnection;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,6 +43,8 @@ const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 const SEMANTIC_ARTIFACT: &str = "semantic.usearch";
 const SEMANTIC_VECTOR_ARTIFACT: &str = "semantic-vectors.f32";
 const SEMANTIC_MAGIC: &[u8] = b"SCOUT-SEMANTIC-F32-COSINE-V1\0";
+const DEFAULT_EMBEDDING_MODEL: &str = "BAAI/bge-small-en-v1.5";
+const MINILM_EMBEDDING_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const EVALUATION_SCHEMA: &str = "scout.evaluation.v1";
 const EVALUATION_QUERY_COUNT: usize = 64;
 const EVALUATION_DEVELOPMENT_QUERY_COUNT: usize = 16;
@@ -75,9 +78,11 @@ struct Cli {
 enum Operation {
     Crawl {
         config: PathBuf,
+        materialize_spool: Option<String>,
     },
     IndexBuild {
         corpus: String,
+        resume: Option<String>,
     },
     IndexActivate {
         generation: String,
@@ -153,6 +158,7 @@ struct RawConfig {
     schema_version: Option<String>,
     contact_url: Option<String>,
     user_agent: Option<String>,
+    embedding_model: Option<String>,
     page_target: Option<usize>,
     min_content_chars: Option<usize>,
     max_decoded_body_bytes: Option<usize>,
@@ -204,12 +210,16 @@ struct RawSource {
     source_id: Option<String>,
     name: Option<String>,
     seeds: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_urls: Option<Vec<String>>,
     #[serde(alias = "origins")]
     allowed_origins: Option<Vec<String>>,
     #[serde(alias = "allowed_path_prefixes", alias = "paths")]
     path_prefixes: Option<Vec<String>>,
     #[serde(default, alias = "deny_paths")]
     deny_path_prefixes: Vec<String>,
+    #[serde(default)]
+    sitemap_url_prefixes: Vec<String>,
     politeness_group: Option<String>,
     license_urls: Option<Vec<String>>,
     #[serde(alias = "min_pages", alias = "minimum_pages")]
@@ -221,9 +231,14 @@ struct Source {
     source_id: String,
     name: Option<String>,
     seeds: Vec<String>,
+    // When set, only these normalized page URLs belong to this Source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allowed_urls: Option<BTreeSet<String>>,
     allowed_origins: Vec<String>,
     path_prefixes: Vec<String>,
     deny_path_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sitemap_url_prefixes: Vec<String>,
     politeness_group: Option<String>,
     license_urls: Vec<String>,
     minimum_page_quota: usize,
@@ -234,6 +249,7 @@ struct Config {
     schema_version: String,
     contact_url: String,
     user_agent: String,
+    embedding_model: String,
     page_target: usize,
     min_content_chars: usize,
     max_body_bytes: usize,
@@ -259,6 +275,7 @@ struct Config {
 struct CrawlPolicy {
     schema_version: String,
     contact_url: String,
+    embedding_model: String,
     global_concurrency: usize,
     origin_concurrency: usize,
     min_start_spacing_ms: u64,
@@ -283,6 +300,7 @@ impl Config {
         CrawlPolicy {
             schema_version: self.schema_version.clone(),
             contact_url: self.contact_url.clone(),
+            embedding_model: self.embedding_model.clone(),
             global_concurrency: self.global_concurrency,
             origin_concurrency: self.origin_concurrency,
             min_start_spacing_ms: self.min_start_spacing_ms,
@@ -309,6 +327,7 @@ struct CanonicalConfig<'a> {
     schema_version: &'a str,
     contact_url: &'a str,
     user_agent: &'a str,
+    embedding_model: &'a str,
     page_target: usize,
     min_content_chars: usize,
     max_body_bytes: usize,
@@ -407,7 +426,7 @@ struct ManifestPage {
     language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     canonical_url: Option<String>,
-    extraction_method: &'static str,
+    extraction_method: String,
     content_type: String,
     content_bytes: usize,
     body_file: String,
@@ -425,7 +444,7 @@ struct PageRecord {
     description: Option<String>,
     language: Option<String>,
     canonical_url: Option<String>,
-    extraction_method: &'static str,
+    extraction_method: String,
     content: String,
     content_identity: String,
     content_sha256: String,
@@ -505,6 +524,7 @@ struct SnapshotManifest {
     run_id: String,
     crawl_manifest_sha256: String,
     source_config_sha256: String,
+    embedding_model: String,
     created_at_utc: String,
     page_count: usize,
     alias_count: usize,
@@ -525,6 +545,8 @@ struct StoredSnapshotManifest {
     run_id: String,
     crawl_manifest_sha256: String,
     source_config_sha256: String,
+    #[serde(default)]
+    embedding_model: Option<String>,
     page_count: usize,
     alias_count: usize,
     pages_jsonl_sha256: String,
@@ -627,6 +649,7 @@ struct RawBuildProfile {
     embedding_batch_size: Option<usize>,
     embedding_workers: Option<usize>,
     embedding_intra_op_threads: Option<usize>,
+    embedding_execution_provider: Option<String>,
     metric: Option<String>,
     scalar_kind: Option<String>,
     connectivity: Option<usize>,
@@ -676,6 +699,7 @@ struct BuildProfile {
     embedding_batch_size: Option<usize>,
     embedding_workers: Option<usize>,
     embedding_intra_op_threads: Option<usize>,
+    embedding_execution_provider: Option<String>,
     metric: Option<String>,
     scalar_kind: Option<String>,
     connectivity: Option<usize>,
@@ -753,6 +777,22 @@ struct SemanticHit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticStageTimings {
+    model_initialization_ms: u128,
+    passage_embedding_ms: u128,
+    passage_embedding_calls: usize,
+    query_embedding_ms: u128,
+    vector_write_ms: u128,
+    vector_index_insertion_ms: u128,
+    vector_flush_ms: u128,
+    vector_validation_ms: u128,
+    index_persistence_ms: u128,
+    index_reopen_validation_ms: u128,
+    smoke_search_ms: u128,
+    other_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticEvidence {
     schema_version: String,
     backend: String,
@@ -777,6 +817,10 @@ struct SemanticEvidence {
     embedding_batch_size: Option<usize>,
     embedding_workers: Option<usize>,
     embedding_intra_op_threads: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding_execution_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding_fingerprint: Option<String>,
     connectivity: Option<usize>,
     construction_expansion: Option<usize>,
     search_expansion: Option<usize>,
@@ -790,6 +834,8 @@ struct SemanticEvidence {
     artifact_bytes: u64,
     artifact_sha256: String,
     build_duration_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_timings: Option<SemanticStageTimings>,
     embedding_passages_per_second: f64,
     memory_observation: String,
     reopened: bool,
@@ -1064,23 +1110,11 @@ struct LoadedGeneration {
     manifest: GenerationManifest,
     profile: BuildProfile,
     catalog: Vec<CatalogRecord>,
-    semantic: StoredSemanticIndex,
+    semantic_dimensions: usize,
     keyword_index: Index,
     semantic_index: UsearchIndex,
     model_cache_dir: PathBuf,
-}
-
-#[derive(Debug, Serialize)]
-struct PageSearchResult {
-    rank: usize,
-    page_id: String,
-    source_id: String,
-    url: String,
-    title: String,
-    score: f32,
-    winning_passage_id: String,
-    heading_path: Vec<String>,
-    snippet: String,
+    query_embedder: generation::QueryEmbedder,
 }
 
 mod app;
@@ -1095,6 +1129,7 @@ mod generation;
 mod http;
 mod observability;
 mod search;
+mod spool;
 mod storage;
 mod url;
 
@@ -1124,9 +1159,11 @@ mod tests {
             source_id: "fixture".into(),
             name: None,
             seeds: vec![],
+            allowed_urls: None,
             allowed_origins: vec!["https://example.invalid".into()],
             path_prefixes: vec!["/Docs/".into()],
             deny_path_prefixes: vec!["/Docs/private/".into()],
+            sitemap_url_prefixes: vec![],
             politeness_group: None,
             license_urls: vec![],
             minimum_page_quota: 0,

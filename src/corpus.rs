@@ -1,11 +1,108 @@
 use super::{
-    AliasRecord, BTreeMap, CRAWL_SCHEMA, Capture, Config, ContentBlock, CrawlResult, Error,
-    HashMap, HashSet, Manifest, ManifestError, ManifestPage, PageRecord, PassageRecord, Path,
-    SNAPSHOT_SCHEMA, SnapshotManifest, SnapshotResult, Summary,
+    AliasRecord, BTreeMap, BufWriter, CRAWL_SCHEMA, Capture, Config, ContentBlock, CrawlResult,
+    Digest, Error, HashMap, HashSet, Manifest, ManifestError, ManifestPage, OpenOptions, PageRecord,
+    PassageRecord, Path, SNAPSHOT_SCHEMA, Serialize, Sha256, SnapshotManifest, SnapshotResult,
+    Summary, Write, io,
     crawl::page_id,
     fs,
-    storage::{jsonl, now, sha256_hex, write_if_absent, write_json},
+    storage::{now, sha256_hex, write_json},
 };
+
+#[path = "corpus/bounded.rs"]
+mod bounded;
+pub(crate) use bounded::{
+    materialize_spooled, seal_existing_materialized_spool, write_incomplete_spooled,
+};
+
+struct DigestWriter<W> {
+    writer: W,
+    digest: Sha256,
+}
+
+impl<W> DigestWriter<W> {
+    fn new(writer: W) -> Self {
+        Self {
+            writer,
+            digest: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> String {
+        format!("{:x}", self.digest.finalize())
+    }
+}
+
+impl<W: Write> Write for DigestWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.writer.write(bytes)?;
+        self.digest.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+fn serialized_sha256<T: Serialize>(value: &T, name: &str) -> Result<String, Error> {
+    let mut writer = DigestWriter::new(io::sink());
+    serde_json::to_writer_pretty(&mut writer, value)
+        .map_err(|e| Error::storage(format!("serialize {name}: {e}")))?;
+    writer
+        .flush()
+        .map_err(|e| Error::storage(format!("flush serialized {name}: {e}")))?;
+    Ok(writer.finish())
+}
+
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
+    let file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            serde_json::to_writer_pretty(io::sink(), value)
+                .map_err(|e| Error::storage(format!("serialize {}: {e}", path.display())))?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(Error::storage(format!("create {}: {error}", path.display())));
+        }
+    };
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
+        .map_err(|e| Error::storage(format!("serialize {}: {e}", path.display())))?;
+    writer
+        .flush()
+        .map_err(|e| Error::storage(format!("write {}: {e}", path.display())))
+}
+
+fn write_jsonl<T: Serialize>(path: &Path, values: &[T]) -> Result<String, Error> {
+    let output: Box<dyn Write> = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => Box::new(BufWriter::new(file)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Box::new(io::sink()),
+        Err(error) => {
+            return Err(Error::storage(format!("create {}: {error}", path.display())));
+        }
+    };
+    let mut writer = DigestWriter::new(output);
+    for value in values {
+        serde_json::to_writer(&mut writer, value)
+            .map_err(|e| Error::storage(format!("serialize {} JSONL: {e}", path.display())))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|e| Error::storage(format!("write {}: {e}", path.display())))?;
+    }
+    writer
+        .flush()
+        .map_err(|e| Error::storage(format!("flush {}: {e}", path.display())))?;
+    Ok(writer.finish())
+}
 
 fn build_passages(
     page_id: &str,
@@ -121,7 +218,7 @@ fn passage_id(page_id: &str, identity: &str, ordinal: usize) -> String {
 /// Lexicographically smallest content hash wins, followed by extracted identity,
 /// body hash, request provenance, and response metadata. The tuple is recorded
 /// in the Crawl Manifest so a superseded response remains explainable.
-fn capture_selection_key(capture: &Capture) -> String {
+pub(crate) fn capture_selection_key(capture: &Capture) -> String {
     format!(
         "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
         capture.content_hash,
@@ -171,6 +268,7 @@ pub(crate) fn materialize(
     result: CrawlResult,
 ) -> Result<SnapshotResult, Error> {
     let mut captures = result.captures;
+    let captured_page_count = captures.len();
     // Conflicting responses for one final URL are selected by this stable tuple,
     // never by worker completion order. The content hash is first so a changed
     // response cannot win merely because it arrived earlier.
@@ -228,7 +326,7 @@ pub(crate) fn materialize(
             description: representative.description.clone(),
             language: representative.language.clone(),
             canonical_url: representative.canonical_url.clone(),
-            extraction_method: representative.extraction_method,
+            extraction_method: representative.extraction_method.into(),
             content: representative.content.clone(),
             content_identity: representative.identity.clone(),
             content_sha256: representative.content_hash.clone(),
@@ -320,7 +418,7 @@ pub(crate) fn materialize(
             description: capture.description.clone(),
             language: capture.language.clone(),
             canonical_url: capture.canonical_url.clone(),
-            extraction_method: capture.extraction_method,
+            extraction_method: capture.extraction_method.into(),
             content_type: capture.content_type.clone(),
             content_bytes: capture.content_bytes,
             body_file: capture.body_file.clone(),
@@ -329,6 +427,14 @@ pub(crate) fn materialize(
             status_code: capture.status_code,
         });
     }
+    drop(alias_for_capture);
+    drop(page_for_capture);
+    drop(selected_capture_ids);
+    drop(identity_groups);
+    drop(selected_by_url);
+    drop(captures_by_url);
+    drop(captures);
+
     pages.sort_by(|a, b| {
         a.source_id
             .cmp(&b.source_id)
@@ -351,23 +457,27 @@ pub(crate) fn materialize(
             .then_with(|| a.ordinal.cmp(&b.ordinal))
     });
     validate_snapshot_records(&pages, &aliases, &passages)?;
-    let page_bytes =
-        serde_json::to_vec(&pages).map_err(|e| Error::storage(format!("serialize pages: {e}")))?;
-    let passage_bytes = serde_json::to_vec(&passages)
-        .map_err(|e| Error::storage(format!("serialize passages: {e}")))?;
-    let snapshot_id = format!(
-        "snapshot-{}",
-        sha256_hex(
-            &[
-                config.digest.as_bytes(),
-                b"\0",
-                &page_bytes,
-                b"\0",
-                &passage_bytes,
-            ]
-            .concat(),
-        )
-    );
+    let mut snapshot_digest = DigestWriter::new(io::sink());
+    snapshot_digest
+        .write_all(config.digest.as_bytes())
+        .map_err(|e| Error::storage(format!("hash snapshot identity: {e}")))?;
+    snapshot_digest
+        .write_all(b"\0")
+        .map_err(|e| Error::storage(format!("hash snapshot identity: {e}")))?;
+    serde_json::to_writer(&mut snapshot_digest, &pages)
+        .map_err(|e| Error::storage(format!("serialize pages for snapshot identity: {e}")))?;
+    snapshot_digest
+        .write_all(b"\0")
+        .map_err(|e| Error::storage(format!("hash snapshot identity: {e}")))?;
+    serde_json::to_writer(&mut snapshot_digest, &passages)
+        .map_err(|e| Error::storage(format!("serialize passages for snapshot identity: {e}")))?;
+    snapshot_digest
+        .flush()
+        .map_err(|e| Error::storage(format!("flush snapshot identity hash: {e}")))?;
+    let snapshot_id = format!("snapshot-{}", snapshot_digest.finish());
+    let page_count = pages.len();
+    let alias_count = aliases.len();
+    let passage_count = passages.len();
     let mut manifest = Manifest {
         schema_version: CRAWL_SCHEMA,
         run_id: run_id.into(),
@@ -384,10 +494,10 @@ pub(crate) fn materialize(
         sources: config.sources.clone(),
         pages: manifest_pages,
         summary: Summary {
-            captured_page_count: captures.len(),
-            page_count: pages.len(),
-            alias_count: aliases.len(),
-            passage_count: passages.len(),
+            captured_page_count,
+            page_count,
+            alias_count,
+            passage_count,
             rejected_count: result.rejected_count,
             failed_count: result.failed_count,
             target_page_count: config.page_target,
@@ -395,37 +505,37 @@ pub(crate) fn materialize(
         },
         error: None,
     };
-    manifest.manifest_sha256 = sha256_hex(
-        &serde_json::to_vec_pretty(&manifest)
-            .map_err(|e| Error::storage(format!("serialize manifest: {e}")))?,
-    );
-    write_json(&crawl_dir.join("crawl-manifest.json"), &manifest)?;
+    manifest.manifest_sha256 = serialized_sha256(&manifest, "manifest")?;
+    write_pretty_json(&crawl_dir.join("crawl-manifest.json"), &manifest)?;
+    let crawl_manifest_sha256 = manifest.manifest_sha256.clone();
+    drop(manifest);
     let corpora = data_dir.join("corpora");
     fs::create_dir_all(&corpora)
         .map_err(|e| Error::storage(format!("create corpora directory: {e}")))?;
     let staging = corpora.join(format!(".staging-{run_id}"));
     fs::create_dir_all(&staging)
         .map_err(|e| Error::storage(format!("create snapshot staging: {e}")))?;
-    let pages_jsonl = jsonl(&pages)?;
-    let aliases_jsonl = jsonl(&aliases)?;
-    let passages_jsonl = jsonl(&passages)?;
-    write_if_absent(&staging.join("pages.jsonl"), &pages_jsonl)?;
-    write_if_absent(&staging.join("aliases.jsonl"), &aliases_jsonl)?;
-    write_if_absent(&staging.join("passages.jsonl"), &passages_jsonl)?;
+    let pages_jsonl_sha256 = write_jsonl(&staging.join("pages.jsonl"), &pages)?;
+    let aliases_jsonl_sha256 = write_jsonl(&staging.join("aliases.jsonl"), &aliases)?;
+    let passages_jsonl_sha256 = write_jsonl(&staging.join("passages.jsonl"), &passages)?;
+    drop(pages);
+    drop(aliases);
+    drop(passages);
     let snapshot_manifest = SnapshotManifest {
         schema_version: SNAPSHOT_SCHEMA,
         snapshot_id: snapshot_id.clone(),
         status: "complete",
         run_id: run_id.into(),
-        crawl_manifest_sha256: manifest.manifest_sha256.clone(),
+        crawl_manifest_sha256,
         source_config_sha256: config.digest.clone(),
+        embedding_model: config.embedding_model.clone(),
         created_at_utc: completed.into(),
-        page_count: pages.len(),
-        alias_count: aliases.len(),
-        pages_jsonl_sha256: sha256_hex(&pages_jsonl),
-        aliases_jsonl_sha256: sha256_hex(&aliases_jsonl),
-        passage_count: passages.len(),
-        passages_jsonl_sha256: sha256_hex(&passages_jsonl),
+        page_count,
+        alias_count,
+        pages_jsonl_sha256,
+        aliases_jsonl_sha256,
+        passage_count,
+        passages_jsonl_sha256,
     };
     write_json(&staging.join("snapshot-manifest.json"), &snapshot_manifest)?;
     let final_dir = corpora.join(&snapshot_id);
@@ -438,8 +548,8 @@ pub(crate) fn materialize(
     fs::rename(&staging, &final_dir).map_err(|e| Error::storage(format!("seal snapshot: {e}")))?;
     Ok(SnapshotResult {
         id: snapshot_id,
-        pages: pages.len(),
-        aliases: aliases.len(),
+        pages: page_count,
+        aliases: alias_count,
     })
 }
 
@@ -579,7 +689,7 @@ pub(crate) fn write_incomplete(
             description: capture.description.clone(),
             language: capture.language.clone(),
             canonical_url: capture.canonical_url.clone(),
-            extraction_method: capture.extraction_method,
+            extraction_method: capture.extraction_method.into(),
             content_type: capture.content_type.clone(),
             content_bytes: capture.content_bytes,
             body_file: capture.body_file.clone(),
@@ -618,7 +728,7 @@ pub(crate) fn write_incomplete(
             message: error.message.clone(),
         }),
     };
-    let _ = write_json(&crawl_dir.join("incomplete-manifest.json"), &manifest);
+    let _ = write_pretty_json(&crawl_dir.join("incomplete-manifest.json"), &manifest);
 }
 
 #[cfg(test)]
@@ -634,6 +744,7 @@ mod tests {
             schema_version: CRAWL_SCHEMA.into(),
             contact_url: "https://example.invalid/contact".into(),
             user_agent: "Scout/test".into(),
+            embedding_model: crate::DEFAULT_EMBEDDING_MODEL.into(),
             page_target: 1,
             min_content_chars: 1,
             max_body_bytes: 1_000_000,
@@ -655,9 +766,11 @@ mod tests {
                 source_id: "fixture".into(),
                 name: None,
                 seeds: vec!["https://example.invalid/docs".into()],
+                allowed_urls: None,
                 allowed_origins: vec!["https://example.invalid".into()],
                 path_prefixes: vec!["/".into()],
                 deny_path_prefixes: Vec::new(),
+                sitemap_url_prefixes: Vec::new(),
                 politeness_group: None,
                 license_urls: Vec::new(),
                 minimum_page_quota: 0,
@@ -805,7 +918,7 @@ mod tests {
             description: None,
             language: None,
             canonical_url: None,
-            extraction_method: "test",
+            extraction_method: "test".into(),
             content: "content".into(),
             content_identity: "Prose\0content".into(),
             content_sha256: sha256_hex(b"Prose\0content"),

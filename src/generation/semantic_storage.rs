@@ -1,6 +1,7 @@
 use crate::{CatalogRecord, Error, SEMANTIC_MAGIC, SemanticHit, StoredSemanticIndex};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 pub(crate) fn read_semantic_index(path: &Path) -> Result<StoredSemanticIndex, Error> {
@@ -23,12 +24,11 @@ pub(super) fn read_semantic_bytes(bytes: &[u8]) -> Result<StoredSemanticIndex, E
             "semantic dimensions outside supported bound",
         ));
     }
+    let vector_bytes = dimensions
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| Error::invalid("semantic record size overflow"))?;
     let record_size = 8_usize
-        .checked_add(
-            dimensions
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| Error::invalid("semantic record size overflow"))?,
-        )
+        .checked_add(vector_bytes)
         .ok_or_else(|| Error::invalid("semantic record size overflow"))?;
     let expected_len = cursor
         .checked_add(
@@ -121,6 +121,117 @@ pub(super) fn validate_semantic_index(
         ));
     }
     Ok(())
+}
+
+pub(super) fn validate_semantic_file(
+    path: &Path,
+    expected_keys: &mut BTreeSet<u64>,
+    expected_dimensions: usize,
+) -> Result<usize, Error> {
+    // Caller passes the catalog's already-validated 1..=N key set.
+    let expected_count = expected_keys.len();
+    let maximum_key = u64::try_from(expected_count)
+        .map_err(|_| Error::invalid("semantic vector count overflow"))?;
+    let file = File::open(path)
+        .map_err(|e| Error::invalid(format!("read semantic vector artifact: {e}")))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| Error::invalid(format!("stat semantic vector artifact: {e}")))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let mut magic = [0; SEMANTIC_MAGIC.len()];
+    read_semantic_file_exact(&mut reader, &mut magic)?;
+    if magic.as_slice() != SEMANTIC_MAGIC {
+        return Err(Error::invalid("semantic artifact magic mismatch"));
+    }
+
+    let dimensions = usize::try_from(read_semantic_file_u32(&mut reader)?)
+        .map_err(|_| Error::invalid("semantic dimensions overflow"))?;
+    let count_u64 = read_semantic_file_u64(&mut reader)?;
+    let count =
+        usize::try_from(count_u64).map_err(|_| Error::invalid("semantic vector count overflow"))?;
+    if dimensions == 0 || dimensions > 4096 {
+        return Err(Error::invalid(
+            "semantic dimensions outside supported bound",
+        ));
+    }
+    if dimensions != expected_dimensions || count != expected_count {
+        return Err(Error::invalid("semantic dimensions/count mismatch"));
+    }
+    let vector_bytes = dimensions
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| Error::invalid("semantic record size overflow"))?;
+    let record_size = 8_usize
+        .checked_add(vector_bytes)
+        .ok_or_else(|| Error::invalid("semantic record size overflow"))?;
+    let expected_len = SEMANTIC_MAGIC
+        .len()
+        .checked_add(12)
+        .and_then(|header_len| count.checked_mul(record_size)?.checked_add(header_len))
+        .ok_or_else(|| Error::invalid("semantic artifact size overflow"))?;
+    if u64::try_from(expected_len).ok() != Some(file_len) {
+        return Err(Error::invalid("semantic artifact length mismatch"));
+    }
+
+    let mut key_error = None;
+    let mut vector = vec![0; vector_bytes];
+    // Remove each valid key as seen; repeats fail immediately and leftovers are missing keys.
+    for _ in 0..count {
+        let key = read_semantic_file_u64(&mut reader)?;
+        if key == 0 || key > maximum_key {
+            key_error.get_or_insert("semantic vector key does not map to catalog");
+        } else if !expected_keys.remove(&key) {
+            key_error.get_or_insert("duplicate semantic vector key");
+        }
+        read_semantic_file_exact(&mut reader, &mut vector)?;
+        for raw in vector.chunks_exact(std::mem::size_of::<f32>()) {
+            if !f32::from_le_bytes(raw.try_into().expect("float width")).is_finite() {
+                return Err(Error::invalid(
+                    "semantic artifact contains non-finite vector",
+                ));
+            }
+        }
+    }
+    let mut trailing = [0; 1];
+    if reader
+        .read(&mut trailing)
+        .map_err(|e| Error::invalid(format!("read semantic vector artifact: {e}")))?
+        != 0
+    {
+        return Err(Error::invalid("semantic artifact length mismatch"));
+    }
+
+    if let Some(message) = key_error {
+        return Err(Error::invalid(message));
+    }
+    if !expected_keys.is_empty() {
+        return Err(Error::invalid(
+            "semantic vector keys do not equal catalog keys",
+        ));
+    }
+    Ok(count)
+}
+
+fn read_semantic_file_exact(reader: &mut impl Read, bytes: &mut [u8]) -> Result<(), Error> {
+    reader.read_exact(bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::invalid("truncated semantic artifact")
+        } else {
+            Error::invalid(format!("read semantic vector artifact: {error}"))
+        }
+    })
+}
+
+fn read_semantic_file_u32(reader: &mut impl Read) -> Result<u32, Error> {
+    let mut raw = [0; std::mem::size_of::<u32>()];
+    read_semantic_file_exact(reader, &mut raw)?;
+    Ok(u32::from_le_bytes(raw))
+}
+
+fn read_semantic_file_u64(reader: &mut impl Read) -> Result<u64, Error> {
+    let mut raw = [0; std::mem::size_of::<u64>()];
+    read_semantic_file_exact(reader, &mut raw)?;
+    Ok(u64::from_le_bytes(raw))
 }
 
 pub(super) fn semantic_hits(

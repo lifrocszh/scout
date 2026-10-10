@@ -1,11 +1,11 @@
 use super::generation::{
-    embed_query, open_semantic_index, read_pointer, read_semantic_index, register_keyword_analyzer,
-    validate_generation, validate_pointer,
+    open_semantic_index, read_pointer, register_keyword_analyzer, validate_generation,
+    validate_pointer,
 };
 use super::storage::parse_jsonl;
 use super::{
     BuildProfile, CatalogRecord, Error, HashMap, Index, LoadedGeneration, Ordering, Path,
-    QueryParser, SEMANTIC_VECTOR_ARTIFACT, TantivyDocument, TantivyValue, TopDocs, fs,
+    QueryParser, TantivyDocument, TantivyValue, TopDocs, fs,
 };
 
 pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration, Error> {
@@ -32,9 +32,7 @@ pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration
         let Ok(catalog) = parse_jsonl::<CatalogRecord>(&catalog_bytes, "catalog.jsonl") else {
             continue;
         };
-        let Ok(semantic) = read_semantic_index(&path.join(SEMANTIC_VECTOR_ARTIFACT)) else {
-            continue;
-        };
+        drop(catalog_bytes);
         let Ok(mut keyword_index) = Index::open_in_dir(path.join(&manifest.keyword_artifact))
         else {
             continue;
@@ -47,14 +45,16 @@ pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration
         else {
             continue;
         };
+        let semantic_dimensions = manifest.semantic.dimensions;
         return Ok(LoadedGeneration {
             manifest,
             profile,
             catalog,
-            semantic,
+            semantic_dimensions,
             keyword_index,
             semantic_index,
             model_cache_dir: data_dir.join("models"),
+            query_embedder: super::generation::QueryEmbedder::default(),
         });
     }
     Err(Error::not_ready(
@@ -136,8 +136,8 @@ pub(crate) fn semantic_hits_for_query<'a>(
     query: &str,
     source: Option<&str>,
 ) -> Result<Vec<(f32, &'a CatalogRecord)>, Error> {
-    let dimensions = generation.semantic.dimensions;
-    let query_vector = embed_query(
+    let dimensions = generation.semantic_dimensions;
+    let query_vector = generation.query_embedder.embed(
         query,
         &generation.profile,
         &generation.model_cache_dir,

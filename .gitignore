@@ -1,5 +1,6 @@
 /target/
 /.scratch/
+/data/
 
 # Local runtime artifacts
 *.log
@@ -13,3 +14,7 @@
 !.env.example
 .DS_Store
 *.swp
+
+# Python caches
+__pycache__/
+*.py[cod]

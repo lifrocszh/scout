@@ -131,7 +131,6 @@ body_boost = 1.0
 candidate_depth = 5
 writer_memory_bytes = 16000000
 worker_count = 1
-model_name = "BAAI/bge-small-en-v1.5"
 model_source = "local"
 model_revision = "contract-revision"
 model_license = "contract-license"
@@ -449,6 +448,29 @@ fn benchmark_artifact_contract_locks_protocol_inputs_and_integrity_evidence() {
     assert_eq!(report["performance_thresholds_claimed"], false);
     assert!(report["domain_metrics"].is_object());
     assert!(report["phase_timings"].is_object());
+    let concurrency_one = &report["serving_by_concurrency"]["1"];
+    assert_eq!(
+        concurrency_one["measured"]["duration_ms"]["sample_count"],
+        10
+    );
+    assert_eq!(
+        concurrency_one["measured"]["passes"]
+            .as_array()
+            .map(Vec::len),
+        Some(10)
+    );
+    assert_eq!(
+        concurrency_one["measured"]["latency_ms"]["sample_count"],
+        640
+    );
+    for field in ["min_ms", "p50_ms", "p95_ms", "p99_ms", "max_ms"] {
+        assert!(
+            concurrency_one["measured"]["latency_ms"][field].is_number(),
+            "aggregate latency distribution is missing {field}"
+        );
+    }
+    assert!(concurrency_one["measured"]["passes"][0]["latency_ms"]["p95_ms"].is_number());
+    assert!(report["flags"]["unstable_concurrency_levels"].is_array());
 
     let evidence = fs::read_to_string(
         only_child(&data_dir.path().join("benchmarks")).join("system-evidence.json"),
@@ -555,4 +577,55 @@ fn benchmark_protocol_contract_records_replay_staging_cold_warm_and_latency_evid
         assert_eq!(manifest["status"], "complete");
         assert!(manifest["snapshot_id"].is_string());
     }
+}
+
+#[test]
+fn benchmark_can_run_serving_only_without_fresh_staging() {
+    let (data_dir, crawl_dir, generation_id, snapshot_id) = prepare_generation();
+    let package = write_queries(data_dir.path());
+    let config = write_benchmark_config(
+        data_dir.path(),
+        &crawl_dir,
+        &generation_id,
+        &snapshot_id,
+        &package,
+    );
+    let config_text = fs::read_to_string(&config).expect("read benchmark config");
+    fs::write(
+        &config,
+        config_text
+            .replace("fresh_staging_runs = 3", "fresh_staging_runs = 0")
+            .replace("cold_open_runs = 5", "cold_open_runs = 1")
+            .replace("warmup_passes = 2", "warmup_passes = 1")
+            .replace("measured_passes = 10", "measured_passes = 1")
+            .replace("concurrency = [1, 4, 8, 16]", "concurrency = [1]"),
+    )
+    .expect("write serving-only benchmark config");
+
+    let output = run_scout(
+        data_dir.path(),
+        &[
+            "benchmark".into(),
+            "--config".into(),
+            config.display().to_string(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "benchmark failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (plan, report, samples) = benchmark_artifacts(data_dir.path());
+    assert_eq!(plan["fresh_staging_runs"], 0);
+    assert_eq!(report["flags"]["integrity_verified"], true);
+    let phases = samples
+        .iter()
+        .filter_map(|sample| sample["phase"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(phases.contains("serving-cold-open"));
+    assert!(phases.contains("serving-warmup"));
+    assert!(phases.contains("serving-warm"));
+    assert!(!phases.contains("crawl-fresh-staging"));
+    assert!(!phases.contains("index-fresh-staging"));
 }

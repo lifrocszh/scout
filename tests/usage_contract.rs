@@ -124,7 +124,6 @@ body_boost = 1.0
 candidate_depth = 5
 writer_memory_bytes = 16000000
 worker_count = 1
-model_name = "fixture-deterministic"
 model_source = "none"
 model_revision = "fixture-revision"
 model_license = "Apache-2.0"

@@ -15,7 +15,9 @@ where
         None
     };
     let mut config = None;
+    let mut materialize_spool = None;
     let mut corpus = None;
+    let mut resume = None;
     let mut generation = None;
     let mut retain = Vec::new();
     let mut bind = None;
@@ -37,10 +39,26 @@ where
             Some("--config") => {
                 config = Some(PathBuf::from(args.next().ok_or("--config needs a path")?))
             }
+            Some("--materialize-spool") => {
+                materialize_spool = Some(
+                    args.next()
+                        .ok_or("--materialize-spool needs a Crawl run ID")?
+                        .to_string_lossy()
+                        .into(),
+                )
+            }
             Some("--corpus") => {
                 corpus = Some(
                     args.next()
                         .ok_or("--corpus needs an ID")?
+                        .to_string_lossy()
+                        .into(),
+                )
+            }
+            Some("--resume") => {
+                resume = Some(
+                    args.next()
+                        .ok_or("--resume needs a staging run ID")?
                         .to_string_lossy()
                         .into(),
                 )
@@ -83,7 +101,7 @@ where
             Some("--json") => json_errors = true,
             Some("--help") | Some("-h") => {
                 println!(
-                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
+                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>"
                 );
                 return Err(String::new());
             }
@@ -91,13 +109,24 @@ where
             None => return Err("argument is not valid UTF-8".into()),
         }
     }
+    if resume.is_some()
+        && !(command == "index"
+            && index_command.as_deref().and_then(OsStr::to_str) == Some("build"))
+    {
+        return Err("--resume is only valid for index build".into());
+    }
+    if materialize_spool.is_some() && command != "crawl" {
+        return Err("--materialize-spool is only valid for crawl".into());
+    }
     let operation = match command {
         "crawl" => Operation::Crawl {
             config: config.ok_or("missing --config")?,
+            materialize_spool,
         },
         "index" => match index_command.as_deref().and_then(OsStr::to_str) {
             Some("build") => Operation::IndexBuild {
                 corpus: corpus.ok_or("missing --corpus")?,
+                resume,
             },
             Some("activate") => Operation::IndexActivate {
                 generation: generation.ok_or("missing --generation")?,

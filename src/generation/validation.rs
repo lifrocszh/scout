@@ -1,7 +1,8 @@
-use super::checksums::{collect_files, directory_digest, directory_or_file_digest};
+use super::checksums::{directory_digest, directory_or_file_digest};
 use super::keyword::register_keyword_analyzer;
+use super::profile::validate_model_metadata;
 use super::semantic::{open_semantic_index, validate_usearch_index};
-use super::semantic_storage::{read_semantic_bytes, validate_semantic_index};
+use super::semantic_storage::validate_semantic_file;
 use crate::storage::parse_jsonl;
 use crate::storage::sha256_hex;
 use crate::{
@@ -80,6 +81,7 @@ pub(crate) fn validate_generation(
     {
         return Err(Error::invalid("Generation profile compatibility mismatch"));
     }
+    validate_model_metadata(&profile)?;
 
     let catalog_path = generation.join(&manifest.catalog_file);
     let catalog_bytes = fs::read(&catalog_path)
@@ -88,6 +90,7 @@ pub(crate) fn validate_generation(
         return Err(Error::invalid("Generation catalog checksum mismatch"));
     }
     let catalog = parse_jsonl::<CatalogRecord>(&catalog_bytes, "catalog.jsonl")?;
+    drop(catalog_bytes);
     if catalog.len() != manifest.passage_count || catalog.len() != manifest.vector_key_count {
         return Err(Error::invalid("Generation catalog count mismatch"));
     }
@@ -130,8 +133,13 @@ pub(crate) fn validate_generation(
     {
         return Err(Error::invalid("Generation catalog alias identity mismatch"));
     }
-    let expected_keys = (1..=catalog.len() as u64).collect::<BTreeSet<_>>();
-    if vector_keys != expected_keys
+    let expected_key_count = catalog.len();
+    // Unique keys with count N and endpoints 1/N prove the set is exactly 1..=N.
+    let vector_keys_are_contiguous = vector_keys.len() == expected_key_count
+        && (expected_key_count == 0
+            || (vector_keys.first().copied() == Some(1)
+                && vector_keys.last().copied() == Some(expected_key_count as u64)));
+    if !vector_keys_are_contiguous
         || page_ids.len() != manifest.page_count
         || alias_ids.len() != manifest.alias_count
     {
@@ -139,6 +147,13 @@ pub(crate) fn validate_generation(
             "Generation catalog key, Page, or alias count mismatch",
         ));
     }
+    drop((
+        passage_ids,
+        page_ids,
+        page_shapes,
+        passage_ordinals,
+        alias_ids,
+    ));
 
     let keyword_path = generation.join(&manifest.keyword_artifact);
     if directory_digest(&keyword_path)? != manifest.keyword_sha256 {
@@ -159,13 +174,14 @@ pub(crate) fn validate_generation(
     if directory_or_file_digest(&semantic_path)? != manifest.semantic_sha256 {
         return Err(Error::invalid("semantic artifact checksum mismatch"));
     }
-    let vector_bytes = fs::read(generation.join(SEMANTIC_VECTOR_ARTIFACT))
-        .map_err(|e| Error::invalid(format!("read semantic vector artifact: {e}")))?;
-    let semantic_index = read_semantic_bytes(&vector_bytes)?;
     let dimensions = profile
         .dimensions
         .ok_or_else(|| Error::invalid("semantic dimensions missing from profile"))?;
-    validate_semantic_index(&semantic_index, &catalog, dimensions)?;
+    let vector_count = validate_semantic_file(
+        &generation.join(SEMANTIC_VECTOR_ARTIFACT),
+        &mut vector_keys,
+        dimensions,
+    )?;
     let usearch_index = open_semantic_index(&semantic_path, &profile)?;
     validate_usearch_index(&usearch_index, &catalog, dimensions, &profile)?;
     let semantic_manifest_bytes = fs::read(generation.join("semantic-manifest.json"))
@@ -175,13 +191,28 @@ pub(crate) fn validate_generation(
     if semantic_evidence.artifact != manifest.semantic_artifact
         || semantic_evidence.artifact_sha256 != manifest.semantic_sha256
         || semantic_evidence.catalog_count != catalog.len()
-        || semantic_evidence.vector_count != semantic_index.vectors.len()
+        || semantic_evidence.vector_count != vector_count
         || semantic_evidence.dimensions != dimensions
+        || semantic_evidence.embedding_fingerprint != manifest.semantic.embedding_fingerprint
+        || !model_metadata_matches(&semantic_evidence, &profile)
+        || !model_metadata_matches(&manifest.semantic, &profile)
         || !semantic_evidence.reopened
     {
         return Err(Error::invalid(
             "semantic evidence does not match persisted artifacts",
         ));
+    }
+    if semantic_evidence
+        .embedding_fingerprint
+        .as_deref()
+        .is_some_and(|fingerprint| {
+            fingerprint.len() != 64
+                || !fingerprint
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return Err(Error::invalid("semantic embedding fingerprint is invalid"));
     }
     if manifest.semantic_count != catalog.len()
         || manifest.semantic.vector_count != catalog.len()
@@ -193,6 +224,24 @@ pub(crate) fn validate_generation(
     }
     verify_checksums(generation)?;
     Ok(manifest)
+}
+
+fn model_metadata_matches(evidence: &SemanticEvidence, profile: &BuildProfile) -> bool {
+    evidence.model_name == profile.model_name
+        && evidence.model_source == profile.model_source
+        && evidence.model_revision == profile.model_revision
+        && evidence.model_license == profile.model_license
+        && evidence.onnx_sha256 == profile.onnx_sha256
+        && evidence.tokenizer_sha256 == profile.tokenizer_sha256
+        && evidence.model_config_sha256 == profile.model_config_sha256
+        && evidence.embedding_backend == profile.embedding_backend
+        && evidence.model_max_tokens == profile.model_max_tokens
+        && evidence.pooling == profile.pooling
+        && evidence.normalization == profile.normalization
+        && evidence.query_instruction == profile.query_instruction
+        && evidence.document_representation == profile.document_representation
+        && profile.dimensions == Some(evidence.dimensions)
+        && evidence.embedding_execution_provider == profile.embedding_execution_provider
 }
 
 fn verify_checksums(generation: &Path) -> Result<(), Error> {
@@ -212,23 +261,79 @@ fn verify_checksums(generation: &Path) -> Result<(), Error> {
         {
             return Err(Error::invalid("invalid Generation checksum path"));
         }
-        let bytes = fs::read(generation.join(relative_path))
+        let actual = super::checksums::file_digest(&generation.join(relative_path))
             .map_err(|e| Error::invalid(format!("read checksummed artifact {relative}: {e}")))?;
-        if sha256_hex(&bytes) != expected || !listed.insert(relative.to_string()) {
+        if actual != expected || !listed.insert(relative.to_string()) {
             return Err(Error::invalid(format!(
                 "Generation checksum mismatch for {relative}"
             )));
         }
     }
-    let mut files = Vec::new();
-    collect_files(generation, generation, &mut files)?;
-    let actual = files
-        .into_iter()
-        .map(|(relative, _)| relative)
-        .filter(|relative| relative != "checksums.sha256")
-        .collect::<BTreeSet<_>>();
+    let mut actual = BTreeSet::new();
+    collect_file_paths(generation, generation, &mut actual)?;
+    actual.remove("checksums.sha256");
     if listed != actual {
         return Err(Error::invalid("Generation checksum coverage mismatch"));
     }
     Ok(())
+}
+
+fn collect_file_paths(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeSet<String>,
+) -> Result<(), Error> {
+    for entry in
+        fs::read_dir(current).map_err(|e| Error::storage(format!("read index directory: {e}")))?
+    {
+        let path = entry
+            .map_err(|e| Error::storage(format!("read index entry: {e}")))?
+            .path();
+        if path.is_dir() {
+            collect_file_paths(root, &path, files)?;
+        } else {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| Error::storage(format!("relative index path: {e}")))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.insert(relative);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SemanticEvidence;
+
+    #[test]
+    fn absent_embedding_provider_is_omitted_for_legacy_manifest_digest() {
+        let evidence: SemanticEvidence = serde_json::from_str(
+            r#"{
+                "schema_version": "scout.semantic.usearch.v1",
+                "backend": "fastembed-usearch",
+                "artifact": "semantic.usearch",
+                "reopen_mode": "restore_view-mmap",
+                "embedding_backend": "fastembed",
+                "dimensions": 384,
+                "catalog_count": 1,
+                "vector_count": 1,
+                "candidate_depth": 1,
+                "query": "test",
+                "query_hit_count": 0,
+                "returned_identities": [],
+                "artifact_bytes": 0,
+                "artifact_sha256": "",
+                "build_duration_ms": 0,
+                "embedding_passages_per_second": 0.0,
+                "memory_observation": "",
+                "reopened": true
+            }"#,
+        )
+        .expect("parse legacy semantic evidence");
+
+        let serialized = serde_json::to_value(evidence).expect("serialize semantic evidence");
+        assert!(serialized.get("embedding_execution_provider").is_none());
+    }
 }

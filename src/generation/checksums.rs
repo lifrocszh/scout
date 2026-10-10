@@ -1,7 +1,23 @@
 use crate::Error;
 use crate::storage::{sha256_hex, write_if_absent};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+
+pub(super) fn file_digest(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
 
 pub(super) fn write_checksums(staging: &Path) -> Result<String, Error> {
     let bytes = checksum_payload(staging)?;

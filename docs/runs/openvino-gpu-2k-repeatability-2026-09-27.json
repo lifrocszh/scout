@@ -1,0 +1,164 @@
+{
+  "schema_version": "scout.openvino-gpu-2k-repeatability.v1",
+  "classification": "2k checkpoint evidence",
+  "frozen_inputs": {
+    "corpus_snapshot_id": "snapshot-4ab6f3b944327df3e89fe29a1b535a52f62d4a1407fc98a472701e929d90d0e9",
+    "corpus_manifest_sha256": "2e3702498d51fda8dce94c2d69b7f9963c0f9653bce9e4bb96a64d8c469384e6",
+    "evaluation_id": "scout-2k-page-64-v2",
+    "query_count": 64,
+    "queries_sha256": "049763f2b69275e0afdfb6e3d21cb94f9edacc374f031eb49ef2ca9e0120bf31",
+    "judgments_sha256": "13e4cd317f8cbc79e76133ec9bc6521d89eedcff2d44fed92dc8043ee56677a8",
+    "judgments_provisional": true,
+    "human_independent_adjudication": false
+  },
+  "runs": [
+    {
+      "run": "Run 11",
+      "evaluation_run_id": "run-1e67bfebd9a518d4eb700573a65496b3fdde2889fffd2c178915485624575bb6",
+      "generation_id": "generation-49490253561adfa44305573404c501c18b473752a3e0794965607e787c3f53f1",
+      "build_profile_sha256": "b348acfbf5aa2ce94d69159da509727ca3b8c44990dcfaee1a24918f51487ee6",
+      "keyword_artifact_sha256": "ebace924b95f253c5e71577d56d9154e79d28be0bdf3ad13f5580b41c2b6026c",
+      "semantic_artifact_sha256": "b14808ff91399b714eb51327ca4e47ad2ffc6e4dafe47ffbefe346b0d986a373",
+      "held_out_gate_passed": true,
+      "current_pointer_manifest_sha256": "abdc7bf2c0fe83f959404786de6b1c25bbbc832fab2f39ecd5a6a28d8512cd8f",
+      "generation_manifest_file_sha256": "f7070140d7a3cd396e42cb9e0970480aeb55f79e79d5e28dd67e96b1bf8fd29e",
+      "catalog_sha256": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235"
+    },
+    {
+      "run": "Run 12",
+      "evaluation_run_id": "run-d294b0ba71358dc7cee3ec1774a60d3ad9ff0316bc73ec24f283cb823fa49eec",
+      "generation_id": "generation-49490253561adfa44305573404c501c18b473752a3e0794965607e787c3f53f1",
+      "build_profile_sha256": "b348acfbf5aa2ce94d69159da509727ca3b8c44990dcfaee1a24918f51487ee6",
+      "keyword_artifact_sha256": "57351779985242d38c9ac8442989ad95a5ee007e6808b3a1882bcf3ccdb39e0a",
+      "semantic_artifact_sha256": "b14808ff91399b714eb51327ca4e47ad2ffc6e4dafe47ffbefe346b0d986a373",
+      "held_out_gate_passed": true,
+      "current_pointer_manifest_sha256": "09e0140c547d2ed3a283cc9a6fba293af42e1e8f3593c0eb4404d82f4ba93d55",
+      "generation_manifest_file_sha256": "326766febd090b11153460fe9b8b71fb6e50a4954fce01f55af9258fdec79acf",
+      "catalog_sha256": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235"
+    },
+    {
+      "run": "Run 13",
+      "evaluation_run_id": "run-ee7f43140ccb2cdd0eaa781ec5e4da725b1ebab1cbb1a8f5a8ab8861f8c56dff",
+      "generation_id": "generation-49490253561adfa44305573404c501c18b473752a3e0794965607e787c3f53f1",
+      "build_profile_sha256": "b348acfbf5aa2ce94d69159da509727ca3b8c44990dcfaee1a24918f51487ee6",
+      "keyword_artifact_sha256": "083b382b538cf63251846e1a97ac5a03ee059acc291e72cf4eaaa566453a08f9",
+      "semantic_artifact_sha256": "b14808ff91399b714eb51327ca4e47ad2ffc6e4dafe47ffbefe346b0d986a373",
+      "held_out_gate_passed": true,
+      "current_pointer_manifest_sha256": "822c97df806df68d9b1ed2ddd6ecd386d069b9991e8ad41df15ed4af4a522262",
+      "generation_manifest_file_sha256": "9a4f232b33d8059fd4633e5e7facd4c5e23c1f7f905ded8569796f8fa9106673",
+      "catalog_sha256": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235"
+    }
+  ],
+  "evaluation_comparison": {
+    "metrics_identical_across_runs": true,
+    "metrics_by_split": {
+      "development": {
+        "hybrid": {
+          "mrr_at_10": 0.6666666666666667,
+          "ndcg_at_10": 0.7202324383928644,
+          "recall_at_100": 0.875
+        },
+        "keyword": {
+          "mrr_at_10": 0.5625,
+          "ndcg_at_10": 0.5788662191964322,
+          "recall_at_100": 0.625
+        },
+        "semantic": {
+          "mrr_at_10": 0.7395833333333333,
+          "ndcg_at_10": 0.7581831095982161,
+          "recall_at_100": 0.8125
+        }
+      },
+      "held-out": {
+        "hybrid": {
+          "mrr_at_10": 0.638888888888889,
+          "ndcg_at_10": 0.6724554456488957,
+          "recall_at_100": 0.7708333333333334
+        },
+        "keyword": {
+          "mrr_at_10": 0.4583333333333333,
+          "ndcg_at_10": 0.4637887397321441,
+          "recall_at_100": 0.4791666666666667
+        },
+        "semantic": {
+          "mrr_at_10": 0.576388888888889,
+          "ndcg_at_10": 0.6160657717261978,
+          "recall_at_100": 0.7291666666666666
+        }
+      }
+    },
+    "held_out_gate": {
+      "hybrid": {
+        "mrr_at_10": 0.638888888888889,
+        "ndcg_at_10": 0.6724554456488957,
+        "recall_at_100": 0.7708333333333334
+      },
+      "hybrid_minus_keyword": {
+        "iterations": 10000,
+        "lower": 0.11491670591675156,
+        "mean": 0.20866670591675152,
+        "upper": 0.3060945013586731
+      },
+      "hybrid_minus_semantic": {
+        "iterations": 10000,
+        "lower": 0.011205985361646261,
+        "mean": 0.05638967392269789,
+        "upper": 0.10301760085722046
+      },
+      "keyword": {
+        "mrr_at_10": 0.4583333333333333,
+        "ndcg_at_10": 0.4637887397321441,
+        "recall_at_100": 0.4791666666666667
+      },
+      "passed": true,
+      "semantic": {
+        "mrr_at_10": 0.576388888888889,
+        "ndcg_at_10": 0.6160657717261978,
+        "recall_at_100": 0.7291666666666666
+      },
+      "thresholds": {
+        "bootstrap_ci_lower": 0.0,
+        "max_mrr_regression": 0.02,
+        "max_recall_regression": 0.02,
+        "ndcg_uplift": 0.03
+      }
+    },
+    "top_10_page_id_matches_against_run_11": {
+      "Run 12": {
+        "keyword": 64,
+        "semantic": 64,
+        "hybrid": 64
+      },
+      "Run 13": {
+        "keyword": 64,
+        "semantic": 64,
+        "hybrid": 64
+      }
+    },
+    "interpretation": "All three frozen-package evaluations produced identical aggregate and split metrics and identical top-10 Page identity lists. Labels are provisional Codex consensus, not independent human evidence."
+  },
+  "artifact_repeatability": {
+    "build_profile_identical": true,
+    "semantic_artifact_identical": true,
+    "keyword_artifact_identical": false,
+    "keyword_artifact_sha256_by_run": {
+      "Run 11": "ebace924b95f253c5e71577d56d9154e79d28be0bdf3ad13f5580b41c2b6026c",
+      "Run 12": "57351779985242d38c9ac8442989ad95a5ee007e6808b3a1882bcf3ccdb39e0a",
+      "Run 13": "083b382b538cf63251846e1a97ac5a03ee059acc291e72cf4eaaa566453a08f9"
+    },
+    "generation_manifest_identical": false,
+    "interpretation": "BGE semantic vectors are byte-identical. Keyword artifacts and Generation manifest digests differ between runs, so this is not byte-for-byte whole-Generation repeatability.",
+    "manifest_hash_note": "current_pointer_manifest_sha256 is the logical digest referenced by CURRENT and Evaluation metadata; generation_manifest_file_sha256 is the raw sealed JSON file SHA-256 locked in the Ticket 31 benchmark plan.",
+    "catalog_identical": true,
+    "catalog_sha256_by_run": {
+      "Run 11": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235",
+      "Run 12": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235",
+      "Run 13": "fd27cf31f344fcfaf02122791aa92b9c05e867d1043be06b72d1cdc7393fb235"
+    }
+  },
+  "scope_limits": [
+    "This is 2k checkpoint evidence, not the 10k scale checkpoint.",
+    "ADR-0001 final MVP performance baseline still requires a real 100,000-Page Corpus.",
+    "No strong relevance-quality claim until independent human judgments are added."
+  ]
+}

@@ -74,7 +74,6 @@ body_boost = 1.0
 candidate_depth = 5
 writer_memory_bytes = 16000000
 worker_count = 1
-model_name = "BAAI/bge-small-en-v1.5"
 model_source = "local"
 model_revision = "fixture-revision"
 model_license = "Apache-2.0"

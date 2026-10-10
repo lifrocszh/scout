@@ -1,17 +1,37 @@
 use super::app::report_error;
+use super::generation::{IndexGeneration, SearchMode};
 use super::observability::Events;
-use super::search::{hybrid_hits, keyword_hits, load_active_generation, semantic_hits_for_query};
 use super::storage::{new_run_id, parse_jsonl, sha256_hex, write_json};
 use super::{
     BTreeMap, BTreeSet, BootstrapInterval, Cli, EVALUATION_BOOTSTRAP_ITERATIONS,
     EVALUATION_BOOTSTRAP_SEED, EVALUATION_DEVELOPMENT_QUERY_COUNT, EVALUATION_HELD_OUT_QUERY_COUNT,
     EVALUATION_INTENTS, EVALUATION_QUERY_COUNT, EVALUATION_SCHEMA, EVALUATION_SOURCES, Error,
-    EvaluationJudgment, EvaluationQuery, EvaluationRanking, HashMap, HashSet, LoadedGeneration,
-    Operation, Ordering, Path, QueryMetrics, Value, fs, json,
+    EvaluationJudgment, EvaluationQuery, EvaluationRanking, HashMap, HashSet, Operation, Ordering,
+    Path, QueryMetrics, Value, fs, json,
 };
 
 type PageGrades = BTreeMap<String, BTreeMap<String, u8>>;
 type NormalizedJudgments = (PageGrades, Value);
+
+pub(crate) fn corpus_source_id(source: Option<&str>) -> Option<&str> {
+    source.map(|source| match source {
+        "rust-docs" => "rust",
+        "python-docs" => "python",
+        "kubernetes-docs" => "kubernetes",
+        "postgres-docs" => "postgresql",
+        source => source,
+    })
+}
+
+fn evaluation_source_stratum(source: &str) -> Option<&str> {
+    match source {
+        "rust-docs" | "rust" => Some("rust-docs"),
+        "python-docs" | "python" => Some("python-docs"),
+        "kubernetes-docs" | "kubernetes" => Some("kubernetes-docs"),
+        "postgres-docs" | "postgresql" => Some("postgres-docs"),
+        _ => None,
+    }
+}
 
 pub(crate) fn run_evaluate(cli: &Cli) -> i32 {
     let Operation::Evaluate { package } = &cli.operation else {
@@ -116,9 +136,15 @@ pub(crate) fn load_evaluation_metadata(package: &Path) -> Result<Value, Error> {
             ));
         }
     }
-    if judges.len() < 2 {
+    let owner_reviewed_llm_review = metadata
+        .get("judgment_provenance")
+        .and_then(Value::as_object)
+        .and_then(|provenance| provenance.get("owner_reviewed_llm_review"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if judges.is_empty() || (judges.len() < 2 && !owner_reviewed_llm_review) {
         return Err(Error::invalid(
-            "evaluation metadata must record at least two independent judges",
+            "evaluation metadata must record two judges or one owner-reviewed LLM reviewer",
         ));
     }
     let adjudication = metadata_string(&metadata, &["adjudication", "adjudication_method"])
@@ -230,6 +256,12 @@ pub(crate) fn normalize_evaluation_judgments(
                 .or_else(|| row.judge_id.is_none().then_some(row.grade).flatten())
         };
         if row.judge_id.is_none() && !row.judge_grades.is_empty() && final_grade.is_some() {
+            adjudicated_rows += 1;
+        }
+        if row.judge_id.is_none()
+            && row.judge_grades.is_empty()
+            && row.adjudicated_grade.is_some()
+        {
             adjudicated_rows += 1;
         }
         if let Some(grade) = final_grade
@@ -346,11 +378,12 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
         ));
     }
     let generation = if ranking_bytes.is_none() {
-        Some(load_active_generation(data_dir)?)
+        Some(IndexGeneration::at(data_dir).open_active()?)
     } else {
         None
     };
     let mut per_mode = BTreeMap::<String, Vec<QueryMetrics>>::new();
+    let mut query_details = Vec::with_capacity(queries.len());
     for query in &queries {
         let query_judgments = judgments
             .get(&query.query_id)
@@ -361,29 +394,125 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
                 query.query_id
             )));
         }
-        let ranking = if let Some(ranking) = supplied.get(&query.query_id) {
-            vec![
-                ranking.keyword.clone(),
-                ranking.semantic.clone(),
-                ranking.hybrid.clone(),
-            ]
+        let (ranking, page_results) = if let Some(ranking) = supplied.get(&query.query_id) {
+            (
+                vec![
+                    ranking.keyword.clone(),
+                    ranking.semantic.clone(),
+                    ranking.hybrid.clone(),
+                ],
+                None,
+            )
         } else {
             let generation = generation
                 .as_ref()
                 .expect("generated when no supplied rankings");
-            vec![
-                ranked_page_ids(generation, "keyword", &query.query, Some(&query.source))?,
-                ranked_page_ids(generation, "semantic", &query.query, Some(&query.source))?,
-                ranked_page_ids(generation, "hybrid", &query.query, Some(&query.source))?,
-            ]
+            let page_results = vec![
+                generation.search(super::generation::PageQuery {
+                    query: &query.query,
+                    mode: SearchMode::Keyword,
+                    source: corpus_source_id(Some(&query.source)),
+                    limit: None,
+                })?,
+                generation.search(super::generation::PageQuery {
+                    query: &query.query,
+                    mode: SearchMode::Semantic,
+                    source: corpus_source_id(Some(&query.source)),
+                    limit: None,
+                })?,
+                generation.search(super::generation::PageQuery {
+                    query: &query.query,
+                    mode: SearchMode::Hybrid,
+                    source: corpus_source_id(Some(&query.source)),
+                    limit: None,
+                })?,
+            ];
+            let ranking = page_results
+                .iter()
+                .map(|results| {
+                    results
+                        .pages
+                        .iter()
+                        .map(|page| page.page_id.clone())
+                        .collect()
+                })
+                .collect();
+            (ranking, Some(page_results))
         };
-        for (mode, ids) in ["keyword", "semantic", "hybrid"].into_iter().zip(ranking) {
+        for (mode, ids) in ["keyword", "semantic", "hybrid"].into_iter().zip(&ranking) {
             let refs = ids.iter().map(String::as_str).collect::<Vec<_>>();
             per_mode
                 .entry(mode.into())
                 .or_default()
                 .push(compute_query_metrics(&refs, query_judgments)?);
         }
+        let rank_by_mode = ["keyword", "semantic", "hybrid"]
+            .into_iter()
+            .enumerate()
+            .map(|(mode_index, mode)| {
+                let ranks = query_judgments
+                    .keys()
+                    .map(|page_id| {
+                        (
+                            page_id.clone(),
+                            ranking[mode_index]
+                                .iter()
+                                .position(|result_id| result_id == page_id)
+                                .map(|rank| rank + 1),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (mode.to_owned(), ranks)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let judged_pages = query_judgments
+            .iter()
+            .map(|(page_id, grade)| {
+                json!({
+                    "page_id": page_id,
+                    "grade": grade,
+                    "target_ranks": {
+                        "keyword": rank_by_mode["keyword"][page_id],
+                        "semantic": rank_by_mode["semantic"][page_id],
+                        "hybrid": rank_by_mode["hybrid"][page_id],
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let mode_results = ["keyword", "semantic", "hybrid"]
+            .into_iter()
+            .enumerate()
+            .map(|(mode_index, mode)| {
+                let top_10_page_ids = ranking[mode_index].iter().take(10).collect::<Vec<_>>();
+                let top_10_page_results = page_results.as_ref().map(|results| {
+                    results[mode_index]
+                        .pages
+                        .iter()
+                        .take(10)
+                        .collect::<Vec<_>>()
+                });
+                let generation_id = page_results
+                    .as_ref()
+                    .map(|results| &results[mode_index].generation.generation_id);
+                (
+                    mode.to_owned(),
+                    json!({
+                        "generation_id": generation_id,
+                        "top_10_page_ids": top_10_page_ids,
+                        "top_10_page_results": top_10_page_results,
+                    }),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        query_details.push(json!({
+            "query_id": query.query_id,
+            "query": query.query,
+            "split": query.split,
+            "source": query.source,
+            "intent": query.intent,
+            "judged_pages": judged_pages,
+            "modes": mode_results,
+        }));
     }
     let aggregates = per_mode
         .iter()
@@ -505,6 +634,7 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
         "development_query_count": queries.iter().filter(|query| query.split == "development").count(),
         "held_out_query_count": held_out.len(),
         "query_strata": query_strata,
+        "query_details": query_details,
         "metrics": aggregates,
         "metrics_by_split": metrics_by_split,
         "judgment_protocol": judgment_protocol,
@@ -546,36 +676,6 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
     )
 }
 
-pub(crate) fn ranked_page_ids(
-    generation: &LoadedGeneration,
-    mode: &str,
-    query: &str,
-    source: Option<&str>,
-) -> Result<Vec<String>, Error> {
-    let hits = match mode {
-        "keyword" => keyword_hits(generation, query, source)?,
-        "semantic" => semantic_hits_for_query(generation, query, source)?,
-        "hybrid" => hybrid_hits(generation, query, source)?,
-        _ => return Err(Error::invalid(format!("unknown search mode {mode:?}"))),
-    };
-    let mut pages = Vec::<(f32, String, String)>::new();
-    let mut seen = HashSet::new();
-    for (score, record) in hits {
-        if seen.insert(record.page_id.clone()) {
-            pages.push((score, record.passage_id.clone(), record.page_id.clone()));
-        }
-    }
-    pages.sort_by(|left, right| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-    Ok(pages.into_iter().map(|(_, _, page_id)| page_id).collect())
-}
-
 pub(crate) fn validate_evaluation_queries(queries: &[EvaluationQuery]) -> Result<(), Error> {
     if queries.len() != EVALUATION_QUERY_COUNT {
         return Err(Error::invalid(format!(
@@ -597,17 +697,20 @@ pub(crate) fn validate_evaluation_queries(queries: &[EvaluationQuery]) -> Result
                 "evaluation query IDs and text must be nonempty and unique",
             ));
         }
-        if !EVALUATION_SOURCES.contains(&query.source.as_str())
-            || !EVALUATION_INTENTS.contains(&query.intent.as_str())
-        {
+        let Some(source_stratum) = evaluation_source_stratum(&query.source) else {
+            return Err(Error::invalid(
+                "evaluation query source or intent is outside frozen strata",
+            ));
+        };
+        if !EVALUATION_INTENTS.contains(&query.intent.as_str()) {
             return Err(Error::invalid(
                 "evaluation query source or intent is outside frozen strata",
             ));
         }
-        *source_counts.entry(query.source.clone()).or_default() += 1;
+        *source_counts.entry(source_stratum.into()).or_default() += 1;
         *intent_counts.entry(query.intent.clone()).or_default() += 1;
         *strata_counts
-            .entry((query.source.clone(), query.intent.clone()))
+            .entry((source_stratum.into(), query.intent.clone()))
             .or_default() += 1;
         match query.split.as_str() {
             "development" => development += 1,

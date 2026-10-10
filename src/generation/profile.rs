@@ -1,6 +1,11 @@
+use super::embeddings::fastembed_model_spec;
 use crate::{BuildProfile, Error, MAX_MODEL_PASSAGE_TOKENS, RawBuildProfile};
 
-pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<BuildProfile, Error> {
+pub(super) fn build_profile(
+    raw: RawBuildProfile,
+    corpus_id: &str,
+    corpus_model: &str,
+) -> Result<BuildProfile, Error> {
     macro_rules! required {
         ($field:ident) => {
             raw.$field.ok_or_else(|| {
@@ -45,7 +50,12 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
     let candidate_depth = required!(candidate_depth);
     let writer_memory_bytes = required!(writer_memory_bytes);
     let worker_count = required!(worker_count);
-    let model_name = required!(model_name);
+    if raw.model_name.is_some() {
+        return Err(Error::invalid(
+            "model_name must be selected in the crawl config before crawling, not in the index profile",
+        ));
+    }
+    let model_name = corpus_model.to_string();
     let model_source = required!(model_source);
     let model_revision = required!(model_revision);
     let model_license = required!(model_license);
@@ -63,6 +73,9 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
     let embedding_batch_size = required!(embedding_batch_size);
     let embedding_workers = required!(embedding_workers);
     let embedding_intra_op_threads = required!(embedding_intra_op_threads);
+    let embedding_execution_provider = raw
+        .embedding_execution_provider
+        .unwrap_or_else(|| "cpu".into());
     let metric = required!(metric);
     let scalar_kind = required!(scalar_kind);
     let connectivity = required!(connectivity);
@@ -107,7 +120,26 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
             "embedding_backend must be fastembed or deterministic",
         ));
     }
-    if pooling != "cls"
+    if !matches!(
+        embedding_execution_provider.as_str(),
+        "cpu" | "openvino_gpu"
+    ) {
+        return Err(Error::invalid(
+            "embedding_execution_provider must be cpu or openvino_gpu",
+        ));
+    }
+    if embedding_backend == "deterministic" && embedding_execution_provider != "cpu" {
+        return Err(Error::invalid(
+            "deterministic embedding_backend only supports embedding_execution_provider=cpu",
+        ));
+    }
+    #[cfg(not(feature = "openvino-gpu"))]
+    if embedding_execution_provider == "openvino_gpu" {
+        return Err(Error::invalid(
+            "embedding_execution_provider=openvino_gpu requires the openvino-gpu Cargo feature and an OpenVINO-enabled ONNX Runtime",
+        ));
+    }
+    if !matches!(pooling.as_str(), "cls" | "mean")
         || normalization != "l2"
         || quantization != "none"
         || metric != "cosine"
@@ -116,10 +148,10 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
         || page_aggregation != "max"
     {
         return Err(Error::invalid(
-            "build profile must use cls/l2/none/cosine/f32/rrf/max MVP settings",
+            "build profile must use model-supported pooling/l2/none/cosine/f32/rrf/max MVP settings",
         ));
     }
-    Ok(BuildProfile {
+    let profile = BuildProfile {
         schema_version,
         snapshot_id: corpus_id.into(),
         extraction_schema,
@@ -153,6 +185,7 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
         embedding_batch_size: Some(embedding_batch_size),
         embedding_workers: Some(embedding_workers),
         embedding_intra_op_threads: Some(embedding_intra_op_threads),
+        embedding_execution_provider: Some(embedding_execution_provider),
         metric: Some(metric),
         scalar_kind: Some(scalar_kind),
         connectivity: Some(connectivity),
@@ -165,5 +198,39 @@ pub(super) fn build_profile(raw: RawBuildProfile, corpus_id: &str) -> Result<Bui
         rrf_k: Some(rrf_k),
         page_aggregation: Some(page_aggregation),
         snippet_window: Some(snippet_window),
-    })
+    };
+    validate_model_metadata(&profile)?;
+    Ok(profile)
+}
+
+pub(super) fn validate_model_metadata(profile: &BuildProfile) -> Result<(), Error> {
+    if profile.embedding_backend != "fastembed" {
+        return Ok(());
+    }
+    let spec = fastembed_model_spec(profile.model_name.as_deref().unwrap_or_default())?;
+    let sha256_fields = [
+        profile.onnx_sha256.as_deref(),
+        profile.tokenizer_sha256.as_deref(),
+        profile.model_config_sha256.as_deref(),
+    ];
+    if profile.model_source.as_deref() != Some(spec.source)
+        || profile.model_license.as_deref() != Some(spec.license)
+        || profile.pooling.as_deref() != Some(spec.pooling)
+        || profile.dimensions != Some(spec.dimensions)
+        || profile
+            .model_max_tokens
+            .is_none_or(|limit| limit > spec.max_tokens)
+        || profile.query_instruction.as_deref() != Some(spec.query_instruction)
+        || profile.model_revision.as_deref().is_none_or(str::is_empty)
+        || sha256_fields.into_iter().any(|value| {
+            value.is_none_or(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        })
+    {
+        return Err(Error::invalid(
+            "FastEmbed model metadata does not match the selected model",
+        ));
+    }
+    Ok(())
 }

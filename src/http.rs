@@ -1,13 +1,18 @@
 use super::app::report_error;
-use super::generation::recover_generation;
-use super::observability::Events;
-use super::search::{hybrid_hits, keyword_hits, load_active_generation, semantic_hits_for_query};
-use super::storage::{new_run_id, sha256_hex, trim_snippet};
-use super::{
-    Arc, BTreeMap, CatalogRecord, Cli, Duration, Error, File, Mutex, OpenOptions, Operation,
-    Ordering, PageSearchResult, Path, Read, SearchRequest, SocketAddr, TcpListener, TcpStream, Utc,
-    Value, Write, io, json, thread,
+use super::generation::{
+    ActiveGeneration, IndexGeneration, LifecycleAction, PageQuery, SearchMode, read_pointer,
 };
+use super::observability::Events;
+use super::storage::{new_run_id, sha256_hex};
+use super::{
+    Arc, Cli, Duration, Error, File, Mutex, OpenOptions, Operation, Read, SearchRequest,
+    SocketAddr, TcpListener, TcpStream, Utc, Value, Write, io, json, thread,
+};
+use std::sync::mpsc::{self, TrySendError};
+
+const SERVE_ACTIVE_WORKERS: usize = 1;
+const SERVE_CONNECTION_QUEUE_CAPACITY: usize = 1;
+const SERVE_OVERLOAD_REQUEST_READ_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub(crate) fn run_serve(cli: &Cli) -> i32 {
     let Operation::Serve { bind, access_log } = &cli.operation else {
@@ -48,7 +53,13 @@ pub(crate) fn run_serve(cli: &Cli) -> i32 {
             return error.exit_code;
         }
     };
-    let ready = recover_generation(&cli.data_dir).is_ok();
+    let ready = IndexGeneration::at(&cli.data_dir)
+        .lifecycle(LifecycleAction::Recover)
+        .is_ok();
+    let state = Arc::new(ServingState {
+        data_dir: cli.data_dir.clone(),
+        active_generation: Mutex::new(None),
+    });
     events.emit(
         "serve.started",
         "success",
@@ -59,18 +70,108 @@ pub(crate) fn run_serve(cli: &Cli) -> i32 {
         .map(|address| address.to_string())
         .unwrap_or_else(|_| bind.clone());
     println!("scout serve listening on http://{bound}");
+    let worker_state = state.clone();
+    let worker_access = access.clone();
+    let (connection_tx, connection_rx) =
+        mpsc::sync_channel::<TcpStream>(SERVE_CONNECTION_QUEUE_CAPACITY);
+    if let Err(error) = thread::Builder::new()
+        .name("scout-http-worker-0".into())
+        .spawn(move || {
+            for stream in connection_rx {
+                handle_http_connection(stream, &worker_state, worker_access.clone());
+            }
+        })
+    {
+        let error = Error::storage(format!("start HTTP worker: {error}"));
+        report_error(cli, &error);
+        return error.exit_code;
+    }
     for incoming in listener.incoming() {
         let Ok(stream) = incoming else { continue };
-        let data_dir = cli.data_dir.clone();
-        let access = access.clone();
-        thread::spawn(move || handle_http_connection(stream, &data_dir, access));
+        match connection_tx.try_send(stream) {
+            Ok(()) => {}
+            Err(TrySendError::Full(stream) | TrySendError::Disconnected(stream)) => {
+                reject_overloaded(stream, &state.data_dir, access.clone());
+            }
+        }
     }
     0
 }
 
+fn reject_overloaded(
+    mut stream: TcpStream,
+    data_dir: &std::path::Path,
+    access_log: Option<Arc<Mutex<Option<File>>>>,
+) {
+    let peer = stream.peer_addr().ok();
+    // Consume a complete, promptly delivered request before closing the socket.
+    // This keeps TCP from resetting a client that is still sending its small body.
+    let _ = read_http_request_with_timeout(&mut stream, SERVE_OVERLOAD_REQUEST_READ_TIMEOUT);
+    let request_id = new_run_id();
+    let error = Error {
+        code: "overloaded".into(),
+        message: "serving capacity reached; retry later".into(),
+        exit_code: 1,
+    };
+    let body =
+        serde_json::to_vec(&error_envelope(&error, &request_id)).unwrap_or_else(|_| b"{}".to_vec());
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let _ = write_http_response(&mut stream, 503, &body);
+    write_access_log(access_log, peer, "UNKNOWN", "-", 503, body.len());
+    if let Ok(mut events) = Events::open(data_dir, &request_id, "serve") {
+        events.emit(
+            "serve.request_rejected",
+            "failure",
+            json!({
+                "request_id": request_id,
+                "reason": "capacity_reached",
+                "status": 503,
+                "active_workers": SERVE_ACTIVE_WORKERS,
+                "queued_connections": SERVE_CONNECTION_QUEUE_CAPACITY,
+            }),
+        );
+    }
+}
+
+struct ServingState {
+    data_dir: std::path::PathBuf,
+    active_generation: Mutex<Option<CachedGeneration>>,
+}
+
+struct CachedGeneration {
+    generation_id: String,
+    manifest_sha256: String,
+    generation: Arc<ActiveGeneration>,
+}
+
+impl ServingState {
+    fn active_generation(&self) -> Result<Arc<ActiveGeneration>, Error> {
+        let pointer = read_pointer(&self.data_dir, "CURRENT").ok().flatten();
+        let mut cached = self
+            .active_generation
+            .lock()
+            .map_err(|_| Error::storage("serving Generation lock poisoned"))?;
+        if let (Some(pointer), Some(cached)) = (pointer.as_ref(), cached.as_ref())
+            && pointer.generation_id == cached.generation_id
+            && pointer.manifest_sha256 == cached.manifest_sha256
+        {
+            return Ok(cached.generation.clone());
+        }
+
+        let generation = Arc::new(IndexGeneration::at(&self.data_dir).open_active()?);
+        let info = generation.info();
+        *cached = Some(CachedGeneration {
+            generation_id: info.generation_id,
+            manifest_sha256: info.manifest_sha256,
+            generation: generation.clone(),
+        });
+        Ok(generation)
+    }
+}
+
 fn handle_http_connection(
     mut stream: TcpStream,
-    data_dir: &Path,
+    state: &ServingState,
     access_log: Option<Arc<Mutex<Option<File>>>>,
 ) {
     let peer = stream.peer_addr().ok();
@@ -82,9 +183,9 @@ fn handle_http_connection(
     let request_id = new_run_id();
     let result = match (method.as_str(), path.as_str()) {
         ("GET", "/v1/healthz") => Ok(json!({"status": "ok"})),
-        ("GET", "/v1/readyz") => ready_response(data_dir),
-        ("GET", "/v1/generation") => generation_response(data_dir),
-        ("POST", "/v1/search") => search_response(data_dir, &body),
+        ("GET", "/v1/readyz") => ready_response(state),
+        ("GET", "/v1/generation") => generation_response(state),
+        ("POST", "/v1/search") => search_response(state, &body),
         _ => Err(Error {
             code: "not_found".into(),
             message: "route not found".into(),
@@ -101,7 +202,7 @@ fn handle_http_connection(
     let body_bytes = serde_json::to_vec(&response_body).unwrap_or_else(|_| b"{}".to_vec());
     let _ = write_http_response(&mut stream, status, &body_bytes);
     write_access_log(access_log, peer, &method, &target, status, body_bytes.len());
-    if let Ok(mut events) = Events::open(data_dir, &request_id, "serve") {
+    if let Ok(mut events) = Events::open(&state.data_dir, &request_id, "serve") {
         let event = if path == "/v1/search" {
             "search.completed"
         } else {
@@ -122,26 +223,28 @@ fn handle_http_connection(
     }
 }
 
-fn ready_response(data_dir: &Path) -> Result<Value, Error> {
-    let generation = load_active_generation(data_dir)?;
-    Ok(json!({"status": "ready", "generation_id": generation.manifest.generation_id}))
+fn ready_response(state: &ServingState) -> Result<Value, Error> {
+    let generation = state.active_generation()?;
+    let info = generation.info();
+    Ok(json!({"status": "ready", "generation_id": info.generation_id}))
 }
 
-fn generation_response(data_dir: &Path) -> Result<Value, Error> {
-    let generation = load_active_generation(data_dir)?;
+fn generation_response(state: &ServingState) -> Result<Value, Error> {
+    let generation = state.active_generation()?;
+    let info = generation.info();
     Ok(json!({
         "status": "ready",
-        "generation_id": generation.manifest.generation_id,
-        "manifest_sha256": generation.manifest.manifest_sha256,
-        "corpus_snapshot_id": generation.manifest.corpus_snapshot_id,
-        "page_count": generation.manifest.page_count,
-        "passage_count": generation.manifest.passage_count,
-        "keyword_count": generation.manifest.keyword_count,
-        "semantic_count": generation.manifest.semantic_count,
+        "generation_id": info.generation_id,
+        "manifest_sha256": info.manifest_sha256,
+        "corpus_snapshot_id": info.corpus_snapshot_id,
+        "page_count": info.page_count,
+        "passage_count": info.passage_count,
+        "keyword_count": info.keyword_count,
+        "semantic_count": info.semantic_count,
     }))
 }
 
-fn search_response(data_dir: &Path, body: &[u8]) -> Result<Value, Error> {
+fn search_response(state: &ServingState, body: &[u8]) -> Result<Value, Error> {
     let request: SearchRequest = serde_json::from_slice(body).map_err(|_| Error {
         code: "invalid_request".into(),
         message: "request body must be valid JSON".into(),
@@ -156,13 +259,11 @@ fn search_response(data_dir: &Path, body: &[u8]) -> Result<Value, Error> {
         });
     }
     let mode = request.mode.as_deref().unwrap_or("hybrid");
-    if !matches!(mode, "keyword" | "semantic" | "hybrid") {
-        return Err(Error {
-            code: "invalid_request".into(),
-            message: "mode must be keyword, semantic, or hybrid".into(),
-            exit_code: 2,
-        });
-    }
+    let mode = SearchMode::parse(mode).map_err(|_| Error {
+        code: "invalid_request".into(),
+        message: "mode must be keyword, semantic, or hybrid".into(),
+        exit_code: 2,
+    })?;
     let limit = request.limit.unwrap_or(10);
     if !(1..=100).contains(&limit) {
         return Err(Error {
@@ -171,61 +272,24 @@ fn search_response(data_dir: &Path, body: &[u8]) -> Result<Value, Error> {
             exit_code: 2,
         });
     }
-    let generation = load_active_generation(data_dir)?;
-    let snippet_window = generation
-        .profile
-        .snippet_window
-        .ok_or_else(|| Error::not_ready("snippet window missing from Generation profile"))?;
-    let mut hits = match mode {
-        "keyword" => keyword_hits(&generation, query, request.source.as_deref())?,
-        "semantic" => semantic_hits_for_query(&generation, query, request.source.as_deref())?,
-        "hybrid" => hybrid_hits(&generation, query, request.source.as_deref())?,
-        _ => unreachable!("validated search mode"),
-    };
-    let mut pages = BTreeMap::<String, (f32, &CatalogRecord)>::new();
-    for (score, record) in hits.drain(..) {
-        let entry = pages
-            .entry(record.page_id.clone())
-            .or_insert((score, record));
-        if score > entry.0 || (score == entry.0 && record.passage_id < entry.1.passage_id) {
-            *entry = (score, record);
-        }
-    }
-    let mut results = pages
-        .into_iter()
-        .map(|(page_id, (score, record))| PageSearchResult {
-            rank: 0,
-            page_id,
-            source_id: record.source_id.clone(),
-            url: record.normalized_final_url.clone(),
-            title: record.title.clone(),
-            score,
-            winning_passage_id: record.passage_id.clone(),
-            heading_path: record.heading_path.clone(),
-            snippet: trim_snippet(&record.text, snippet_window),
-        })
-        .collect::<Vec<_>>();
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.winning_passage_id.cmp(&b.winning_passage_id))
-            .then_with(|| a.page_id.cmp(&b.page_id))
-    });
-    results.truncate(limit);
-    for (index, result) in results.iter_mut().enumerate() {
-        result.rank = index + 1;
-    }
+    let generation = state.active_generation()?;
+    let results = generation.search(PageQuery {
+        query,
+        mode,
+        source: request.source.as_deref(),
+        limit: Some(limit),
+    })?;
+    let info = results.generation;
     Ok(json!({
         "schema_version": "scout.search.v1",
         "generation": {
-            "id": generation.manifest.generation_id,
-            "corpus_snapshot_id": generation.manifest.corpus_snapshot_id,
-            "manifest_sha256": generation.manifest.manifest_sha256,
+            "id": info.generation_id,
+            "corpus_snapshot_id": info.corpus_snapshot_id,
+            "manifest_sha256": info.manifest_sha256,
         },
-        "generation_id": generation.manifest.generation_id,
-        "mode": mode,
-        "results": results,
+        "generation_id": info.generation_id,
+        "mode": results.mode.as_str(),
+        "results": results.pages,
     }))
 }
 
@@ -238,6 +302,7 @@ fn http_status(code: &str) -> u16 {
         "invalid_request" => 400,
         "not_found" => 404,
         "not_ready" => 503,
+        "overloaded" => 503,
         "conflict" => 409,
         "integrity_error" => 503,
         _ => 500,
@@ -247,15 +312,19 @@ fn http_status(code: &str) -> u16 {
 pub(crate) fn read_http_request(
     stream: &mut TcpStream,
 ) -> Result<(String, String, Vec<u8>), Error> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| Error::fetch(e.to_string()))?;
+    read_http_request_with_timeout(stream, Duration::from_secs(5))
+}
+
+fn read_http_request_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> Result<(String, String, Vec<u8>), Error> {
+    let deadline = std::time::Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut header_end = None;
     let mut chunk = [0_u8; 8192];
     while header_end.is_none() && bytes.len() < 1_048_576 {
-        let count = stream
-            .read(&mut chunk)
+        let count = read_request_chunk(stream, &mut chunk, deadline)
             .map_err(|e| Error::fetch(e.to_string()))?;
         if count == 0 {
             break;
@@ -289,8 +358,7 @@ pub(crate) fn read_http_request(
         return Err(Error::invalid("request body too large"));
     }
     while bytes.len() < header_end + content_length {
-        let count = stream
-            .read(&mut chunk)
+        let count = read_request_chunk(stream, &mut chunk, deadline)
             .map_err(|e| Error::fetch(e.to_string()))?;
         if count == 0 {
             break;
@@ -305,6 +373,22 @@ pub(crate) fn read_http_request(
         target,
         bytes[header_end..header_end + content_length].to_vec(),
     ))
+}
+
+fn read_request_chunk(
+    stream: &mut TcpStream,
+    chunk: &mut [u8],
+    deadline: std::time::Instant,
+) -> io::Result<usize> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "HTTP request deadline exceeded",
+        ));
+    }
+    stream.set_read_timeout(Some(remaining))?;
+    stream.read(chunk)
 }
 
 fn write_http_response(stream: &mut TcpStream, status: u16, body: &[u8]) -> io::Result<()> {
