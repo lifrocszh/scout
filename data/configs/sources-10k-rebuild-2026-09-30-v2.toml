@@ -1,0 +1,84 @@
+# New reconstructed 10k policy revision; this does not reproduce the deleted
+# historical config. Source identity, origin, license, and crawl caps carry
+# forward from v1. The 500-page minimum per source remains an inherited floor
+# from sources-2k.toml, not a recovered historical 10k quota.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
+page_target = 10000
+embedding_model = "BAAI/bge-small-en-v1.5"
+
+# Recovered Ticket26 operational caps; body and retry settings inherit from
+# the surviving 2k policy.
+global_concurrency = 8
+origin_concurrency = 1
+min_start_spacing_ms = 500
+max_frontier = 100000
+max_decoded_body_bytes = 8388608
+max_extraction_bytes = 8388608
+max_extraction_millis = 5000
+request_timeout_seconds = 30
+max_attempts = 2
+retry_backoff_ms = 1000
+retry_max_delay_ms = 10000
+max_total_attempts = 40000
+max_duration_seconds = 172800
+robots_cache_seconds = 86400
+max_passage_tokens = 384
+
+[[sources]]
+source_id = "rust"
+name = "Rust official documentation"
+seeds = [
+  "https://doc.rust-lang.org/book/",
+  "https://doc.rust-lang.org/std/",
+  "https://doc.rust-lang.org/reference/",
+]
+allowed_origins = ["https://doc.rust-lang.org"]
+path_prefixes = [
+  "/book/",
+  "/reference/",
+  "/std/",
+  "/cargo/",
+  "/edition-guide/",
+  "/nomicon/",
+  "/embedded-book/",
+  "/rust-by-example/",
+]
+license_urls = ["https://www.rust-lang.org/policies/licenses"]
+minimum_page_quota = 500
+
+[[sources]]
+source_id = "python"
+name = "Python 3 documentation"
+seeds = [
+  "https://docs.python.org/3/",
+  "https://docs.python.org/3.10/",
+  "https://docs.python.org/3.11/",
+  "https://docs.python.org/3.12/",
+  "https://docs.python.org/3.13/",
+  "https://docs.python.org/3.14/",
+]
+allowed_origins = ["https://docs.python.org"]
+path_prefixes = ["/3/", "/3.10/", "/3.11/", "/3.12/", "/3.13/", "/3.14/"]
+license_urls = ["https://docs.python.org/3/license.html"]
+minimum_page_quota = 500
+
+[[sources]]
+source_id = "kubernetes"
+name = "Kubernetes documentation"
+seeds = ["https://kubernetes.io/docs/"]
+allowed_origins = ["https://kubernetes.io"]
+path_prefixes = ["/docs/"]
+license_urls = ["https://github.com/kubernetes/website/blob/main/LICENSE"]
+minimum_page_quota = 500
+
+[[sources]]
+source_id = "postgresql"
+name = "PostgreSQL documentation"
+seeds = ["https://www.postgresql.org/docs/current/"]
+allowed_origins = ["https://www.postgresql.org"]
+path_prefixes = ["/docs/"]
+deny_path_prefixes = ["/docs/devel/"]
+license_urls = ["https://www.postgresql.org/about/licence/"]
+minimum_page_quota = 500

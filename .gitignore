@@ -1,6 +1,12 @@
 /target/
 /.scratch/
-/data/
+/data/*
+!/data/configs/
+/data/configs/*
+!/data/configs/*.toml
+!/data/configs/archive/
+/data/configs/archive/*
+!/data/configs/archive/*.toml
 
 # Local runtime artifacts
 *.log
@@ -18,3 +24,10 @@
 # Python caches
 __pycache__/
 *.py[cod]
+
+# Run artifacts are local evidence; keep the human-readable reports and configs
+# versionable without accidentally adding large generated datasets.
+/docs/runs/**
+!/docs/runs/**/
+!/docs/runs/**/*.md
+!/docs/runs/**/*.toml
