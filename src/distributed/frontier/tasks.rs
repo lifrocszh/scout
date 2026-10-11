@@ -9,6 +9,25 @@ use ::url::Url;
 use std::time::Duration;
 
 impl FrontierStore {
+    pub(crate) fn live_leased_task_count_excluding(
+        &mut self,
+        run_id: &str,
+        excluded_source_ids: &[String],
+    ) -> Result<usize, Error> {
+        let count: i64 = self
+            .client
+            .query_one(
+                "SELECT count(*) FROM scout_crawl_tasks
+                 WHERE crawl_run_id=$1 AND status='leased'
+                   AND lease_deadline > clock_timestamp()
+                   AND NOT (source_id = ANY($2::TEXT[]))",
+                &[&run_id, &excluded_source_ids],
+            )
+            .map_err(|error| Error::storage(format!("count live leased crawl tasks: {error}")))?
+            .get(0);
+        usize::try_from(count).map_err(|_| Error::storage("live task count does not fit memory"))
+    }
+
     pub(crate) fn mark_run_failed(&mut self, run_id: &str) -> Result<(), Error> {
         self.client
             .execute(

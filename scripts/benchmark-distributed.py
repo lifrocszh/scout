@@ -13,6 +13,7 @@ import os
 import pathlib
 import platform
 import signal
+import shutil
 import socket
 import statistics
 import subprocess
@@ -379,8 +380,10 @@ def run_once(args, config_path, count, repetition, workload, fixture=None):
         start = time.monotonic()
         workers = [launch(f"worker-{number}", [str(args.binary), "worker", "--coordinator", f"http://127.0.0.1:{port}",
                           "--data-dir", str(path), "--worker-id", f"benchmark-worker-{number}"],
-                          {**os.environ, "SCOUT_DISTRIBUTED_METRICS": "1"}) for number in range(1, count + 1)]
-        deadline = time.monotonic() + config["max_duration_seconds"] + 30
+                          {**{key: value for key, value in os.environ.items() if key not in ("SCOUT_DATABASE_URL", "SCOUT_TEST_DATABASE_URL")},
+                           "SCOUT_DISTRIBUTED_METRICS": "1",
+                           "SCOUT_BENCHMARK_WORKER_CONCURRENCY": str(getattr(args, "worker_concurrency", 1))}) for number in range(1, count + 1)]
+        deadline = time.monotonic() + min(config["max_duration_seconds"], getattr(args, "max_run_seconds", config["max_duration_seconds"])) + 30
         while any(worker.poll() is None for worker in workers):
             assert coordinator.poll() is None, "coordinator exited; inspect stderr"
             assert watcher.poll() is None, "PostgreSQL observer exited early; inspect samples"
@@ -410,7 +413,7 @@ def run_once(args, config_path, count, repetition, workload, fixture=None):
         if workload != "live":
             assert materialized.returncode == 0, "materialization failed; inspect stderr"
         save(path / "metadata.json", {"run_id": run, "workload": workload, "worker_count": count,
-             "repetition": repetition, "config_file_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+             "worker_concurrency": getattr(args, "worker_concurrency", 1), "repetition": repetition, "config_file_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
              "process_ids": processes, "duration_seconds": duration,
              "measurement_end_unix": ended_unix, "measurement_start_unix": ended_unix-duration, "source_config_sha256": state["run"]["config_digest"]})
         if fixture:
@@ -438,6 +441,16 @@ def run_once(args, config_path, count, repetition, workload, fixture=None):
             stop(child)
         for log in logs:
             log.close()
+        if getattr(args, "cleanup_crawl_data", False):
+            for name in ("crawls", "corpora", "logs"):
+                shutil.rmtree(path / name, ignore_errors=True)
+            (path / "database-state.json").unlink(missing_ok=True)
+            remaining = sql(args, f"WITH removed AS (DELETE FROM scout_crawl_runs WHERE crawl_run_id='{run}' RETURNING 1) SELECT count(*) FROM removed")
+            assert sql(args, f"SELECT count(*) FROM scout_crawl_tasks WHERE crawl_run_id='{run}'") == 0
+            assert not any((path / name).exists() for name in ("crawls", "corpora", "logs"))
+            save(path / "cleanup.json", {"crawl_run_rows_deleted": remaining, "remaining_tasks": 0,
+                 "bodies_spool_corpus_event_logs_removed": True, "database_state_dump_removed": True,
+                 "completed_unix": time.time()})
 
 
 def self_test():

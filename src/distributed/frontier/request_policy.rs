@@ -351,6 +351,94 @@ impl FrontierStore {
         Ok(PermitDecision::Acquired(grant))
     }
 
+    /// RPC waiters vanish on coordinator restart. Never clear active HTTP permits here.
+    pub(crate) fn clear_pending_request_waits(&mut self, run_id: &str) -> Result<(), Error> {
+        self.client.execute("DELETE FROM scout_crawl_request_permits WHERE crawl_run_id=$1 AND status='pending'", &[&run_id])
+            .map_err(|error| Error::storage(format!("clear disconnected request waits: {error}")))?;
+        Ok(())
+    }
+
+    /// Queue lifetime follows the renewable task lease, rather than requiring request polling.
+    pub(crate) fn bind_request_waits_to_lease(
+        &mut self,
+        task: &super::ClaimedTask,
+        request_ids: &[String],
+    ) -> Result<(), Error> {
+        if request_ids.is_empty() {
+            return Ok(());
+        }
+        self.client.execute(
+            "UPDATE scout_crawl_request_permits AS request SET pending_deadline=task.lease_deadline
+             FROM scout_crawl_tasks AS task WHERE request.crawl_run_id=$1 AND request.request_id=ANY($2::TEXT[])
+               AND request.status='pending' AND task.task_id=$3 AND task.crawl_run_id=$1
+               AND task.status='leased' AND task.lease_owner=$4 AND task.lease_epoch=$5",
+            &[&task.crawl_run_id, &request_ids, &task.task_id, &task.lease_owner, &task.lease_epoch])
+            .map_err(|error| Error::storage(format!("bind queued requests to task lease: {error}")))?;
+        Ok(())
+    }
+
+    pub(crate) fn expired_request_waits(
+        &mut self,
+        run_id: &str,
+        request_ids: &[String],
+    ) -> Result<Vec<String>, Error> {
+        self.client.query("SELECT ids.id FROM unnest($2::TEXT[]) AS ids(id) LEFT JOIN scout_crawl_request_permits AS request ON request.crawl_run_id=$1 AND request.request_id=ids.id WHERE request.request_id IS NULL OR (request.status='pending' AND request.pending_deadline<=clock_timestamp())", &[&run_id, &request_ids])
+            .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
+            .map_err(|error| Error::storage(format!("read expired request waits: {error}")))
+    }
+
+    /// One eligible request, using exactly the durable round-robin ordering of permit grants.
+    pub(crate) fn ready_request_id(&mut self, run_id: &str) -> Result<Option<String>, Error> {
+        self.client.query_opt(
+            "SELECT request.request_id FROM scout_crawl_request_permits AS request
+             JOIN scout_crawl_request_policy AS policy USING(crawl_run_id)
+             WHERE request.crawl_run_id=$1 AND request.status='pending' AND request.pending_deadline>clock_timestamp()
+               AND (policy.total_attempts>=policy.max_total_attempts OR (
+                 (SELECT count(*) FROM scout_crawl_request_permits AS active WHERE active.crawl_run_id=$1 AND active.status='active' AND active.expires_at>clock_timestamp())<policy.global_concurrency
+                 AND (SELECT count(*) FROM scout_crawl_request_permits AS active WHERE active.crawl_run_id=$1 AND active.status='active' AND active.origin=request.origin AND active.expires_at>clock_timestamp())<policy.origin_concurrency
+                 AND NOT EXISTS (SELECT 1 FROM scout_crawl_request_spacing AS spacing WHERE spacing.crawl_run_id=$1 AND spacing.schedule_key=request.schedule_key AND spacing.next_allowed_at>clock_timestamp())))
+             ORDER BY CASE WHEN policy.last_schedule_key IS NULL OR request.schedule_key>policy.last_schedule_key THEN 0 ELSE 1 END,
+                      request.schedule_key, request.queued_at, request.request_id LIMIT 1",
+            &[&run_id])
+            .map(|row| row.map(|row| row.get(0)))
+            .map_err(|error| Error::storage(format!("select queued request notification: {error}")))
+    }
+
+    pub(crate) fn dispatch_clock_ms(&mut self) -> Result<i64, Error> {
+        self.client
+            .query_one(
+                "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::BIGINT",
+                &[],
+            )
+            .map(|row| row.get(0))
+            .map_err(|error| Error::storage(format!("read dispatcher clock: {error}")))
+    }
+
+    /// Deadline-driven dispatcher wakeup. Events handle earlier completions and new work.
+    pub(crate) fn next_dispatch_delay(
+        &mut self,
+        run_id: &str,
+        claims: bool,
+        permits: bool,
+        excluded_sources: &[String],
+        max_duration_seconds: u64,
+        reference_unix_ms: i64,
+    ) -> Result<Option<Duration>, Error> {
+        let duration = i64::try_from(max_duration_seconds)
+            .map_err(|_| Error::invalid("crawl duration too large"))?;
+        self.client.query_one(
+            "SELECT ceil(extract(epoch FROM (min(due)-clock_timestamp()))*1000)::BIGINT FROM (
+               SELECT retry_at AS due FROM scout_crawl_tasks WHERE $2 AND crawl_run_id=$1 AND status='pending' AND retry_at>to_timestamp($6::BIGINT/1000.0) AND NOT(source_id=ANY($4::TEXT[]))
+               UNION ALL SELECT lease_deadline FROM scout_crawl_tasks WHERE $2 AND crawl_run_id=$1 AND status='leased' AND lease_deadline>to_timestamp($6::BIGINT/1000.0)
+               UNION ALL SELECT expires_at FROM scout_crawl_request_permits WHERE $3 AND crawl_run_id=$1 AND status='active' AND expires_at>to_timestamp($6::BIGINT/1000.0)
+               UNION ALL SELECT pending_deadline FROM scout_crawl_request_permits WHERE $3 AND crawl_run_id=$1 AND status='pending'
+               UNION ALL SELECT spacing.next_allowed_at FROM scout_crawl_request_spacing AS spacing WHERE $3 AND spacing.crawl_run_id=$1 AND spacing.next_allowed_at>to_timestamp($6::BIGINT/1000.0) AND EXISTS(SELECT 1 FROM scout_crawl_request_permits AS request WHERE request.crawl_run_id=$1 AND request.status='pending' AND request.schedule_key=spacing.schedule_key)
+               UNION ALL SELECT created_at+($5::BIGINT*interval '1 second') FROM scout_crawl_runs WHERE $2 AND crawl_run_id=$1
+             ) deadlines", &[&run_id, &claims, &permits, &excluded_sources, &duration, &reference_unix_ms])
+            .map(|row| row.get::<_, Option<i64>>(0).map(|millis| Duration::from_millis(millis.max(1) as u64)))
+            .map_err(|error| Error::storage(format!("read scheduling deadline: {error}")))
+    }
+
     /// Remove a queued request after worker cancellation; active permits require report/recovery.
     pub(crate) fn cancel_request_wait(
         &mut self,

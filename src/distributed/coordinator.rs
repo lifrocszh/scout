@@ -1,15 +1,12 @@
 use super::frontier::{
-    AcceptedCapture, AcceptedCaptureRecord, ClaimedTask, CompletionAcceptance, DiscoveredTask,
-    FrontierStore, LeaseTiming, PermitDecision, RequestPolicyLimits, RobotsDecision, TaskStatus,
+    AcceptedCapture, AcceptedCaptureRecord, ClaimedTask, DiscoveredTask, FrontierStore,
+    LeaseTiming, PermitDecision, RequestPolicyLimits, RobotsDecision, TaskStatus,
 };
 use super::proto;
 use super::protocol::{check_protocol, safe_event_url, validate_identity};
-use super::{
-    EMPTY_POLL_MS, MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, MAX_URL_BYTES, PROTOCOL_VERSION,
-};
+use super::{MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, MAX_URL_BYTES, PROTOCOL_VERSION};
 use crate::app::report_error;
 use crate::cli::{Cli, Operation};
-use crate::corpus::capture_selection_key;
 use crate::crawl::spool::CaptureSpool;
 use crate::crawl::{
     Config, RobotsGroup, RobotsPolicy, RobotsRule, Source, load_config, schedule_key,
@@ -30,7 +27,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::{Request, Response, Status, transport::Server};
 
 mod capture;
+mod results;
 mod rpc;
+mod scheduling;
 mod sitemaps;
 use capture::{
     StoredCapture, completion_result_sha256, eligible_discoveries, replay_accepted_captures,
@@ -40,6 +39,8 @@ use capture::{
 struct CoordinatorState {
     core: Mutex<CoordinatorCore>,
     shutdown: tokio::sync::Notify,
+    schedule_changed: Arc<tokio::sync::Notify>,
+    results: Arc<results::ResultPool>,
 }
 
 struct CoordinatorCore {
@@ -52,6 +53,7 @@ struct CoordinatorCore {
     registered_workers: HashSet<String>,
     fatal_error: Option<String>,
     events: Arc<Mutex<Events>>,
+    waits: scheduling::Waits,
 }
 
 impl CoordinatorCore {
@@ -252,6 +254,8 @@ fn coordinator_main(
         max_pending_requests: config.max_frontier,
     };
     frontier.configure_run(&run_id, &config.digest, policy_limits)?;
+    // Pending RPC connections do not survive restart; active HTTP permits still do.
+    frontier.clear_pending_request_waits(&run_id)?;
     let crawl_dir = cli.data_dir.join("crawls").join(&run_id);
     let recovered = (|| {
         fs::create_dir_all(crawl_dir.join("bodies")).map_err(|error| {
@@ -268,6 +272,10 @@ fn coordinator_main(
             return Err(Error::storage(error.message));
         }
     };
+    let completion_lanes = results::ResultPool::lane_count()?;
+    let (results, result_workers) =
+        results::ResultPool::new(&database_url, completion_lanes, config.max_body_bytes)?;
+    let results = Arc::new(results);
     let (run_events, first_start) = Events::open_or_append(&cli.data_dir, &run_id, "coordinator")?;
     let events = Arc::new(Mutex::new(run_events));
     if first_start {
@@ -323,6 +331,7 @@ fn coordinator_main(
             "page_target": config.page_target,
             "database_credentials": "coordinator_only",
             "auth": "tailnet_acl",
+            "completion_lanes": completion_lanes,
         }),
     );
     println!("scout coordinator listening on {address}");
@@ -337,8 +346,11 @@ fn coordinator_main(
             registered_workers: HashSet::new(),
             fatal_error: None,
             events,
+            waits: scheduling::Waits::default(),
         }),
         shutdown: tokio::sync::Notify::new(),
+        schedule_changed: results.notify(),
+        results: results.clone(),
     });
     let service = CoordinatorRpc {
         state: state.clone(),
@@ -348,8 +360,27 @@ fn coordinator_main(
         .build()
         .map_err(|error| Error::storage(format!("start coordinator runtime: {error}")))?;
     let shutdown_state = state.clone();
+    let runtime_state = state.clone();
     let result = runtime.block_on(async move {
-        Server::builder()
+        let (config, run_id, spool, events) = {
+            let core = runtime_state.core.lock().expect("coordinator state lock");
+            (
+                core.config.clone(),
+                core.run_id.clone(),
+                core.spool.clone(),
+                core.events.clone(),
+            )
+        };
+        let result_handles = runtime_state.results.start(
+            result_workers,
+            Arc::downgrade(&runtime_state),
+            config,
+            run_id,
+            spool,
+            events,
+        );
+        let dispatcher = tokio::spawn(scheduling::run(runtime_state.clone()));
+        let server_result = Server::builder()
             .add_service(
                 CoordinatorServer::new(service)
                     .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
@@ -360,10 +391,15 @@ fn coordinator_main(
                     _ = tokio::signal::ctrl_c() => {},
                     _ = shutdown_state.shutdown.notified() => {},
                 }
+                scheduling::close(&shutdown_state);
             })
             .await
-            .map_err(|error| Error::storage(format!("coordinator gRPC server: {error}")))
+            .map_err(|error| Error::storage(format!("coordinator gRPC server: {error}")));
+        scheduling::close(&runtime_state);
+        let _ = dispatcher.await;
+        (server_result, result_handles)
     });
+    let (server_result, result_handles) = result;
     let (run_events, global_concurrency, origin_concurrency, fatal_error) = {
         let core = state.core.lock().expect("coordinator state lock");
         (
@@ -386,7 +422,13 @@ fn coordinator_main(
     );
     // Drop the synchronous PostgreSQL client outside Tokio; its destructor drives its own runtime.
     drop(state);
-    result?;
+    drop(results);
+    runtime.block_on(async move {
+        for handle in result_handles {
+            let _ = handle.await;
+        }
+    });
+    server_result?;
     match fatal_error {
         Some(message) => Err(Error::storage(message)),
         None => Ok(()),
@@ -754,7 +796,7 @@ mod tests {
             frontier
                 .accept_task_result(&task, &result_hash, Some(&accepted), "", &[], 0, 3, 100,)
                 .unwrap(),
-            super::CompletionAcceptance::Accepted { .. }
+            crate::distributed::frontier::CompletionAcceptance::Accepted { .. }
         ));
         let spool = CaptureSpool::open(&crawl_dir, 100).unwrap();
         assert_eq!(

@@ -355,8 +355,8 @@ fn duration_millis(duration: Duration) -> Result<i64, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrontierStore, LeaseTiming, PermitDecision, RequestPermitGrant, RequestPolicyLimits,
-        RobotsDecision, TaskStatus,
+        AcceptedCapture, FrontierStore, LeaseTiming, PermitDecision, RequestPermitGrant,
+        RequestPolicyLimits, RobotsDecision, TaskStatus,
     };
     use crate::crawl::{RobotsGroup, RobotsPolicy, RobotsRule};
     use crate::storage::sha256_hex;
@@ -479,6 +479,78 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires disposable PostgreSQL database in SCOUT_TEST_DATABASE_URL"]
+    fn page_completion_does_not_wait_for_fair_scheduler_cursor() {
+        let database_url = std::env::var("SCOUT_TEST_DATABASE_URL")
+            .expect("set SCOUT_TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let (run_id, _cleanup, mut frontier) = setup_policy_run(
+            &database_url,
+            policy_limits(
+                4,
+                2,
+                Duration::ZERO,
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+            ),
+            "completion-scheduler-lock",
+        );
+        let url = "https://example.invalid/docs/page";
+        frontier.enqueue_url(&run_id, "docs", url, 3).unwrap();
+        let task = frontier
+            .claim_one(
+                &run_id,
+                "worker-a",
+                LeaseTiming::for_request_timeout(Duration::from_secs(2)).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut blocker = postgres::Client::connect(&database_url, postgres::NoTls).unwrap();
+        let mut transaction = blocker.transaction().unwrap();
+        transaction
+            .query_one(
+                "SELECT crawl_run_id FROM scout_crawl_task_scheduler WHERE crawl_run_id=$1 FOR UPDATE",
+                &[&run_id],
+            )
+            .unwrap();
+        let identity = "unique completion identity";
+        let capture = AcceptedCapture {
+            source_id: "docs".into(),
+            content_hash: sha256_hex(identity.as_bytes()),
+            identity: identity.into(),
+            body_hash: sha256_hex(b"body"),
+            body_size: 4,
+            metadata_json: "{}".into(),
+        };
+        let result_hash = sha256_hex(b"page-only completion");
+        let (sent, received) = std::sync::mpsc::channel();
+        let mut result_frontier = FrontierStore::connect(&database_url).unwrap();
+        let result_run_id = run_id.clone();
+        let handle = thread::spawn(move || {
+            let result = result_frontier.accept_task_result(
+                &task,
+                &result_hash,
+                Some(&capture),
+                "",
+                &[],
+                0,
+                3,
+                100,
+            );
+            sent.send(result).unwrap();
+        });
+        let completed_while_cursor_locked = received.recv_timeout(Duration::from_secs(1));
+        transaction.commit().unwrap();
+        handle.join().unwrap();
+        assert!(
+            matches!(
+                completed_while_cursor_locked,
+                Ok(Ok(super::CompletionAcceptance::Accepted { .. }))
+            ),
+            "page-only result was blocked by scheduler cursor for run {result_run_id}"
+        );
+    }
+
     // Run with SCOUT_TEST_DATABASE_URL set and `cargo test --lib frontier::tests::postgres_frontier_contract -- --ignored`.
     #[test]
     #[ignore = "requires a coordinator-only PostgreSQL test database"]
@@ -584,6 +656,17 @@ mod tests {
             .claim_one(&run_id, "worker-old", short_timing)
             .unwrap()
             .unwrap();
+        // Quota-satisfied Sources still have live leases to drain. Their expiry must wake
+        // queued claims even though new work from those Sources is excluded.
+        let reference = store.dispatch_clock_ms().unwrap();
+        let wake = store
+            .next_dispatch_delay(&run_id, true, false, &["docs".into()], 60, reference)
+            .unwrap()
+            .expect("leased excluded Source has a deadline");
+        assert!(
+            wake <= short_timing.lease_for,
+            "must wake on lease expiry, not run duration: {wake:?}"
+        );
         thread::sleep(Duration::from_millis(180));
         assert!(!store.renew_lease(&expired, short_timing).unwrap());
         assert!(!store.complete_task(&expired).unwrap());

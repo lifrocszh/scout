@@ -55,15 +55,21 @@ impl FrontierStore {
             .transaction()
             .map_err(|error| Error::storage(format!("begin capture acceptance: {error}")))?;
 
-        // Claims lock this row before task rows, so results take locks in the same order.
-        tx.query_opt(
-            "SELECT crawl_run_id FROM scout_crawl_task_scheduler
-             WHERE crawl_run_id = $1 FOR UPDATE",
-            &[&task.crawl_run_id],
-        )
-        .map_err(|error| Error::storage(format!("lock capture frontier: {error}")))?
-        .ok_or_else(|| Error::storage("crawl task scheduler is missing"))?;
+        // Only discoveries consume frontier capacity. Page-only completions avoid the fair
+        // scheduler cursor lock; discovery admission still serializes with claims/sitemaps.
+        if !discovered.is_empty() {
+            let started = std::time::Instant::now();
+            tx.query_opt(
+                "SELECT crawl_run_id FROM scout_crawl_task_scheduler
+                 WHERE crawl_run_id = $1 FOR UPDATE",
+                &[&task.crawl_run_id],
+            )
+            .map_err(|error| Error::storage(format!("lock capture frontier: {error}")))?
+            .ok_or_else(|| Error::storage("crawl task scheduler is missing"))?;
+            crate::distributed::metrics::completion_phase("postgres_scheduler_lock_wait", started);
+        }
 
+        let started = std::time::Instant::now();
         let row = tx
             .query_opt(
                 "SELECT crawl_run_id, source_id, origin, normalized_url, schedule_key,
@@ -73,6 +79,7 @@ impl FrontierStore {
                 &[&task.task_id],
             )
             .map_err(|error| Error::storage(format!("lock capture task: {error}")))?;
+        crate::distributed::metrics::completion_phase("postgres_task_lock_wait", started);
         let Some(row) = row else {
             return Ok(CompletionAcceptance::Stale);
         };
@@ -128,6 +135,7 @@ impl FrontierStore {
         }
 
         if let Some(capture) = capture {
+            let started = std::time::Instant::now();
             let group = tx
                 .query_opt(
                     "SELECT identity FROM scout_crawl_content_groups
@@ -139,6 +147,10 @@ impl FrontierStore {
                     ],
                 )
                 .map_err(|error| Error::storage(format!("read unique content group: {error}")))?;
+            crate::distributed::metrics::completion_phase(
+                "postgres_content_group_lock_wait",
+                started,
+            );
             if group.is_some_and(|row| row.get::<_, Vec<u8>>(0) != capture.identity.as_bytes()) {
                 return Err(Error::storage(
                     "extracted content SHA-256 collision within a Source",
@@ -334,6 +346,9 @@ pub(super) fn enqueue_bounded_discoveries(
     max_task_attempts: i32,
     max_frontier: i64,
 ) -> Result<(i64, i64, Vec<String>), Error> {
+    if discovered.is_empty() {
+        return Ok((0, initially_rejected, Vec::new()));
+    }
     let mut unfinished: i64 = tx
         .query_one(
             "SELECT count(*) FROM scout_crawl_tasks

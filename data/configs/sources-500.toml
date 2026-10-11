@@ -4,10 +4,10 @@ user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
 page_target = 500
 
 # Four sources share the target evenly. Per-origin pacing limits each site to
-# at most two request starts per second; bounded retries and frontier cap work.
-global_concurrency = 4
-origin_concurrency = 1
-min_start_spacing_ms = 500
+# at most four request starts per second; bounded retries and frontier cap work.
+global_concurrency = 16
+origin_concurrency = 8
+min_start_spacing_ms = 250
 max_frontier = 20000
 max_decoded_body_bytes = 8388608
 max_extraction_bytes = 8388608

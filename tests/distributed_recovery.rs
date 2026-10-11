@@ -434,6 +434,32 @@ impl Run {
 }
 impl Drop for Run {
     fn drop(&mut self) {
+        // Preserve only fixture config/logs on failure, while still removing all crawl data.
+        if thread::panicking() {
+            if let Ok(output) = std::env::var("SCOUT_TEST_EVIDENCE_DIR") {
+                let output = PathBuf::from(output).join(format!("failure-{}", self.id));
+                let _ = fs::create_dir_all(&output);
+                let _ = fs::copy(self.dir.join("sources.toml"), output.join("sources.toml"));
+                for root in [&self.dir, &self.dir.join("logs")] {
+                    if let Ok(entries) = fs::read_dir(root) {
+                        for entry in entries.filter_map(Result::ok) {
+                            if entry.path().is_file()
+                                && (root.ends_with("logs")
+                                    || matches!(
+                                        entry
+                                            .path()
+                                            .extension()
+                                            .and_then(|extension| extension.to_str()),
+                                        Some("stdout" | "stderr")
+                                    ))
+                            {
+                                let _ = fs::copy(entry.path(), output.join(entry.file_name()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let _ = self.database.execute(
             "DELETE FROM scout_crawl_runs WHERE crawl_run_id=$1",
             &[&self.id],
@@ -982,8 +1008,26 @@ fn sitemap_last_attempt_worker_death_records_terminal_discovery_failure() {
     )
     .unwrap();
     let _coordinator = run.coordinator("sitemap-last-attempt");
-    let worker = run.worker("sitemap-last-killed", None);
-    fixture.wait_path("/child.xml");
+    let mut worker = run.worker("sitemap-last-killed", None);
+    wait(
+        || {
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "scanner exited before child request: {}",
+                fs::read_to_string(run.dir.join("sitemap-last-killed.stderr")).unwrap()
+            );
+            fixture
+                .metrics
+                .lock()
+                .unwrap()
+                .counts
+                .get("/child.xml")
+                .copied()
+                .unwrap_or_default()
+                > 0
+        },
+        "child fixture request",
+    );
     drop(worker);
     let mut workers = vec![run.worker("sitemap-last-replacement", None)];
     run.finish_workers(&mut workers);

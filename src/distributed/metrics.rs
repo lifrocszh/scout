@@ -15,7 +15,7 @@ fn emit(data: serde_json::Value) {
 
 pub(super) fn rpc(name: &str, queued: u128, lock_wait: u128, service: u128, total: u128) {
     emit(serde_json::json!({
-        "metric": "rpc", "operation": name,
+        "metric": "rpc", "operation": name, "end_unix_ns": unix_ns(),
         "blocking_queue_ns": queued as u64,
         "core_lock_wait_ns": lock_wait as u64,
         "service_ns": service as u64,
@@ -30,6 +30,23 @@ impl DatabaseScope {
     pub(super) fn new(operation: &'static str) -> Self {
         Self(operation, enabled().then(Instant::now))
     }
+}
+
+pub(super) fn completion_phase(phase: &'static str, started: Instant) {
+    emit(serde_json::json!({
+        "metric": "completion_phase",
+        "phase": phase,
+        "elapsed_ns": started.elapsed().as_nanos() as u64,
+    }));
+}
+
+pub(super) fn completion_queue(jobs: usize, bytes: usize, lanes: usize) {
+    emit(serde_json::json!({
+        "metric": "completion_queue",
+        "in_flight_jobs": jobs,
+        "in_flight_bytes": bytes,
+        "lanes": lanes,
+    }));
 }
 
 impl Drop for DatabaseScope {

@@ -20,6 +20,23 @@ where
             return Err(Status::internal(message.clone()));
         }
         let result = operation(&mut core);
+        if core.waits.has_pending()
+            && matches!(
+                operation_name,
+                "claim_one"
+                    | "acquire_request_permit"
+                    | "cancel_request_wait"
+                    | "release_request_permit"
+                    | "renew_lease"
+                    | "commit_robots_refresh"
+                    | "fail_robots_refresh"
+                    | "commit_sitemap_discovery"
+                    | "complete_task"
+                    | "fail_task"
+            )
+        {
+            state.schedule_changed.notify_one();
+        }
         if let Err(error) = &result {
             if error.code() == tonic::Code::Internal {
                 let run_id = core.run_id.clone();
@@ -134,58 +151,7 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::ClaimOneResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let response = with_coordinator_core(self.state.clone(), "claim_one", move |core| {
-            require_worker(core, &request.worker_id)?;
-            let run_id = core.run_id.clone();
-            let quota_satisfied = core.quota_satisfied_source_ids()?;
-            if core.target_reached()?
-                || core
-                    .frontier
-                    .unfinished_task_count_excluding(&run_id, &quota_satisfied)
-                    .map_err(to_status)?
-                    == 0
-            {
-                let abandoned = core.frontier.finalize_abandoned_sitemap_discovery(&run_id).map_err(to_status)?;
-                if abandoned > 0 {
-                    emit_shared(&core.events, "sitemap.discovery_abandoned", "failure",
-                        serde_json::json!({"count":abandoned,"reason":"frontier/run stopped before discovery committed"}));
-                }
-                return Ok(proto::ClaimOneResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    lease: None,
-                    target_reached: true,
-                    retry_after_ms: 0,
-                });
-            }
-            let timing = core.lease_timing;
-            let task = core
-                .frontier
-                .claim_one_excluding(&run_id, &request.worker_id, timing, &quota_satisfied)
-                .map_err(to_status)?;
-            if let Some(task) = task {
-            let safe_url = safe_event_url(&task.normalized_url);
-                emit_shared(
-                    &core.events,
-                    "task.claimed",
-                    "success",
-                serde_json::json!({"worker_id": request.worker_id, "task_id": task.task_id, "source_id": task.source_id, "url": safe_url, "lease_epoch": task.lease_epoch, "task_attempt": task.task_attempt_count}),
-                );
-                Ok(proto::ClaimOneResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    lease: Some(task_to_proto(&task)),
-                    target_reached: false,
-                    retry_after_ms: 0,
-                })
-            } else {
-                Ok(proto::ClaimOneResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    lease: None,
-                    target_reached: false,
-                    retry_after_ms: EMPTY_POLL_MS,
-                })
-            }
-        })
-        .await?;
+        let response = scheduling::claim(self.state.clone(), request).await?;
         Ok(Response::new(response))
     }
 
@@ -206,6 +172,7 @@ impl Coordinator for CoordinatorRpc {
                 .renew_lease(&task, timing)
                 .map_err(to_status)?;
             if renewed {
+                scheduling::renew_pending(core, &task)?;
                 emit_shared(
                     &core.events,
                     "task.lease_renewed",
@@ -230,53 +197,7 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::AcquireRequestPermitResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let lease = request
-            .lease
-            .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response =
-            with_coordinator_core(self.state.clone(), "acquire_request_permit", move |core| {
-                let task = core.validate_lease(&lease)?;
-                let (origin, url) =
-                    core.validate_request_url(&request.url, &request.request_kind)?;
-                let key = schedule_key(&core.config, &url);
-                let run_id = core.run_id.clone();
-                let decision = core
-                    .frontier
-                    .try_acquire_request_permit(
-                        &run_id,
-                        &task.lease_owner,
-                        &request.request_id,
-                        &key,
-                        &origin,
-                        &request.request_kind,
-                    )
-                    .map_err(to_status)?;
-                Ok(match decision {
-                    PermitDecision::Acquired(grant) => proto::AcquireRequestPermitResponse {
-                        protocol_version: PROTOCOL_VERSION,
-                        decision: proto::acquire_request_permit_response::Decision::Acquired as i32,
-                        permit_id: grant.permit_id,
-                        expires_at_unix_ms: grant.expires_at_unix_ms,
-                        retry_after_ms: 0,
-                    },
-                    PermitDecision::Waiting(wait) => proto::AcquireRequestPermitResponse {
-                        protocol_version: PROTOCOL_VERSION,
-                        decision: proto::acquire_request_permit_response::Decision::Waiting as i32,
-                        permit_id: 0,
-                        expires_at_unix_ms: 0,
-                        retry_after_ms: wait.as_millis().max(1) as u64,
-                    },
-                    PermitDecision::AlreadyCompleted => proto::AcquireRequestPermitResponse {
-                        protocol_version: PROTOCOL_VERSION,
-                        decision: proto::acquire_request_permit_response::Decision::AlreadyCompleted
-                            as i32,
-                        permit_id: 0,
-                        expires_at_unix_ms: 0,
-                        retry_after_ms: 0,
-                    },
-                })
-            })
-            .await?;
+        let response = scheduling::permit(self.state.clone(), request).await?;
         Ok(Response::new(response))
     }
 
@@ -289,6 +210,9 @@ impl Coordinator for CoordinatorRpc {
         let response =
             with_coordinator_core(self.state.clone(), "cancel_request_wait", move |core| {
                 require_worker(core, &request.worker_id)?;
+                if request.crawl_run_id != core.run_id {
+                    return Err(Status::failed_precondition("crawl run ID mismatch"));
+                }
                 let success = core
                     .frontier
                     .cancel_request_wait(
@@ -297,6 +221,9 @@ impl Coordinator for CoordinatorRpc {
                         &request.request_id,
                     )
                     .map_err(to_status)?;
+                if success {
+                    scheduling::cancel_pending(core, &request.worker_id, &request.request_id);
+                }
                 Ok(proto::BoolResponse {
                     protocol_version: PROTOCOL_VERSION,
                     success,
@@ -517,105 +444,138 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::CompleteTaskResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
+        let size = prost::Message::encoded_len(&request).max(1);
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), "complete_task", move |core| {
+        let reservation = self.state.results.reserve(size)?;
+        let state = self.state.clone();
+        let rpc_started = std::time::Instant::now();
+        let blocking_started = std::time::Instant::now();
+        let blocking_queue_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let core_lock_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let intake_service_ns = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let queue_metric = blocking_queue_ns.clone();
+        let lock_metric = core_lock_ns.clone();
+        let service_metric = intake_service_ns.clone();
+        let failure_state = self.state.clone();
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        let intake = tokio::task::spawn_blocking(move || {
+            queue_metric.store(
+                blocking_started.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let lock_started = std::time::Instant::now();
+            let (config, crawl_dir) = {
+                let core = state.core.lock().expect("coordinator state lock");
+                let core_service_started = std::time::Instant::now();
+                lock_metric.store(
+                    lock_started.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if let Some(message) = core.fatal_error.as_ref() {
+                    return Err(Status::internal(message.clone()));
+                }
+                let task = claimed_task(&lease)?;
+                core.validate_task_identity(&task)?;
+                let snapshot = (core.config.clone(), core.crawl_dir.clone());
+                service_metric.store(
+                    core_service_started.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                snapshot
+            };
             let task = claimed_task(&lease)?;
-            core.validate_task_identity(&task)?;
-            let capture_received = request.capture.is_some();
+            let validation_started = std::time::Instant::now();
             if let Some(capture) = request.capture.as_ref() {
-                validate_capture(&core.config, &task, capture)?;
+                validate_capture(&config, &task, capture)?;
             } else if request.rejection_reason.trim().is_empty() {
                 return Err(Status::invalid_argument(
                     "completion requires capture or rejection reason",
                 ));
             }
             let stored_capture = request.capture.as_ref().map(StoredCapture::from);
-            if let Some(capture) = request.capture.as_ref() {
-                write_body_file(&core.crawl_dir, capture)?;
-            }
             let result_sha256 = completion_result_sha256(
                 stored_capture.as_ref(),
                 &request.discovered_urls,
                 &request.rejection_reason,
             )?;
             let (discovered, initially_rejected) =
-                eligible_discoveries(&core.config, &request.discovered_urls, core.config.max_frontier);
+                eligible_discoveries(&config, &request.discovered_urls, config.max_frontier);
             let accepted_capture = stored_capture
                 .as_ref()
                 .map(StoredCapture::to_frontier_capture)
                 .transpose()?;
-            let acceptance = core
-                .frontier
-                .accept_task_result(
-                    &task,
-                    &result_sha256,
-                    accepted_capture.as_ref(),
-                    &request.rejection_reason,
-                    &discovered,
-                    initially_rejected,
-                    core.config.max_attempts as i32,
-                    core.config.max_frontier,
-                )
-                .map_err(to_status)?;
-            let (completed, accepted_discovered_count, rejected_discovered_count) = match acceptance {
-                CompletionAcceptance::Accepted {
-                    accepted_discovered_count,
-                    rejected_discovered_count,
-                }
-                | CompletionAcceptance::Duplicate {
-                    accepted_discovered_count,
-                    rejected_discovered_count,
-                } => {
-                    if let Some(capture) = stored_capture.as_ref() {
-                        let capture = capture
-                            .to_crawl_capture()
-                            .map_err(to_status)?;
-                        core.spool
-                            .insert_capture(&capture, &capture_selection_key(&capture))
-                            .map_err(|error| to_status(Error::storage(error.message)))?;
-                    }
-                    (true, accepted_discovered_count as u64, rejected_discovered_count as u64)
-                }
-                CompletionAcceptance::Stale => (false, 0, 0),
-            };
-            let target_reached = core.target_reached()?;
-            if completed && matches!(acceptance, CompletionAcceptance::Accepted { .. }) {
-                let safe_url = safe_event_url(&task.normalized_url);
-                emit_shared(
-                    &core.events,
-                    if capture_received {
-                        "capture.accepted"
-                    } else {
-                        "page.rejected"
-                    },
-                    "success",
-                    serde_json::json!({
-                        "task_id": task.task_id,
-                        "source_id": task.source_id,
-                        "url": safe_url,
-                        "capture_received": capture_received,
-                        "body_bytes": stored_capture.as_ref().map(|capture| capture.content_bytes),
-                        "body_sha256": stored_capture.as_ref().map(|capture| capture.body_hash.as_str()),
-                        "rejection_reason": request.rejection_reason,
-                        "accepted_discovered_count": accepted_discovered_count,
-                        "rejected_discovered_count": rejected_discovered_count,
-                        "capture_persistence": "postgresql_transaction",
-                        "target_reached": target_reached,
-                    }),
-                );
+            crate::distributed::metrics::completion_phase("validation_hashing", validation_started);
+            if let Some(capture) = request.capture.as_ref() {
+                let started = std::time::Instant::now();
+                write_body_file(&crawl_dir, capture)?;
+                crate::distributed::metrics::completion_phase("body_write_fsync", started);
             }
-            Ok(proto::CompleteTaskResponse {
-                protocol_version: PROTOCOL_VERSION,
-                completed,
-                accepted_discovered_count,
-                rejected_discovered_count,
-                capture_received,
-                target_reached,
-            })
+            let job = super::results::Job::new(
+                task,
+                result_sha256,
+                stored_capture,
+                accepted_capture,
+                request.rejection_reason,
+                discovered,
+                initially_rejected,
+                config.max_attempts as i32,
+                config.max_frontier,
+                reply,
+            );
+            state.results.submit(job, reservation);
+            Ok(())
         })
-        .await?;
+        .await
+        .map_err(|error| Status::internal(format!("completion intake task failed: {error}")))?;
+        if let Err(error) = &intake {
+            if error.code() == tonic::Code::Internal {
+                let message = error.message().to_owned();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let mut core = failure_state.core.lock().expect("coordinator state lock");
+                    if core.fatal_error.is_none() {
+                        let run_id = core.run_id.clone();
+                        let _ = core.frontier.mark_run_failed(&run_id);
+                        emit_shared(
+                            &core.events,
+                            "coordinator.failed",
+                            "failure",
+                            serde_json::json!({"crawl_run_id": run_id, "error": message}),
+                        );
+                        core.fatal_error = Some(message);
+                        failure_state.shutdown.notify_one();
+                    }
+                })
+                .await;
+            }
+        }
+        intake?;
+        let response = receive
+            .await
+            .map_err(|_| Status::unavailable("completion processor stopped"))?;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let total = rpc_started.elapsed().as_nanos() as u64;
+                crate::distributed::metrics::rpc(
+                    "complete_task",
+                    blocking_queue_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+                    core_lock_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+                    intake_service_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+                    total as u128,
+                );
+                return Err(error);
+            }
+        };
+        let total = rpc_started.elapsed().as_nanos() as u64;
+        crate::distributed::metrics::rpc(
+            "complete_task",
+            blocking_queue_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+            core_lock_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+            intake_service_ns.load(std::sync::atomic::Ordering::Relaxed) as u128,
+            total as u128,
+        );
         Ok(Response::new(response))
     }
 
@@ -668,7 +628,7 @@ impl Coordinator for CoordinatorRpc {
     }
 }
 
-fn require_worker(core: &CoordinatorCore, worker_id: &str) -> Result<(), Status> {
+pub(super) fn require_worker(core: &CoordinatorCore, worker_id: &str) -> Result<(), Status> {
     validate_identity(worker_id, "worker_id")?;
     if core.registered_workers.contains(worker_id) {
         Ok(())
@@ -679,7 +639,7 @@ fn require_worker(core: &CoordinatorCore, worker_id: &str) -> Result<(), Status>
     }
 }
 
-fn task_to_proto(task: &ClaimedTask) -> proto::Lease {
+pub(super) fn task_to_proto(task: &ClaimedTask) -> proto::Lease {
     proto::Lease {
         task_id: task.task_id,
         crawl_run_id: task.crawl_run_id.clone(),

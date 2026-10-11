@@ -1,6 +1,6 @@
 use super::proto;
 use super::protocol::{check_protocol, safe_event_url, validate_identity};
-use super::{EMPTY_POLL_MS, MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, PROTOCOL_VERSION};
+use super::{MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, PROTOCOL_VERSION};
 use crate::app::report_error;
 use crate::cli::{Cli, Operation};
 use crate::crawl::{
@@ -92,6 +92,12 @@ fn worker_main(
     let worker_id = worker_id.map(str::to_owned).unwrap_or_else(new_run_id);
     validate_identity(&worker_id, "worker_id")
         .map_err(|status| Error::invalid(status.message().to_owned()))?;
+    let concurrency = benchmark_concurrency()?;
+    if concurrency > 1 && max_tasks.is_some() {
+        return Err(Error::invalid(
+            "benchmark concurrency cannot be combined with --max-tasks",
+        ));
+    }
     let run_id = new_run_id();
     let events = Arc::new(Mutex::new(Events::open(&cli.data_dir, &run_id, "worker")?));
     let endpoint = tonic::transport::Endpoint::from_shared(address.to_owned())
@@ -160,130 +166,31 @@ fn worker_main(
             &events,
             "worker.started",
             "success",
-            serde_json::json!({"worker_id": worker_id, "coordinator": address, "protocol_version": PROTOCOL_VERSION, "concurrency": 1, "prefetch": 0}),
+            serde_json::json!({"worker_id": worker_id, "coordinator": address, "protocol_version": PROTOCOL_VERSION, "concurrency": concurrency, "prefetch": 0}),
         );
-        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         let signal = shutdown.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
-            signal.store(true, std::sync::atomic::Ordering::SeqCst);
+            signal.send_replace(true);
         });
-        let mut completed = 0_usize;
-        loop {
-            if shutdown.load(std::sync::atomic::Ordering::SeqCst)
-                || max_tasks.is_some_and(|limit| completed >= limit)
-            {
-                break;
-            }
-            let rpc_measurement = super::metrics::RpcScope::new("claim_one");
-            let response = ctx
-                .rpc
-                .clone()
-                .claim_one(proto::ClaimOneRequest {
-                    protocol_version: PROTOCOL_VERSION,
-                    worker_id: ctx.worker_id.clone(),
-                })
-                .await
-                .map_err(|error| Error::storage(format!("claim task: {error}")))?
-                .into_inner();
-            drop(rpc_measurement);
-            check_protocol(response.protocol_version)
-                .map_err(|error| Error::invalid(error.message().to_owned()))?;
-            let Some(lease) = response.lease else {
-                if response.target_reached {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(response.retry_after_ms.max(EMPTY_POLL_MS)))
-                    .await;
-                continue;
-            };
-            emit_shared(
-                &ctx.events,
-                "worker.task_started",
-                "success",
-                serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "source_id": lease.source_id, "url": safe_event_url(&lease.normalized_url), "lease_epoch": lease.lease_epoch}),
-            );
-            let report = run_with_lease_renewal(&ctx, lease.clone()).await;
-            match report {
-                Ok(report) => {
-                    let rpc_measurement = super::metrics::RpcScope::new("complete_task");
-                    let response = ctx
-                        .rpc
-                        .clone()
-                        .complete_task(proto::CompleteTaskRequest {
-                            protocol_version: PROTOCOL_VERSION,
-                            lease: Some(lease.clone()),
-                            capture: report.capture,
-                            discovered_urls: report.discovered_urls,
-                            rejection_reason: report.rejection_reason,
-                        })
-                        .await
-                        .map_err(|error| Error::storage(format!("report task completion: {error}")))?
-                        .into_inner();
-                    drop(rpc_measurement);
-                    if response.protocol_version != PROTOCOL_VERSION {
-                        return Err(Error::invalid("coordinator protocol changed during run"));
-                    }
-                    if !response.completed {
-                        emit_shared(
-                            &ctx.events,
-                            "worker.task_stale",
-                            "failure",
-                            serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch}),
-                        );
-                        completed += 1;
-                        continue;
-                    }
-                    completed += 1;
-                    emit_shared(
-                        &ctx.events,
-                        "worker.task_completed",
-                        "success",
-                        serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "capture_received": response.capture_received, "accepted_discovered_count": response.accepted_discovered_count, "rejected_discovered_count": response.rejected_discovered_count, "target_reached": response.target_reached}),
-                    );
-                }
+        let mut lanes = tokio::task::JoinSet::new();
+        for _ in 0..concurrency {
+            lanes.spawn(worker_loop(ctx.clone(), shutdown.subscribe(), max_tasks));
+        }
+        let mut completed = 0;
+        let mut failure = None;
+        while let Some(result) = lanes.join_next().await {
+            match result.unwrap_or_else(|error| Err(Error::storage(format!("worker lane failed: {error}")))) {
+                Ok(count) => completed += count,
                 Err(error) => {
-                    let response = ctx
-                        .rpc
-                        .clone()
-                        .fail_task(proto::FailTaskRequest {
-                            protocol_version: PROTOCOL_VERSION,
-                            lease: Some(lease.clone()),
-                            error_code: error.code.clone(),
-                            error_message: error.message.chars().take(2048).collect(),
-                            retry_delay_ms: retry_delay_ms(1, &ctx.config),
-                        })
-                        .await;
-                    let response = match response {
-                        Ok(response) => response.into_inner(),
-                        Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                            emit_shared(
-                                &ctx.events,
-                                "worker.task_stale",
-                                "failure",
-                                serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch}),
-                            );
-                            completed += 1;
-                            continue;
-                        }
-                        Err(status) => {
-                            return Err(Error::storage(format!(
-                                "report task failure: {status}"
-                            )));
-                        }
-                    };
-                    if response.protocol_version != PROTOCOL_VERSION {
-                        return Err(Error::invalid("coordinator protocol changed during run"));
-                    }
-                    emit_shared(
-                        &ctx.events,
-                        "worker.task_failed",
-                        "failure",
-                        serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "code": error.code, "status": response.status}),
-                    );
-                    completed += 1;
+                    shutdown.send_replace(true);
+                    failure.get_or_insert(error);
                 }
             }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         emit_shared(
             &ctx.events,
@@ -295,6 +202,180 @@ fn worker_main(
     })
 }
 
+// Benchmark-only load knob. Normal workers keep their one-task behavior.
+fn benchmark_concurrency() -> Result<usize, Error> {
+    let Some(value) = std::env::var_os("SCOUT_BENCHMARK_WORKER_CONCURRENCY") else {
+        return Ok(1);
+    };
+    if std::env::var_os("SCOUT_DISTRIBUTED_METRICS").is_none() {
+        return Err(Error::invalid(
+            "benchmark concurrency requires SCOUT_DISTRIBUTED_METRICS",
+        ));
+    }
+    parse_benchmark_concurrency(&value.to_string_lossy())
+}
+
+fn parse_benchmark_concurrency(value: &str) -> Result<usize, Error> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (1..=32).contains(count))
+        .ok_or_else(|| Error::invalid("benchmark worker concurrency must be between 1 and 32"))
+}
+
+async fn worker_loop(
+    ctx: WorkerContext,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    max_tasks: Option<usize>,
+) -> Result<usize, Error> {
+    let mut completed = 0_usize;
+    'work: loop {
+        if *shutdown.borrow() || max_tasks.is_some_and(|limit| completed >= limit) {
+            break;
+        }
+        let rpc_measurement = super::metrics::RpcScope::new("claim_one");
+        let mut rpc = ctx.rpc.clone();
+        let response = tokio::select! {
+            response = rpc.claim_one(proto::ClaimOneRequest {
+                protocol_version: PROTOCOL_VERSION,
+                worker_id: ctx.worker_id.clone(),
+            }) => response.map_err(|error| Error::storage(format!("claim task: {error}")))?.into_inner(),
+            _ = shutdown.changed() => break,
+        };
+        drop(rpc_measurement);
+        check_protocol(response.protocol_version)
+            .map_err(|error| Error::invalid(error.message().to_owned()))?;
+        let Some(lease) = response.lease else {
+            if response.target_reached {
+                break;
+            }
+            return Err(Error::storage(
+                "coordinator returned an empty capacity assignment",
+            ));
+        };
+        emit_shared(
+            &ctx.events,
+            "worker.task_started",
+            "success",
+            serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "source_id": lease.source_id, "url": safe_event_url(&lease.normalized_url), "lease_epoch": lease.lease_epoch}),
+        );
+        let report = run_with_lease_renewal(&ctx, lease.clone()).await;
+        match report {
+            Ok(report) => {
+                let mut lease = lease;
+                let mut completion = proto::CompleteTaskRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    lease: Some(lease.clone()),
+                    capture: report.capture,
+                    discovered_urls: report.discovered_urls,
+                    rejection_reason: report.rejection_reason,
+                };
+                let mut retry_delay = Duration::from_millis(25);
+                let mut renew_at = tokio::time::Instant::now() + ctx.config.renew_after;
+                let response = loop {
+                    let rpc_measurement = super::metrics::RpcScope::new("complete_task");
+                    let result = ctx.rpc.clone().complete_task(completion.clone()).await;
+                    drop(rpc_measurement);
+                    match result {
+                        Ok(response) => break response.into_inner(),
+                        Err(status) if status.code() == tonic::Code::ResourceExhausted => {
+                            if tokio::time::Instant::now() >= renew_at {
+                                let renewed = ctx.rpc.clone().renew_lease(proto::LeaseRequest {
+                                    protocol_version: PROTOCOL_VERSION,
+                                    lease: Some(lease.clone()),
+                                }).await.map_err(|error| Error::storage(format!("renew task lease while waiting for result capacity: {error}")))?.into_inner();
+                                if !renewed.renewed {
+                                    emit_shared(
+                                        &ctx.events,
+                                        "worker.task_stale",
+                                        "failure",
+                                        serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch}),
+                                    );
+                                    completed += 1;
+                                    continue 'work;
+                                }
+                                lease.lease_deadline_unix_ms = renewed.lease_deadline_unix_ms;
+                                completion.lease = Some(lease.clone());
+                                renew_at = tokio::time::Instant::now() + ctx.config.renew_after;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(retry_delay) => {},
+                                _ = shutdown.changed() => break 'work,
+                            }
+                            retry_delay = (retry_delay * 2).min(Duration::from_millis(500));
+                        }
+                        Err(status) => {
+                            return Err(Error::storage(format!(
+                                "report task completion: {status}"
+                            )));
+                        }
+                    }
+                };
+                if response.protocol_version != PROTOCOL_VERSION {
+                    return Err(Error::invalid("coordinator protocol changed during run"));
+                }
+                if !response.completed {
+                    emit_shared(
+                        &ctx.events,
+                        "worker.task_stale",
+                        "failure",
+                        serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch}),
+                    );
+                    completed += 1;
+                    continue;
+                }
+                completed += 1;
+                emit_shared(
+                    &ctx.events,
+                    "worker.task_completed",
+                    "success",
+                    serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "capture_received": response.capture_received, "accepted_discovered_count": response.accepted_discovered_count, "rejected_discovered_count": response.rejected_discovered_count, "target_reached": response.target_reached}),
+                );
+            }
+            Err(error) => {
+                let response = ctx
+                    .rpc
+                    .clone()
+                    .fail_task(proto::FailTaskRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        lease: Some(lease.clone()),
+                        error_code: error.code.clone(),
+                        error_message: error.message.chars().take(2048).collect(),
+                        retry_delay_ms: retry_delay_ms(1, &ctx.config),
+                    })
+                    .await;
+                let response = match response {
+                    Ok(response) => response.into_inner(),
+                    Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                        emit_shared(
+                            &ctx.events,
+                            "worker.task_stale",
+                            "failure",
+                            serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch}),
+                        );
+                        completed += 1;
+                        continue;
+                    }
+                    Err(status) => {
+                        return Err(Error::storage(format!("report task failure: {status}")));
+                    }
+                };
+                if response.protocol_version != PROTOCOL_VERSION {
+                    return Err(Error::invalid("coordinator protocol changed during run"));
+                }
+                emit_shared(
+                    &ctx.events,
+                    "worker.task_failed",
+                    "failure",
+                    serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "code": error.code, "status": response.status}),
+                );
+                completed += 1;
+            }
+        }
+    }
+    Ok(completed)
+}
+
 async fn run_with_lease_renewal(
     ctx: &WorkerContext,
     lease: proto::Lease,
@@ -302,6 +383,14 @@ async fn run_with_lease_renewal(
     let task_ctx = ctx.clone();
     let task_lease = lease.clone();
     let mut task = tokio::spawn(async move { process_task(&task_ctx, &task_lease).await });
+    // A dropped/rejected lease must stop its HTTP task rather than detach it.
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _abort = AbortOnDrop(task.abort_handle());
     let mut renew = tokio::time::interval(ctx.config.renew_after);
     renew.tick().await;
     loop {
@@ -586,7 +675,7 @@ async fn request(
 ) -> Result<HttpResponse, Error> {
     for attempt in 1..=ctx.config.max_attempts {
         let request_id = new_run_id();
-        let permit_id = loop {
+        let permit_id = {
             let rpc_measurement = super::metrics::RpcScope::new("acquire_request_permit");
             let response = ctx
                 .rpc
@@ -609,10 +698,26 @@ async fn request(
             }
             match proto::acquire_request_permit_response::Decision::try_from(response.decision) {
                 Ok(proto::acquire_request_permit_response::Decision::Acquired) => {
-                    break response.permit_id;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| Error::fetch("worker clock is before Unix epoch"))?
+                        .as_millis();
+                    let minimum = ctx.config.timeout.as_millis().saturating_add(100);
+                    if response.expires_at_unix_ms <= 0
+                        || (response.expires_at_unix_ms as u128).saturating_sub(now_ms) < minimum
+                    {
+                        // Clocks must be synchronized across hosts. Never start HTTP on a delayed grant.
+                        let _ = release_permit(ctx, response.permit_id, "late_grant").await;
+                        return Err(Error::fetch(
+                            "request permit arrived too late to safely start HTTP",
+                        ));
+                    }
+                    response.permit_id
                 }
                 Ok(proto::acquire_request_permit_response::Decision::Waiting) => {
-                    tokio::time::sleep(Duration::from_millis(response.retry_after_ms.max(1))).await;
+                    return Err(Error::storage(
+                        "coordinator returned a polling permit response",
+                    ));
                 }
                 Ok(proto::acquire_request_permit_response::Decision::AlreadyCompleted) => {
                     return Err(Error::safety(
@@ -908,4 +1013,20 @@ fn retry_delay_ms(attempt: usize, config: &WorkerConfig) -> u64 {
         .retry_backoff_ms
         .saturating_mul(multiplier)
         .min(config.retry_max_delay_ms)
+}
+
+#[cfg(test)]
+mod benchmark_tests {
+    #[test]
+    fn benchmark_concurrency_is_bounded() {
+        for count in [1, 4, 8, 16, 32] {
+            assert_eq!(
+                super::parse_benchmark_concurrency(&count.to_string()).unwrap(),
+                count
+            );
+        }
+        for invalid in ["0", "33", "-1", "threads", ""] {
+            assert!(super::parse_benchmark_concurrency(invalid).is_err());
+        }
+    }
 }

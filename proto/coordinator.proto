@@ -5,8 +5,10 @@ package scout.distributed.v1;
 service Coordinator {
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc Heartbeat(WorkerRequest) returns (WorkerResponse);
+  // One outstanding call advertises one free worker task slot; reply waits for work.
   rpc ClaimOne(ClaimOneRequest) returns (ClaimOneResponse);
   rpc RenewLease(LeaseRequest) returns (LeaseResponse);
+  // Reply waits for a durable grant; WAITING is reserved for older protocol versions.
   rpc AcquireRequestPermit(AcquireRequestPermitRequest) returns (AcquireRequestPermitResponse);
   rpc CancelRequestWait(CancelRequestWaitRequest) returns (BoolResponse);
   rpc ReleaseRequestPermit(ReleaseRequestPermitRequest) returns (BoolResponse);
