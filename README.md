@@ -157,8 +157,84 @@ scout worker --coordinator http://100.64.0.10:50051 --data-dir ./data/worker-a
 Coordinator and worker negotiate protocol version 1 at registration. Tailnet ACLs control access;
 the RPC service has no application credentials. Each worker processes one leased URL at a time,
 renews its fenced lease, and obtains shared request permits for page, redirect, robots, and sitemap
-requests. Captures are validated and reported to the coordinator; durable capture acceptance and
-Corpus materialization are Ticket 4 work.
+requests. The coordinator verifies each response body and stores it under its SHA-256 before it
+atomically accepts the result, discoveries, and task completion in PostgreSQL. On restart, it
+replays accepted captures into the local SQLite spool. After the coordinator stops, materialize the
+run with the same config and data directory:
+
+```bash
+scout crawl --config data/configs/sources-500.toml --data-dir ./data/distributed --materialize-spool <run-id>
+```
+
+This seals the deterministic Corpus snapshot from the durable accepted capture set.
+
+### Local macOS setup
+
+The supported native setup uses Homebrew `postgresql@17` (PostgreSQL 17; supported upstream
+through November 2029). See the [Homebrew formula](https://formulae.brew.sh/formula/postgresql@17)
+and [PostgreSQL version policy](https://www.postgresql.org/support/versioning/).
+
+Install and start PostgreSQL, then launch the coordinator and three independent worker processes:
+
+```bash
+scripts/distributed-local.sh setup
+scripts/distributed-local.sh start data/configs/sources-500.toml ./data/distributed
+scripts/distributed-local.sh status ./data/distributed
+```
+
+For a menu-driven workflow, run `scripts/distributed-local-ui.sh`. It lists the source TOML profiles,
+builds Scout, starts or resumes a crawl, and shows accepted/rejected page counts with worker status.
+From the menu, you can stop or materialize the run, then build and activate a keyword Generation for
+a completed Corpus. The UI creates a default index profile when needed. Choose **Start Search API**
+to serve the active Generation; it waits for `/v1/readyz` before reporting ready. The default bind is
+`127.0.0.1:8080`; set `SCOUT_SERVE_BIND` or enter another address when prompted. Choose **Stop
+Search API** to stop it. In the crawl monitor, press `s` to stop or `m` to return to the menu.
+Quitting the UI leaves active crawl and API processes running after confirmation. The API log is
+`data/distributed/logs/serve.log`.
+
+The launcher builds Scout if needed, creates a local `scout` database, and writes separate
+coordinator/worker logs and PID files under `data/distributed/distributed-local/`. PostgreSQL
+connections use a local Unix socket; PostgreSQL TCP listens on localhost only. Only the coordinator
+gets `SCOUT_DATABASE_URL`. Worker processes get no database connection variables. The coordinator
+defaults to `127.0.0.1:50051`; set `SCOUT_COORDINATOR_BIND` to a private or Tailscale address and
+`SCOUT_COORDINATOR_URL` to the matching worker URL when other tailnet machines must connect.
+
+The gRPC service has no application credentials. A Tailscale ACL must allow only the coordinator
+and approved worker machines to reach the coordinator's gRPC port (default TCP 50051). Keep
+PostgreSQL off the tailnet and public interfaces.
+
+Launcher state stores the run ID, source config SHA-256, and config path. `restart` with the same
+config resumes that durable run; a changed config path or contents starts a fresh run and preserves
+the prior PostgreSQL run. Stop the coordinator and workers gracefully before materializing:
+
+```bash
+# Resume the same run after a coordinator/worker restart.
+scripts/distributed-local.sh restart data/configs/sources-500.toml ./data/distributed
+# When crawling is done, stop before materializing the accepted captures.
+scripts/distributed-local.sh stop ./data/distributed
+scripts/distributed-local.sh materialize data/configs/sources-500.toml ./data/distributed
+```
+
+`stop` sends SIGINT to all Scout processes and waits for them. An in-flight task is accepted if its
+worker completes; otherwise its lease expires and another worker can reclaim it after restart. Use
+the same config file path and contents when materializing a run. `cleanup` removes launcher logs,
+PIDs, and run pointers only; it keeps PostgreSQL, crawl bodies, spools, and Corpora. Stop the
+Homebrew service separately with `brew services stop postgresql@17` when it is no longer needed.
+
+For explicit CLI use, the coordinator command is:
+
+```bash
+SCOUT_DATABASE_URL='postgresql:///scout?host=%2Ftmp' scout coordinator \
+  --config data/configs/sources-500.toml --data-dir ./data/distributed \
+  --bind 127.0.0.1:50051 --run-id <saved-run-id>
+```
+
+Workers connect without a database URL:
+
+```bash
+env -u SCOUT_DATABASE_URL scout worker --coordinator http://127.0.0.1:50051 \
+  --data-dir ./data/distributed --worker-id local-worker-1
+```
 
 ## HTTP API
 

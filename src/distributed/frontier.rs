@@ -1,19 +1,18 @@
-use crate::crawl::RobotsPolicy;
 use crate::error::Error;
 use crate::storage::sha256_hex;
-use crate::url::{normalize_origin, normalize_url, origin_key};
-use ::url::Url;
 use postgres::{Client, NoTls};
 use std::time::Duration;
 
 const MIGRATION_V1: &str = include_str!("../../migrations/0001_durable_crawl_frontier.sql");
 const MIGRATION_V2: &str = include_str!("../../migrations/0002_shared_request_policy.sql");
 const MIGRATION_V3: &str = include_str!("../../migrations/0003_fair_frontier_schedule.sql");
+const MIGRATION_V4: &str = include_str!("../../migrations/0004_durable_crawl_results.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
-const REQUEST_MIGRATION: [(i32, &str, &str); 3] = [
+const REQUEST_MIGRATION: [(i32, &str, &str); 4] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
     (2, "shared-request-policy", MIGRATION_V2),
     (3, "fair-frontier-schedule", MIGRATION_V3),
+    (4, "durable-crawl-results", MIGRATION_V4),
 ];
 
 const CLAIM_ONE_TASK: &str = r#"
@@ -39,6 +38,7 @@ WITH scheduler AS MATERIALIZED (
     FROM scout_crawl_tasks AS task
     CROSS JOIN scheduler
     WHERE task.crawl_run_id = $1
+      AND NOT (task.source_id = ANY($4::TEXT[]))
       AND task.task_attempt_count < task.max_task_attempts
       AND (
           (task.status = 'pending' AND task.retry_at <= clock_timestamp())
@@ -115,6 +115,42 @@ pub(crate) struct ClaimedTask {
     pub(crate) lease_epoch: i64,
     pub(crate) lease_deadline_unix_ms: i64,
     pub(crate) idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveredTask {
+    pub(crate) source_id: String,
+    pub(crate) normalized_url: String,
+    pub(crate) schedule_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcceptedCapture {
+    pub(crate) source_id: String,
+    pub(crate) content_hash: String,
+    pub(crate) identity: String,
+    pub(crate) body_hash: String,
+    pub(crate) body_size: i64,
+    pub(crate) metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcceptedCaptureRecord {
+    pub(crate) task_id: i64,
+    pub(crate) metadata_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionAcceptance {
+    Accepted {
+        accepted_discovered_count: usize,
+        rejected_discovered_count: usize,
+    },
+    Duplicate {
+        accepted_discovered_count: usize,
+        rejected_discovered_count: usize,
+    },
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +235,11 @@ pub(crate) struct FrontierStore {
     client: Client,
 }
 
+mod request_policy;
+mod results;
+mod robots;
+mod tasks;
+
 impl FrontierStore {
     pub(crate) fn connect(database_url: &str) -> Result<Self, Error> {
         let client = Client::connect(database_url, NoTls)
@@ -259,988 +300,6 @@ impl FrontierStore {
         tx.commit()
             .map_err(|error| Error::storage(format!("commit frontier migration: {error}")))
     }
-
-    /// Persist run identity and immutable shared policy limits before workers start.
-    pub(crate) fn configure_run(
-        &mut self,
-        run_id: &str,
-        config_digest: &str,
-        limits: RequestPolicyLimits,
-    ) -> Result<bool, Error> {
-        let persisted = request_policy_values(limits)?;
-        let inserted = self.ensure_run(run_id, config_digest)?;
-        self.client
-            .execute(
-                "INSERT INTO scout_crawl_request_policy(
-                     crawl_run_id, global_concurrency, origin_concurrency,
-                     min_start_spacing_ms, request_timeout_ms,
-                     permit_safety_margin_ms, robots_cache_ms,
-                     max_total_attempts, max_pending_requests
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT (crawl_run_id) DO NOTHING",
-                &[
-                    &run_id,
-                    &persisted.global_concurrency,
-                    &persisted.origin_concurrency,
-                    &persisted.min_start_spacing_ms,
-                    &persisted.request_timeout_ms,
-                    &persisted.permit_safety_margin_ms,
-                    &persisted.robots_cache_ms,
-                    &persisted.max_total_attempts,
-                    &persisted.max_pending_requests,
-                ],
-            )
-            .map_err(|error| Error::storage(format!("persist shared request policy: {error}")))?;
-        let row = self
-            .client
-            .query_one(
-                "SELECT global_concurrency, origin_concurrency,
-                        min_start_spacing_ms, request_timeout_ms,
-                        permit_safety_margin_ms, robots_cache_ms,
-                        max_total_attempts, max_pending_requests
-                 FROM scout_crawl_request_policy WHERE crawl_run_id = $1",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("read shared request policy: {error}")))?;
-        let stored = PersistedRequestPolicy {
-            global_concurrency: row.get(0),
-            origin_concurrency: row.get(1),
-            min_start_spacing_ms: row.get(2),
-            request_timeout_ms: row.get(3),
-            permit_safety_margin_ms: row.get(4),
-            robots_cache_ms: row.get(5),
-            max_total_attempts: row.get(6),
-            max_pending_requests: row.get(7),
-        };
-        if stored != persisted {
-            return Err(Error::invalid(format!(
-                "crawl run {run_id:?} already has different shared request policy limits"
-            )));
-        }
-        Ok(inserted)
-    }
-
-    /// Queue one outbound request and grant only when DB-wide limits and fairness permit it.
-    /// Acquired marks the shared start time; caller must dispatch HTTP immediately.
-    pub(crate) fn try_acquire_request_permit(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        request_id: &str,
-        schedule_key: &str,
-        origin: &str,
-        request_kind: &str,
-    ) -> Result<PermitDecision, Error> {
-        // ponytail: per-run row lock keeps permit counts atomic; shard only if this becomes a throughput limit.
-        validate_request_identity(worker_id, "worker_id")?;
-        validate_request_identity(request_id, "request_id")?;
-        validate_schedule_key(schedule_key)?;
-        validate_request_identity(request_kind, "request_kind")?;
-        let normalized_origin = normalize_origin(origin)?;
-        if normalized_origin != origin {
-            return Err(Error::invalid("request origin must already be normalized"));
-        }
-        let mut tx = self.client.transaction().map_err(|error| {
-            Error::storage(format!("begin request permit transaction: {error}"))
-        })?;
-        let limits = tx
-            .query_opt(
-                "SELECT global_concurrency, origin_concurrency,
-                        min_start_spacing_ms, request_timeout_ms,
-                        permit_safety_margin_ms, max_total_attempts,
-                        max_pending_requests, total_attempts, last_schedule_key
-                 FROM scout_crawl_request_policy
-                 WHERE crawl_run_id = $1 FOR UPDATE",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("lock shared request policy: {error}")))?
-            .ok_or_else(|| Error::invalid(format!("crawl run {run_id:?} has no request policy")))?;
-        let global_limit: i32 = limits.get(0);
-        let origin_limit: i32 = limits.get(1);
-        let global_limit_db = i64::from(global_limit);
-        let origin_limit_db = i64::from(origin_limit);
-        let spacing_ms: i64 = limits.get(2);
-        let timeout_ms: i64 = limits.get(3);
-        let safety_ms: i64 = limits.get(4);
-        let max_attempts: i64 = limits.get(5);
-        let max_pending: i32 = limits.get(6);
-        let total_attempts: i64 = limits.get(7);
-        let last_schedule_key: Option<String> = limits.get(8);
-        let permit_lifetime_ms = timeout_ms
-            .checked_add(safety_ms)
-            .ok_or_else(|| Error::invalid("request permit lifetime is too large"))?;
-
-        tx.execute(
-            "UPDATE scout_crawl_request_permits
-             SET status = 'expired', finished_at = clock_timestamp(), outcome = 'permit_timeout'
-             WHERE crawl_run_id = $1 AND status = 'active'
-               AND expires_at <= clock_timestamp()",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("reclaim expired request permits: {error}")))?;
-        tx.execute(
-            "DELETE FROM scout_crawl_request_permits
-             WHERE crawl_run_id = $1 AND status = 'pending'
-               AND pending_deadline <= clock_timestamp()",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("expire pending request permits: {error}")))?;
-
-        let prior = tx
-            .query_opt(
-                "SELECT permit_id, worker_id, schedule_key, origin, request_kind, status,
-                        (extract(epoch FROM expires_at) * 1000)::BIGINT AS expires_at_unix_ms
-                 FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND request_id = $2",
-                &[&run_id, &request_id],
-            )
-            .map_err(|error| Error::storage(format!("read request permit: {error}")))?;
-        if let Some(row) = prior {
-            let metadata_matches = row.get::<_, String>(1) == worker_id
-                && row.get::<_, String>(2) == schedule_key
-                && row.get::<_, String>(3) == origin
-                && row.get::<_, String>(4) == request_kind;
-            if !metadata_matches {
-                return Err(Error::invalid(
-                    "request_id was reused with different permit metadata",
-                ));
-            }
-            let permit_id: i64 = row.get(0);
-            let status: String = row.get(5);
-            match status.as_str() {
-                "active" => {
-                    let grant = request_permit_grant(
-                        &mut tx,
-                        run_id,
-                        permit_id,
-                        request_id,
-                        origin,
-                        row.get(6),
-                    )?;
-                    tx.commit().map_err(|error| {
-                        Error::storage(format!("commit existing request permit: {error}"))
-                    })?;
-                    return Ok(PermitDecision::Acquired(grant));
-                }
-                "completed" => {
-                    tx.commit().map_err(|error| {
-                        Error::storage(format!("commit completed request lookup: {error}"))
-                    })?;
-                    return Ok(PermitDecision::AlreadyCompleted);
-                }
-                "expired" => {
-                    return Err(Error::safety(
-                        "request permit expired; do not resume HTTP request",
-                    ));
-                }
-                "pending" => {
-                    tx.execute(
-                        "UPDATE scout_crawl_request_permits
-                         SET pending_deadline = clock_timestamp() + ($3::BIGINT * interval '1 millisecond')
-                         WHERE crawl_run_id = $1 AND request_id = $2 AND status = 'pending'",
-                        &[&run_id, &request_id, &permit_lifetime_ms],
-                    )
-                    .map_err(|error| {
-                        Error::storage(format!("renew pending request permit: {error}"))
-                    })?;
-                }
-                "cancelled" => return Err(Error::safety("request permit was cancelled")),
-                other => {
-                    return Err(Error::storage(format!(
-                        "unknown request permit status from PostgreSQL: {other}"
-                    )));
-                }
-            }
-        } else {
-            let pending: i64 = tx
-                .query_one(
-                    "SELECT count(*) FROM scout_crawl_request_permits
-                     WHERE crawl_run_id = $1 AND status = 'pending'",
-                    &[&run_id],
-                )
-                .map_err(|error| Error::storage(format!("count pending request permits: {error}")))?
-                .get(0);
-            if pending >= i64::from(max_pending) {
-                return Err(Error::safety("pending request limit exceeded"));
-            }
-            tx.execute(
-                "INSERT INTO scout_crawl_request_permits(
-                     crawl_run_id, request_id, worker_id, schedule_key, origin,
-                     request_kind, status, pending_deadline
-                 ) VALUES ($1, $2, $3, $4, $5, $6, 'pending',
-                           clock_timestamp() + ($7::BIGINT * interval '1 millisecond'))",
-                &[
-                    &run_id,
-                    &request_id,
-                    &worker_id,
-                    &schedule_key,
-                    &origin,
-                    &request_kind,
-                    &permit_lifetime_ms,
-                ],
-            )
-            .map_err(|error| Error::storage(format!("queue request permit: {error}")))?;
-        }
-
-        if total_attempts >= max_attempts {
-            tx.execute(
-                "DELETE FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND request_id = $2 AND status = 'pending'",
-                &[&run_id, &request_id],
-            )
-            .map_err(|error| {
-                Error::storage(format!("remove request beyond attempt cap: {error}"))
-            })?;
-            tx.commit().map_err(|error| {
-                Error::storage(format!("commit request attempt limit cleanup: {error}"))
-            })?;
-            return Err(Error::safety("request attempt limit exceeded"));
-        }
-
-        let candidate = tx
-            .query_opt(
-                "SELECT request.request_id, request.schedule_key, request.origin
-                 FROM scout_crawl_request_permits AS request
-                 WHERE request.crawl_run_id = $1 AND request.status = 'pending'
-                   AND request.pending_deadline > clock_timestamp()
-                   AND (SELECT count(*) FROM scout_crawl_request_permits AS active
-                        WHERE active.crawl_run_id = $1 AND active.status = 'active') < $2::BIGINT
-                   AND (SELECT count(*) FROM scout_crawl_request_permits AS active
-                        WHERE active.crawl_run_id = $1 AND active.status = 'active'
-                          AND active.origin = request.origin) < $3::BIGINT
-                   AND NOT EXISTS (
-                       SELECT 1 FROM scout_crawl_request_spacing AS spacing
-                       WHERE spacing.crawl_run_id = $1
-                         AND spacing.schedule_key = request.schedule_key
-                         AND spacing.next_allowed_at > clock_timestamp()
-                   )
-                 ORDER BY CASE
-                     WHEN $4::TEXT IS NULL OR request.schedule_key > $4 THEN 0 ELSE 1
-                 END, request.schedule_key, request.queued_at, request.request_id
-                 LIMIT 1",
-                &[
-                    &run_id,
-                    &global_limit_db,
-                    &origin_limit_db,
-                    &last_schedule_key,
-                ],
-            )
-            .map_err(|error| Error::storage(format!("select fair request permit: {error}")))?;
-        let Some(candidate) = candidate else {
-            tx.commit().map_err(|error| {
-                Error::storage(format!("commit queued request permit: {error}"))
-            })?;
-            return Ok(PermitDecision::Waiting(Duration::from_millis(25)));
-        };
-        let selected_id: String = candidate.get(0);
-        if selected_id != request_id {
-            tx.commit().map_err(|error| {
-                Error::storage(format!("commit waiting request permit: {error}"))
-            })?;
-            return Ok(PermitDecision::Waiting(Duration::from_millis(25)));
-        }
-        let selected_key: String = candidate.get(1);
-        let selected_origin: String = candidate.get(2);
-        let spacing_ms = spacing_ms.max(0);
-        let active_origin: i64 = tx
-            .query_one(
-                "SELECT count(*) FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND status = 'active' AND origin = $2",
-                &[&run_id, &selected_origin],
-            )
-            .map_err(|error| Error::storage(format!("count active origin requests: {error}")))?
-            .get(0);
-        tx.execute(
-            "UPDATE scout_crawl_request_permits
-             SET status = 'active', pending_deadline = NULL, acquired_at = clock_timestamp(),
-                 expires_at = clock_timestamp() + ($3::BIGINT * interval '1 millisecond')
-             WHERE crawl_run_id = $1 AND request_id = $2 AND status = 'pending'",
-            &[&run_id, &request_id, &permit_lifetime_ms],
-        )
-        .map_err(|error| Error::storage(format!("activate request permit: {error}")))?;
-        tx.execute(
-            "UPDATE scout_crawl_request_policy
-             SET total_attempts = total_attempts + 1, last_schedule_key = $2
-             WHERE crawl_run_id = $1",
-            &[&run_id, &selected_key],
-        )
-        .map_err(|error| Error::storage(format!("advance request scheduler: {error}")))?;
-        tx.execute(
-            "INSERT INTO scout_crawl_request_spacing(crawl_run_id, schedule_key, next_allowed_at)
-             VALUES ($1, $2, clock_timestamp() + ($3::BIGINT * interval '1 millisecond'))
-             ON CONFLICT (crawl_run_id, schedule_key) DO UPDATE
-             SET next_allowed_at = EXCLUDED.next_allowed_at",
-            &[&run_id, &selected_key, &spacing_ms],
-        )
-        .map_err(|error| Error::storage(format!("persist request start spacing: {error}")))?;
-        let permit_id: i64 = tx
-            .query_one(
-                "SELECT permit_id FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND request_id = $2",
-                &[&run_id, &request_id],
-            )
-            .map_err(|error| Error::storage(format!("read activated request permit: {error}")))?
-            .get(0);
-        let row = tx
-            .query_one(
-                "SELECT (extract(epoch FROM expires_at) * 1000)::BIGINT
-                 FROM scout_crawl_request_permits WHERE permit_id = $1",
-                &[&permit_id],
-            )
-            .map_err(|error| Error::storage(format!("read request permit expiry: {error}")))?;
-        let grant = request_permit_grant(
-            &mut tx,
-            run_id,
-            permit_id,
-            request_id,
-            &selected_origin,
-            Some(row.get(0)),
-        )?;
-        debug_assert!(active_origin < i64::from(origin_limit));
-        tx.commit()
-            .map_err(|error| Error::storage(format!("commit request permit: {error}")))?;
-        Ok(PermitDecision::Acquired(grant))
-    }
-
-    /// Remove a queued request after worker cancellation; active permits require report/recovery.
-    pub(crate) fn cancel_request_wait(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        request_id: &str,
-    ) -> Result<bool, Error> {
-        let mut tx = self.client.transaction().map_err(|error| {
-            Error::storage(format!("begin pending request cancellation: {error}"))
-        })?;
-        tx.query_opt(
-            "SELECT crawl_run_id FROM scout_crawl_request_policy
-             WHERE crawl_run_id = $1 FOR UPDATE",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("lock shared request policy: {error}")))?
-        .ok_or_else(|| Error::invalid(format!("crawl run {run_id:?} has no request policy")))?;
-        let changed = tx
-            .execute(
-                "DELETE FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND worker_id = $2 AND request_id = $3
-                   AND status = 'pending'",
-                &[&run_id, &worker_id, &request_id],
-            )
-            .map_err(|error| Error::storage(format!("cancel queued request permit: {error}")))?;
-        tx.commit().map_err(|error| {
-            Error::storage(format!("commit pending request cancellation: {error}"))
-        })?;
-        Ok(changed == 1)
-    }
-
-    /// Report request result after response body handling; permits remain active until this call.
-    pub(crate) fn release_request_permit(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        permit_id: i64,
-        outcome: &str,
-    ) -> Result<bool, Error> {
-        validate_request_identity(outcome, "request outcome")?;
-        let mut tx = self.client.transaction().map_err(|error| {
-            Error::storage(format!("begin request release transaction: {error}"))
-        })?;
-        tx.query_opt(
-            "SELECT crawl_run_id FROM scout_crawl_request_policy
-             WHERE crawl_run_id = $1 FOR UPDATE",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("lock shared request policy: {error}")))?
-        .ok_or_else(|| Error::invalid(format!("crawl run {run_id:?} has no request policy")))?;
-        tx.execute(
-            "UPDATE scout_crawl_request_permits
-             SET status = 'expired', finished_at = clock_timestamp(), outcome = 'permit_timeout'
-             WHERE crawl_run_id = $1 AND status = 'active'
-               AND expires_at <= clock_timestamp()",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("reclaim expired request permits: {error}")))?;
-        let changed = tx
-            .execute(
-                "UPDATE scout_crawl_request_permits
-                 SET status = 'completed', finished_at = clock_timestamp(), outcome = $4
-                 WHERE crawl_run_id = $1 AND worker_id = $2 AND permit_id = $3
-                   AND status = 'active' AND expires_at > clock_timestamp()",
-                &[&run_id, &worker_id, &permit_id, &outcome],
-            )
-            .map_err(|error| Error::storage(format!("release request permit: {error}")))?;
-        if changed == 1 {
-            tx.commit()
-                .map_err(|error| Error::storage(format!("commit request release: {error}")))?;
-            return Ok(true);
-        }
-        let already_reported = tx
-            .query_opt(
-                "SELECT outcome FROM scout_crawl_request_permits
-                 WHERE crawl_run_id = $1 AND worker_id = $2 AND permit_id = $3
-                   AND status = 'completed'",
-                &[&run_id, &worker_id, &permit_id],
-            )
-            .map_err(|error| Error::storage(format!("read released request permit: {error}")))?
-            .is_some_and(|row| row.get::<_, Option<String>>(0).as_deref() == Some(outcome));
-        tx.commit().map_err(|error| {
-            Error::storage(format!("commit duplicate request release: {error}"))
-        })?;
-        Ok(already_reported)
-    }
-
-    /// Return a fresh shared decision or claim the one allowed robots refresh for this origin.
-    pub(crate) fn robots_decision(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        refresh_epoch: Option<i64>,
-        origin: &str,
-        path: &str,
-    ) -> Result<RobotsDecision, Error> {
-        validate_request_identity(worker_id, "worker_id")?;
-        let normalized_origin = normalize_origin(origin)?;
-        if normalized_origin != origin || !path.starts_with('/') {
-            return Err(Error::invalid("robots origin or path is not normalized"));
-        }
-        let mut tx = self
-            .client
-            .transaction()
-            .map_err(|error| Error::storage(format!("begin robots policy transaction: {error}")))?;
-        let settings = tx
-            .query_opt(
-                "SELECT request_timeout_ms, permit_safety_margin_ms
-                 FROM scout_crawl_request_policy WHERE crawl_run_id = $1",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("read robots policy settings: {error}")))?
-            .ok_or_else(|| Error::invalid(format!("crawl run {run_id:?} has no request policy")))?;
-        let lease_ms: i64 = settings
-            .get::<_, i64>(0)
-            .checked_add(settings.get::<_, i64>(1))
-            .ok_or_else(|| Error::invalid("robots refresh lease is too large"))?;
-        let inserted = tx
-            .execute(
-                "INSERT INTO scout_crawl_robots_policy(
-                 crawl_run_id, origin, state, policy, refresh_owner, refresh_epoch, refresh_deadline
-             ) VALUES ($1, $2, 'refreshing', '{\"groups\":[],\"sitemaps\":[]}', $3, 1,
-                       clock_timestamp() + ($4::BIGINT * interval '1 millisecond'))
-             ON CONFLICT (crawl_run_id, origin) DO NOTHING",
-                &[&run_id, &origin, &worker_id, &lease_ms],
-            )
-            .map_err(|error| Error::storage(format!("create robots refresh state: {error}")))?
-            == 1;
-        if inserted {
-            tx.commit()
-                .map_err(|error| Error::storage(format!("commit robots refresh claim: {error}")))?;
-            return Ok(RobotsDecision::Refresh { epoch: 1 });
-        }
-        let row = tx
-            .query_one(
-                "SELECT state, policy, body_sha256, refresh_owner, refresh_epoch,
-                        (refresh_deadline > clock_timestamp()) AS refresh_live,
-                        (expires_at > clock_timestamp()) AS cache_fresh
-                 FROM scout_crawl_robots_policy
-                 WHERE crawl_run_id = $1 AND origin = $2 FOR UPDATE",
-                &[&run_id, &origin],
-            )
-            .map_err(|error| Error::storage(format!("lock robots policy state: {error}")))?;
-        let state: String = row.get(0);
-        match state.as_str() {
-            "ready" | "denied" if row.get::<_, bool>(6) => {
-                let allowed = if state == "denied" {
-                    false
-                } else {
-                    let serialized: String = row.get(1);
-                    let policy: RobotsPolicy =
-                        serde_json::from_str(&serialized).map_err(|error| {
-                            Error::storage(format!("decode shared robots policy: {error}"))
-                        })?;
-                    policy.allows(path)
-                };
-                let sitemaps = if state == "ready" {
-                    let serialized: String = row.get(1);
-                    let policy: RobotsPolicy =
-                        serde_json::from_str(&serialized).map_err(|error| {
-                            Error::storage(format!("decode shared robots policy: {error}"))
-                        })?;
-                    policy.sitemaps
-                } else {
-                    Vec::new()
-                };
-                let decision = RobotsDecision::Cached {
-                    allowed,
-                    body_sha256: row.get(2),
-                    sitemaps,
-                };
-                tx.commit()
-                    .map_err(|error| Error::storage(format!("commit robots decision: {error}")))?;
-                Ok(decision)
-            }
-            "refreshing" if row.get::<_, bool>(5) => {
-                let owner: String = row.get(3);
-                let epoch: i64 = row.get(4);
-                if owner == worker_id && refresh_epoch == Some(epoch) {
-                    tx.execute(
-                        "UPDATE scout_crawl_robots_policy
-                         SET refresh_deadline = clock_timestamp() + ($4::BIGINT * interval '1 millisecond')
-                         WHERE crawl_run_id = $1 AND origin = $2 AND refresh_epoch = $3",
-                        &[&run_id, &origin, &epoch, &lease_ms],
-                    )
-                    .map_err(|error| Error::storage(format!("renew robots refresh claim: {error}")))?;
-                    tx.commit().map_err(|error| {
-                        Error::storage(format!("commit robots refresh claim: {error}"))
-                    })?;
-                    Ok(RobotsDecision::Refresh { epoch })
-                } else {
-                    tx.commit().map_err(|error| {
-                        Error::storage(format!("commit robots refresh wait: {error}"))
-                    })?;
-                    Ok(RobotsDecision::Waiting(Duration::from_millis(25)))
-                }
-            }
-            "ready" | "denied" | "refreshing" => {
-                let epoch: i64 = row.get(4);
-                let next_epoch = epoch
-                    .checked_add(1)
-                    .ok_or_else(|| Error::storage("robots refresh epoch exhausted"))?;
-                tx.execute(
-                    "UPDATE scout_crawl_robots_policy
-                     SET state = 'refreshing', refresh_owner = $3, refresh_epoch = $4,
-                         refresh_deadline = clock_timestamp() + ($5::BIGINT * interval '1 millisecond'),
-                         fetched_at = NULL, expires_at = NULL
-                     WHERE crawl_run_id = $1 AND origin = $2",
-                    &[&run_id, &origin, &worker_id, &next_epoch, &lease_ms],
-                )
-                .map_err(|error| Error::storage(format!("claim robots refresh: {error}")))?;
-                tx.commit().map_err(|error| {
-                    Error::storage(format!("commit robots refresh claim: {error}"))
-                })?;
-                Ok(RobotsDecision::Refresh { epoch: next_epoch })
-            }
-            other => Err(Error::storage(format!(
-                "unknown robots policy state from PostgreSQL: {other}"
-            ))),
-        }
-    }
-
-    pub(crate) fn commit_robots_refresh(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        origin: &str,
-        epoch: i64,
-        policy: &RobotsPolicy,
-        body_sha256: &str,
-    ) -> Result<bool, Error> {
-        let normalized_origin = normalize_origin(origin)?;
-        if normalized_origin != origin || epoch <= 0 {
-            return Err(Error::invalid("robots refresh identity is invalid"));
-        }
-        validate_digest(body_sha256, "robots body digest")?;
-        let mut policy = policy.clone();
-        policy.sitemaps = policy
-            .sitemaps
-            .into_iter()
-            .map(|url| {
-                let parsed = Url::parse(&url)
-                    .map_err(|error| Error::invalid(format!("invalid sitemap URL: {error}")))?;
-                normalize_url(parsed).map_err(Error::invalid)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        policy.sitemaps.sort();
-        policy.sitemaps.dedup();
-        let serialized = serde_json::to_string(&policy)
-            .map_err(|error| Error::storage(format!("encode shared robots policy: {error}")))?;
-        let changed = self
-            .client
-            .execute(
-                "UPDATE scout_crawl_robots_policy AS robots
-                 SET state = 'ready', policy = $5, body_sha256 = $6,
-                     fetched_at = clock_timestamp(),
-                     expires_at = clock_timestamp() + (settings.robots_cache_ms * interval '1 millisecond'),
-                     refresh_owner = NULL, refresh_deadline = NULL
-                 FROM scout_crawl_request_policy AS settings
-                 WHERE robots.crawl_run_id = $1 AND robots.origin = $2
-                   AND robots.refresh_owner = $3 AND robots.refresh_epoch = $4
-                   AND robots.state = 'refreshing' AND robots.refresh_deadline > clock_timestamp()
-                   AND settings.crawl_run_id = robots.crawl_run_id",
-                &[&run_id, &origin, &worker_id, &epoch, &serialized, &body_sha256],
-            )
-            .map_err(|error| Error::storage(format!("commit shared robots policy: {error}")))?;
-        Ok(changed == 1)
-    }
-
-    pub(crate) fn fail_robots_refresh(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        origin: &str,
-        epoch: i64,
-    ) -> Result<bool, Error> {
-        let normalized_origin = normalize_origin(origin)?;
-        if normalized_origin != origin || epoch <= 0 {
-            return Err(Error::invalid("robots refresh identity is invalid"));
-        }
-        let changed = self
-            .client
-            .execute(
-                "UPDATE scout_crawl_robots_policy AS robots
-                 SET state = 'denied', policy = '{\"groups\":[],\"sitemaps\":[]}',
-                     body_sha256 = NULL, fetched_at = clock_timestamp(),
-                     expires_at = clock_timestamp() + (settings.robots_cache_ms * interval '1 millisecond'),
-                     refresh_owner = NULL, refresh_deadline = NULL
-                 FROM scout_crawl_request_policy AS settings
-                 WHERE robots.crawl_run_id = $1 AND robots.origin = $2
-                   AND robots.refresh_owner = $3 AND robots.refresh_epoch = $4
-                   AND robots.state = 'refreshing' AND robots.refresh_deadline > clock_timestamp()
-                   AND settings.crawl_run_id = robots.crawl_run_id",
-                &[&run_id, &origin, &worker_id, &epoch],
-            )
-            .map_err(|error| Error::storage(format!("fail shared robots refresh: {error}")))?;
-        Ok(changed == 1)
-    }
-
-    /// Insert a run once; an existing ID is resumable only with the original digest.
-    pub(crate) fn ensure_run(&mut self, run_id: &str, config_digest: &str) -> Result<bool, Error> {
-        validate_digest(config_digest, "crawl config digest")?;
-        if run_id.trim().is_empty() {
-            return Err(Error::invalid("crawl_run_id must not be empty"));
-        }
-        let inserted = self
-            .client
-            .execute(
-                "INSERT INTO scout_crawl_runs(crawl_run_id, config_digest)
-                 VALUES ($1, $2)
-                 ON CONFLICT (crawl_run_id) DO NOTHING",
-                &[&run_id, &config_digest],
-            )
-            .map_err(|error| Error::storage(format!("persist crawl run identity: {error}")))?
-            > 0;
-        let stored_digest: String = self
-            .client
-            .query_one(
-                "SELECT config_digest FROM scout_crawl_runs WHERE crawl_run_id = $1",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("read crawl run identity: {error}")))?
-            .get(0);
-        if stored_digest != config_digest {
-            return Err(Error::invalid(format!(
-                "crawl run {run_id:?} has config digest {stored_digest}; refusing resume with {config_digest}"
-            )));
-        }
-        self.client
-            .execute(
-                "INSERT INTO scout_crawl_task_scheduler(crawl_run_id)
-                 VALUES ($1) ON CONFLICT (crawl_run_id) DO NOTHING",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("initialize task schedule cursor: {error}")))?;
-        Ok(inserted)
-    }
-
-    /// Keep the configured crawl duration anchored to the persisted run creation time,
-    /// including when a coordinator resumes after a restart.
-    pub(crate) fn run_duration_exceeded(
-        &mut self,
-        run_id: &str,
-        max_duration: Duration,
-    ) -> Result<bool, Error> {
-        let max_seconds = i64::try_from(max_duration.as_secs())
-            .map_err(|_| Error::invalid("max crawl duration is too large"))?;
-        self.client
-            .query_opt(
-                "SELECT created_at + ($2::BIGINT * interval '1 second') <= clock_timestamp()
-                 FROM scout_crawl_runs WHERE crawl_run_id = $1",
-                &[&run_id, &max_seconds],
-            )
-            .map_err(|error| Error::storage(format!("check crawl duration: {error}")))?
-            .map(|row| row.get(0))
-            .ok_or_else(|| Error::storage(format!("crawl run {run_id:?} does not exist")))
-    }
-
-    /// Add one logical URL task. Re-enqueueing the same run/source/URL is harmless.
-    #[cfg(test)]
-    pub(crate) fn enqueue_url(
-        &mut self,
-        run_id: &str,
-        source_id: &str,
-        normalized_url: &str,
-        max_task_attempts: i32,
-    ) -> Result<bool, Error> {
-        self.enqueue_url_with_schedule(run_id, source_id, normalized_url, max_task_attempts, None)
-    }
-
-    pub(crate) fn enqueue_scheduled_url(
-        &mut self,
-        run_id: &str,
-        source_id: &str,
-        normalized_url: &str,
-        max_task_attempts: i32,
-        schedule_key: &str,
-    ) -> Result<bool, Error> {
-        self.enqueue_url_with_schedule(
-            run_id,
-            source_id,
-            normalized_url,
-            max_task_attempts,
-            Some(schedule_key),
-        )
-    }
-
-    fn enqueue_url_with_schedule(
-        &mut self,
-        run_id: &str,
-        source_id: &str,
-        normalized_url: &str,
-        max_task_attempts: i32,
-        schedule_key: Option<&str>,
-    ) -> Result<bool, Error> {
-        if source_id.trim().is_empty() || max_task_attempts <= 0 {
-            return Err(Error::invalid(
-                "source_id and max_task_attempts must be positive",
-            ));
-        }
-        let parsed = Url::parse(normalized_url)
-            .map_err(|error| Error::invalid(format!("invalid frontier URL: {error}")))?;
-        let normalized = normalize_url(parsed.clone()).map_err(Error::invalid)?;
-        if normalized != normalized_url {
-            return Err(Error::invalid("frontier URL must already be normalized"));
-        }
-        let origin = origin_key(&parsed);
-        let schedule_key = schedule_key.unwrap_or(&origin);
-        validate_schedule_key(schedule_key)?;
-        let idempotency_key = sha256_hex(
-            format!("scout.crawl-task.v1\0{run_id}\0{source_id}\0{normalized_url}").as_bytes(),
-        );
-        self.client
-            .execute(
-                "INSERT INTO scout_crawl_tasks(
-                     crawl_run_id, source_id, origin, normalized_url, schedule_key,
-                     max_task_attempts, idempotency_key
-                 )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (crawl_run_id, source_id, normalized_url) DO NOTHING",
-                &[
-                    &run_id,
-                    &source_id,
-                    &origin,
-                    &normalized_url,
-                    &schedule_key,
-                    &max_task_attempts,
-                    &idempotency_key,
-                ],
-            )
-            .map(|count| count > 0)
-            .map_err(|error| Error::storage(format!("enqueue crawl URL: {error}")))
-    }
-
-    /// Claim exactly one due task; row locking coordinates independent PostgreSQL clients.
-    pub(crate) fn claim_one(
-        &mut self,
-        run_id: &str,
-        worker_id: &str,
-        timing: LeaseTiming,
-    ) -> Result<Option<ClaimedTask>, Error> {
-        if worker_id.trim().is_empty() {
-            return Err(Error::invalid("worker_id must not be empty"));
-        }
-        let lease_ms = duration_millis(timing.lease_for)?;
-        self.client
-            .query_opt(CLAIM_ONE_TASK, &[&run_id, &worker_id, &lease_ms])
-            .map(|row| row.map(claimed_task))
-            .map_err(|error| Error::storage(format!("claim crawl task: {error}")))
-    }
-
-    pub(crate) fn renew_lease(
-        &mut self,
-        task: &ClaimedTask,
-        timing: LeaseTiming,
-    ) -> Result<bool, Error> {
-        let lease_ms = duration_millis(timing.lease_for)?;
-        self.client
-            .execute(
-                "UPDATE scout_crawl_tasks
-                 SET lease_deadline = clock_timestamp() + ($4::BIGINT * interval '1 millisecond'),
-                     updated_at = clock_timestamp()
-                 WHERE task_id = $1 AND status = 'leased'
-                   AND lease_owner = $2 AND lease_epoch = $3
-                   AND lease_deadline > clock_timestamp()
-                   AND crawl_run_id = $5 AND source_id = $6 AND origin = $7
-                   AND normalized_url = $8 AND schedule_key = $9 AND idempotency_key = $10",
-                &[
-                    &task.task_id,
-                    &task.lease_owner,
-                    &task.lease_epoch,
-                    &lease_ms,
-                    &task.crawl_run_id,
-                    &task.source_id,
-                    &task.origin,
-                    &task.normalized_url,
-                    &task.schedule_key,
-                    &task.idempotency_key,
-                ],
-            )
-            .map(|count| count == 1)
-            .map_err(|error| Error::storage(format!("renew crawl task lease: {error}")))
-    }
-
-    pub(crate) fn complete_task(&mut self, task: &ClaimedTask) -> Result<bool, Error> {
-        self.client
-            .execute(
-                "UPDATE scout_crawl_tasks
-                 SET status = 'succeeded', lease_owner = NULL, lease_deadline = NULL,
-                     updated_at = clock_timestamp()
-                 WHERE task_id = $1 AND status = 'leased'
-                   AND lease_owner = $2 AND lease_epoch = $3
-                   AND lease_deadline > clock_timestamp()
-                   AND crawl_run_id = $4 AND source_id = $5 AND origin = $6
-                   AND normalized_url = $7 AND schedule_key = $8 AND idempotency_key = $9",
-                &[
-                    &task.task_id,
-                    &task.lease_owner,
-                    &task.lease_epoch,
-                    &task.crawl_run_id,
-                    &task.source_id,
-                    &task.origin,
-                    &task.normalized_url,
-                    &task.schedule_key,
-                    &task.idempotency_key,
-                ],
-            )
-            .map(|count| count == 1)
-            .map_err(|error| Error::storage(format!("complete crawl task: {error}")))
-    }
-
-    /// Persist a bounded task retry or terminal failure. HTTP retry counts stay separate.
-    pub(crate) fn fail_task(
-        &mut self,
-        task: &ClaimedTask,
-        error_message: &str,
-        retry_delay: Duration,
-    ) -> Result<Option<TaskStatus>, Error> {
-        let delay_ms = duration_millis(retry_delay)?;
-        let row = self
-            .client
-            .query_opt(
-                "UPDATE scout_crawl_tasks
-                 SET status = CASE
-                         WHEN task_attempt_count >= max_task_attempts THEN 'failed'
-                         ELSE 'pending'
-                     END,
-                     retry_at = CASE
-                         WHEN task_attempt_count >= max_task_attempts THEN retry_at
-                         ELSE clock_timestamp() + ($4::BIGINT * interval '1 millisecond')
-                     END,
-                     lease_owner = NULL,
-                     lease_deadline = NULL,
-                     last_error = $5,
-                     updated_at = clock_timestamp()
-                 WHERE task_id = $1 AND status = 'leased'
-                   AND lease_owner = $2 AND lease_epoch = $3
-                   AND lease_deadline > clock_timestamp()
-                   AND crawl_run_id = $6 AND source_id = $7 AND origin = $8
-                   AND normalized_url = $9 AND schedule_key = $10 AND idempotency_key = $11
-                 RETURNING status",
-                &[
-                    &task.task_id,
-                    &task.lease_owner,
-                    &task.lease_epoch,
-                    &delay_ms,
-                    &error_message,
-                    &task.crawl_run_id,
-                    &task.source_id,
-                    &task.origin,
-                    &task.normalized_url,
-                    &task.schedule_key,
-                    &task.idempotency_key,
-                ],
-            )
-            .map_err(|error| Error::storage(format!("record crawl task failure: {error}")))?;
-        row.map(|row| TaskStatus::parse(row.get::<_, &str>(0)))
-            .transpose()
-    }
-
-    pub(crate) fn lease_is_live(&mut self, task: &ClaimedTask) -> Result<bool, Error> {
-        self.client
-            .query_opt(
-                "SELECT task_id FROM scout_crawl_tasks
-                 WHERE task_id = $1 AND crawl_run_id = $2 AND source_id = $3 AND origin = $4
-                   AND normalized_url = $5 AND schedule_key = $6 AND idempotency_key = $7
-                   AND status = 'leased' AND lease_owner = $8 AND lease_epoch = $9
-                   AND lease_deadline > clock_timestamp()",
-                &[
-                    &task.task_id,
-                    &task.crawl_run_id,
-                    &task.source_id,
-                    &task.origin,
-                    &task.normalized_url,
-                    &task.schedule_key,
-                    &task.idempotency_key,
-                    &task.lease_owner,
-                    &task.lease_epoch,
-                ],
-            )
-            .map(|row| row.is_some())
-            .map_err(|error| Error::storage(format!("validate crawl task lease: {error}")))
-    }
-
-    pub(crate) fn unfinished_task_count(&mut self, run_id: &str) -> Result<usize, Error> {
-        let count: i64 = self
-            .client
-            .query_one(
-                "SELECT count(*) FROM scout_crawl_tasks
-                 WHERE crawl_run_id = $1 AND status IN ('pending', 'leased')",
-                &[&run_id],
-            )
-            .map_err(|error| Error::storage(format!("count unfinished crawl tasks: {error}")))?
-            .get(0);
-        usize::try_from(count)
-            .map_err(|_| Error::storage("unfinished crawl task count does not fit memory"))
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PersistedRequestPolicy {
-    global_concurrency: i32,
-    origin_concurrency: i32,
-    min_start_spacing_ms: i64,
-    request_timeout_ms: i64,
-    permit_safety_margin_ms: i64,
-    robots_cache_ms: i64,
-    max_total_attempts: i64,
-    max_pending_requests: i32,
-}
-
-fn request_policy_values(limits: RequestPolicyLimits) -> Result<PersistedRequestPolicy, Error> {
-    let spacing_ms = duration_millis_allow_zero(limits.min_start_spacing)?;
-    let timeout_ms = duration_millis(limits.request_timeout)?;
-    let safety_ms = duration_millis(limits.permit_safety_margin)?;
-    let cache_ms = duration_millis(limits.robots_cache_ttl)?;
-    let max_attempts = i64::try_from(limits.max_total_attempts)
-        .map_err(|_| Error::invalid("max_total_attempts is too large"))?;
-    let max_pending = i32::try_from(limits.max_pending_requests)
-        .map_err(|_| Error::invalid("max_pending_requests is too large"))?;
-    if limits.global_concurrency == 0
-        || limits.origin_concurrency == 0
-        || max_attempts <= 0
-        || max_pending <= 0
-    {
-        return Err(Error::invalid("shared request limits must be positive"));
-    }
-    Ok(PersistedRequestPolicy {
-        global_concurrency: i32::try_from(limits.global_concurrency)
-            .map_err(|_| Error::invalid("global_concurrency is too large"))?,
-        origin_concurrency: i32::try_from(limits.origin_concurrency)
-            .map_err(|_| Error::invalid("origin_concurrency is too large"))?,
-        min_start_spacing_ms: spacing_ms,
-        request_timeout_ms: timeout_ms,
-        permit_safety_margin_ms: safety_ms,
-        robots_cache_ms: cache_ms,
-        max_total_attempts: max_attempts,
-        max_pending_requests: max_pending,
-    })
 }
 
 fn validate_request_identity(value: &str, label: &str) -> Result<(), Error> {
@@ -1263,65 +322,6 @@ fn validate_schedule_key(value: &str) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-fn duration_millis_allow_zero(duration: Duration) -> Result<i64, Error> {
-    let millis = duration.as_nanos().div_ceil(1_000_000);
-    i64::try_from(millis)
-        .map_err(|_| Error::invalid("duration is too large for PostgreSQL policy state"))
-}
-
-fn request_permit_grant(
-    tx: &mut postgres::Transaction<'_>,
-    run_id: &str,
-    permit_id: i64,
-    request_id: &str,
-    origin: &str,
-    expires_at_unix_ms: Option<i64>,
-) -> Result<RequestPermitGrant, Error> {
-    let expires_at_unix_ms =
-        expires_at_unix_ms.ok_or_else(|| Error::storage("active request permit has no expiry"))?;
-    let active_global: i64 = tx
-        .query_one(
-            "SELECT count(*) FROM scout_crawl_request_permits
-             WHERE crawl_run_id = $1 AND status = 'active'",
-            &[&run_id],
-        )
-        .map_err(|error| Error::storage(format!("count active requests: {error}")))?
-        .get(0);
-    let active_origin: i64 = tx
-        .query_one(
-            "SELECT count(*) FROM scout_crawl_request_permits
-             WHERE crawl_run_id = $1 AND status = 'active' AND origin = $2",
-            &[&run_id, &origin],
-        )
-        .map_err(|error| Error::storage(format!("count active origin requests: {error}")))?
-        .get(0);
-    Ok(RequestPermitGrant {
-        permit_id,
-        request_id: request_id.into(),
-        expires_at_unix_ms,
-        active_global: usize::try_from(active_global)
-            .map_err(|_| Error::storage("active request count does not fit memory"))?,
-        active_origin: usize::try_from(active_origin)
-            .map_err(|_| Error::storage("active origin request count does not fit memory"))?,
-    })
-}
-
-fn claimed_task(row: postgres::Row) -> ClaimedTask {
-    ClaimedTask {
-        task_id: row.get("task_id"),
-        crawl_run_id: row.get("crawl_run_id"),
-        source_id: row.get("source_id"),
-        origin: row.get("origin"),
-        normalized_url: row.get("normalized_url"),
-        schedule_key: row.get("schedule_key"),
-        task_attempt_count: row.get("task_attempt_count"),
-        lease_owner: row.get("lease_owner"),
-        lease_epoch: row.get("lease_epoch"),
-        lease_deadline_unix_ms: row.get("lease_deadline_unix_ms"),
-        idempotency_key: row.get("idempotency_key"),
-    }
 }
 
 fn validate_digest(value: &str, name: &str) -> Result<(), Error> {
@@ -2365,6 +1365,251 @@ mod tests {
                     &sha256_hex(b"fresh robots"),
                 )
                 .unwrap()
+        );
+    }
+
+    // Run with SCOUT_TEST_DATABASE_URL set and `cargo test --lib frontier::tests::postgres_ticket4_acceptance_contract -- --ignored`.
+    #[test]
+    #[ignore = "requires a coordinator-only PostgreSQL test database"]
+    fn postgres_ticket4_acceptance_contract() {
+        let database_url = std::env::var("SCOUT_TEST_DATABASE_URL")
+            .expect("set SCOUT_TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let suffix = sha256_hex(format!("ticket4-{:?}", Instant::now()).as_bytes());
+        let run_id = format!("ticket4-acceptance-{suffix}");
+        let _cleanup = RunCleanup {
+            database_url: database_url.clone(),
+            run_id: run_id.clone(),
+        };
+        let mut store = FrontierStore::connect(&database_url).unwrap();
+        store.apply_migrations().unwrap();
+        store
+            .ensure_run(&run_id, &sha256_hex(run_id.as_bytes()))
+            .unwrap();
+        store
+            .enqueue_url(&run_id, "docs", "https://example.com/seed", 3)
+            .unwrap();
+        let timing = LeaseTiming::for_request_timeout(Duration::from_secs(1)).unwrap();
+        let task = store
+            .claim_one(&run_id, "worker-a", timing)
+            .unwrap()
+            .unwrap();
+        let accepted = |value: &str| {
+            let identity = format!("Prose\0{value}");
+            super::AcceptedCapture {
+                source_id: "docs".into(),
+                content_hash: sha256_hex(identity.as_bytes()),
+                identity,
+                body_hash: sha256_hex(format!("body-{value}").as_bytes()),
+                body_size: value.len() as i64,
+                metadata_json: format!("{{\"capture\":\"{value}\"}}"),
+            }
+        };
+        let capture = accepted("first");
+        let discovered = vec![
+            super::DiscoveredTask {
+                source_id: "docs".into(),
+                normalized_url: "https://example.com/discovered".into(),
+                schedule_key: "https://example.com".into(),
+            },
+            super::DiscoveredTask {
+                source_id: "docs".into(),
+                normalized_url: "https://example.com/discovered".into(),
+                schedule_key: "https://example.com".into(),
+            },
+        ];
+        let result_hash = sha256_hex(b"ticket4-first-result");
+        assert_eq!(
+            store
+                .accept_task_result(
+                    &task,
+                    &result_hash,
+                    Some(&capture),
+                    "",
+                    &discovered,
+                    1,
+                    3,
+                    20
+                )
+                .unwrap(),
+            super::CompletionAcceptance::Accepted {
+                accepted_discovered_count: 1,
+                rejected_discovered_count: 1,
+            }
+        );
+        assert_eq!(
+            store
+                .accept_task_result(
+                    &task,
+                    &result_hash,
+                    Some(&capture),
+                    "",
+                    &discovered,
+                    1,
+                    3,
+                    20
+                )
+                .unwrap(),
+            super::CompletionAcceptance::Duplicate {
+                accepted_discovered_count: 1,
+                rejected_discovered_count: 1,
+            }
+        );
+        assert!(
+            store
+                .accept_task_result(
+                    &task,
+                    &sha256_hex(b"conflicting-payload"),
+                    Some(&capture),
+                    "",
+                    &discovered,
+                    1,
+                    3,
+                    20,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .content_group_counts_by_source(&run_id)
+                .unwrap()
+                .get("docs"),
+            Some(&1)
+        );
+        assert!(
+            store
+                .claim_one_excluding(&run_id, "quota-worker", timing, &["docs".into()])
+                .unwrap()
+                .is_none(),
+            "quota-satisfied Source should stop receiving claims"
+        );
+        assert_eq!(
+            store.accepted_capture_batch(&run_id, 0, 100).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store
+                .client
+                .query_one(
+                    "SELECT count(*) FROM scout_crawl_tasks WHERE crawl_run_id = $1",
+                    &[&run_id],
+                )
+                .unwrap()
+                .get::<_, i64>(0),
+            2,
+            "duplicate discoveries should enqueue one URL"
+        );
+
+        // This error occurs after the group insert point. A failed acceptance must roll back
+        // the group, capture result, discovery, and task completion as one transaction.
+        let invalid_discovery = super::DiscoveredTask {
+            source_id: "docs".into(),
+            normalized_url: "not a URL".into(),
+            schedule_key: "https://example.com".into(),
+        };
+        let rollback_task = store
+            .claim_one(&run_id, "worker-a", timing)
+            .unwrap()
+            .unwrap();
+        let rollback_capture = accepted("rollback");
+        assert!(
+            store
+                .accept_task_result(
+                    &rollback_task,
+                    &sha256_hex(b"rollback-result"),
+                    Some(&rollback_capture),
+                    "",
+                    &[invalid_discovery],
+                    0,
+                    3,
+                    20,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .content_group_counts_by_source(&run_id)
+                .unwrap()
+                .get("docs"),
+            Some(&1)
+        );
+        assert_eq!(
+            store.accepted_capture_batch(&run_id, 0, 100).unwrap().len(),
+            1
+        );
+        assert!(store.lease_is_live(&rollback_task).unwrap());
+
+        let stale_run_id = format!("ticket4-stale-{suffix}");
+        let _stale_cleanup = RunCleanup {
+            database_url: database_url.clone(),
+            run_id: stale_run_id.clone(),
+        };
+        let mut stale_store = FrontierStore::connect(&database_url).unwrap();
+        stale_store.apply_migrations().unwrap();
+        stale_store
+            .ensure_run(&stale_run_id, &sha256_hex(stale_run_id.as_bytes()))
+            .unwrap();
+        stale_store
+            .enqueue_url(&stale_run_id, "docs", "https://example.com/late", 3)
+            .unwrap();
+        let short_timing = LeaseTiming::new(
+            Duration::from_millis(1),
+            Duration::from_millis(25),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        let expired = stale_store
+            .claim_one(&stale_run_id, "worker-old", short_timing)
+            .unwrap()
+            .unwrap();
+        thread::sleep(Duration::from_millis(75));
+        let current = stale_store
+            .claim_one(&stale_run_id, "worker-new", short_timing)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.lease_epoch, expired.lease_epoch + 1);
+        let late_capture = accepted("late");
+        assert_eq!(
+            stale_store
+                .accept_task_result(
+                    &expired,
+                    &sha256_hex(b"late-result"),
+                    Some(&late_capture),
+                    "",
+                    &[],
+                    0,
+                    3,
+                    20,
+                )
+                .unwrap(),
+            super::CompletionAcceptance::Stale
+        );
+        assert!(
+            stale_store
+                .content_group_counts_by_source(&stale_run_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            stale_store
+                .accept_task_result(
+                    &current,
+                    &sha256_hex(b"late-result"),
+                    Some(&late_capture),
+                    "",
+                    &[],
+                    0,
+                    3,
+                    20,
+                )
+                .unwrap(),
+            super::CompletionAcceptance::Accepted { .. }
+        ));
+        assert_eq!(
+            stale_store
+                .content_group_counts_by_source(&stale_run_id)
+                .unwrap()
+                .get("docs"),
+            Some(&1)
         );
     }
 }

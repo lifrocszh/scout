@@ -759,9 +759,23 @@ pub(crate) fn materialize_existing_spool(
     config: &Config,
     events: &Arc<Mutex<Events>>,
 ) -> Result<SnapshotResult, Error> {
-    let valid_run_id = source_run_id.strip_prefix("run-").is_some_and(|suffix| {
-        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-    });
+    let valid_run_id = source_run_id
+        .strip_prefix("run-")
+        .is_some_and(|suffix| {
+            suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || source_run_id
+            .strip_prefix("local-")
+            .is_some_and(|uuid| {
+                uuid.len() == 36
+                    && uuid.bytes().enumerate().all(|(index, byte)| {
+                        if matches!(index, 8 | 13 | 18 | 23) {
+                            byte == b'-'
+                        } else {
+                            byte.is_ascii_hexdigit()
+                        }
+                    })
+            });
     if !valid_run_id {
         return Err(Error::invalid("invalid source Crawl run ID"));
     }
@@ -962,6 +976,9 @@ fn read_source_run_summary(
 mod tests {
     use super::*;
     use crate::crawl::Source;
+    use crate::crawl::extract::extract;
+    use crate::crawl::spool::CaptureSpool;
+    use ::url::Url;
     use serde_json::Value;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1025,6 +1042,32 @@ mod tests {
             content_bytes: content.len(),
             body_hash: sha256_hex(body.as_bytes()),
             body_file: format!("bodies/{}", sha256_hex(body.as_bytes())),
+            content_type: "text/html".into(),
+            status_code: 200,
+        }
+    }
+
+    fn extracted_capture(body: &str, requested_url: &str, final_url: &str) -> Capture {
+        let page_url = Url::parse(final_url).expect("fixture URL");
+        let extracted = extract(body, &page_url, 1).expect("extract fixture body");
+        let body_hash = sha256_hex(body.as_bytes());
+        Capture {
+            requested_url: requested_url.into(),
+            final_url: final_url.into(),
+            redirects: Vec::new(),
+            source_id: "fixture".into(),
+            title: extracted.title,
+            description: extracted.description,
+            language: extracted.language,
+            canonical_url: extracted.canonical_url,
+            extraction_method: extracted.extraction_method,
+            content: extracted.content,
+            identity: extracted.identity,
+            content_hash: extracted.content_hash,
+            blocks: extracted.blocks,
+            content_bytes: body.len(),
+            body_hash: body_hash.clone(),
+            body_file: format!("bodies/{body_hash}"),
             content_type: "text/html".into(),
             status_code: 200,
         }
@@ -1133,6 +1176,114 @@ mod tests {
         );
         let _ = fs::remove_dir_all(first_root);
         let _ = fs::remove_dir_all(second_root);
+    }
+
+    #[test]
+    fn durable_spool_replay_materializes_the_same_corpus_as_memory() {
+        let config = config();
+        let memory_root = temp_root("durable-memory");
+        let spool_root = temp_root("durable-spool");
+        let body_a = "<html lang=\"en\"><head><title>Docker</title></head><body><main><h1>Docker</h1><p>Docker makes it easier to package and deploy applications reliably.</p></main></body></html>";
+        let body_b = "<html lang=\"en\"><head><title>Docker guide</title></head><body><main><h1>Docker guide</h1><p>Docker helps teams package software and deploy services safely.</p></main></body></html>";
+        let captures = vec![
+            extracted_capture(
+                body_a,
+                "https://example.invalid/docs/docker",
+                "https://example.invalid/docs/docker",
+            ),
+            extracted_capture(
+                body_a,
+                "https://example.invalid/docs/docker-copy",
+                "https://example.invalid/docs/docker-copy",
+            ),
+            extracted_capture(
+                body_b,
+                "https://example.invalid/docs/docker-refresh",
+                "https://example.invalid/docs/docker",
+            ),
+        ];
+        let crawl_dir = memory_root.join("crawl");
+        fs::create_dir_all(crawl_dir.join("bodies")).expect("create in-memory crawl dir");
+        for capture in &captures {
+            let body = if capture.body_hash == sha256_hex(body_a.as_bytes()) {
+                body_a
+            } else {
+                body_b
+            };
+            fs::write(crawl_dir.join(&capture.body_file), body).expect("write in-memory body");
+        }
+        let memory_snapshot = materialize(
+            &memory_root,
+            &crawl_dir,
+            "run-fixed",
+            &config,
+            "2025-01-01T00:00:00.000Z",
+            "2025-01-01T00:00:01.000Z",
+            CrawlResult {
+                captures: captures.clone(),
+                rejected_count: 0,
+                failed_count: 0,
+                stop_reason: "frontier_exhausted".into(),
+            },
+        )
+        .expect("materialize in-memory Corpus");
+
+        let spool_crawl_dir = spool_root.join("crawl");
+        fs::create_dir_all(spool_crawl_dir.join("bodies")).expect("create spool crawl dir");
+        let spool = CaptureSpool::open(&spool_crawl_dir, config.max_frontier).expect("open spool");
+        for capture in captures.iter().rev() {
+            let body = if capture.body_hash == sha256_hex(body_a.as_bytes()) {
+                body_a
+            } else {
+                body_b
+            };
+            fs::write(spool_crawl_dir.join(&capture.body_file), body).expect("write spool body");
+            spool
+                .insert_capture(capture, &capture_selection_key(capture))
+                .expect("project accepted capture");
+        }
+        let replayed = &captures[0];
+        assert!(
+            !spool
+                .insert_capture(replayed, &capture_selection_key(replayed))
+                .expect("replay accepted capture idempotently")
+        );
+        assert_eq!(
+            spool.capture_count().expect("capture count"),
+            captures.len()
+        );
+        let spool_snapshot = materialize_spooled(
+            SpoolMaterialization {
+                data_dir: &spool_root,
+                crawl_dir: &spool_crawl_dir,
+                run_id: "run-fixed",
+                config: &config,
+                started: "2025-01-01T00:00:00.000Z",
+                completed: "2025-01-01T00:00:01.000Z",
+                spool: &spool,
+            },
+            CrawlResult {
+                captures: Vec::new(),
+                rejected_count: 0,
+                failed_count: 0,
+                stop_reason: "frontier_exhausted".into(),
+            },
+        )
+        .expect("materialize durable spool Corpus");
+        assert_eq!(spool_snapshot.id, memory_snapshot.id);
+        assert_eq!(spool_snapshot.pages, memory_snapshot.pages);
+        assert_eq!(spool_snapshot.aliases, memory_snapshot.aliases);
+        let memory_snapshot_dir = memory_root.join("corpora").join(&memory_snapshot.id);
+        let spool_snapshot_dir = spool_root.join("corpora").join(&spool_snapshot.id);
+        for file in ["pages.jsonl", "aliases.jsonl", "passages.jsonl"] {
+            assert_eq!(
+                fs::read(memory_snapshot_dir.join(file)).expect("read in-memory Corpus file"),
+                fs::read(spool_snapshot_dir.join(file)).expect("read spooled Corpus file"),
+                "durable replay changed {file}"
+            );
+        }
+        let _ = fs::remove_dir_all(memory_root);
+        let _ = fs::remove_dir_all(spool_root);
     }
 
     #[test]

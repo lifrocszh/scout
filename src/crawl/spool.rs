@@ -154,19 +154,39 @@ impl CaptureSpool {
         }
         let payload = serde_json::to_string(&CaptureStub::from(capture))
             .map_err(|error| Error::storage(format!("serialize capture metadata: {error}")))?;
-        transaction
-            .execute(
-                "INSERT INTO captures(source_id, final_url, content_hash, selection_key, payload_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    capture.source_id,
-                    capture.final_url,
-                    capture.content_hash,
-                    selection_key,
-                    payload
-                ],
+        let prior = transaction
+            .query_row(
+                "SELECT payload_json FROM captures
+                 WHERE source_id = ?1 AND final_url = ?2 AND selection_key = ?3
+                 ORDER BY row_id LIMIT 1",
+                params![capture.source_id, capture.final_url, selection_key],
+                |row| row.get::<_, String>(0),
             )
-            .map_err(|error| Error::storage(format!("write capture metadata: {error}")))?;
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(String::new()),
+                other => Err(other),
+            })
+            .map_err(|error| Error::storage(format!("check duplicate capture: {error}")))?;
+        if !prior.is_empty() && prior != payload {
+            return Err(Error::invalid(
+                "capture selection identity was reused with different metadata",
+            ));
+        }
+        if prior.is_empty() {
+            transaction
+                .execute(
+                    "INSERT INTO captures(source_id, final_url, content_hash, selection_key, payload_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        capture.source_id,
+                        capture.final_url,
+                        capture.content_hash,
+                        selection_key,
+                        payload
+                    ],
+                )
+                .map_err(|error| Error::storage(format!("write capture metadata: {error}")))?;
+        }
         transaction
             .commit()
             .map_err(|error| Error::storage(format!("commit capture spool insert: {error}")))?;

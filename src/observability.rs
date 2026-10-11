@@ -3,6 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -46,6 +47,39 @@ impl Events {
             component,
             log: BufWriter::new(file),
         })
+    }
+
+    /// Open a run log for coordinator recovery while keeping the first run record intact.
+    pub(crate) fn open_or_append(
+        data_dir: &Path,
+        run_id: &str,
+        component: &'static str,
+    ) -> Result<(Self, bool), Error> {
+        let dir = data_dir.join("logs");
+        fs::create_dir_all(&dir)
+            .map_err(|error| Error::storage(format!("create logs directory: {error}")))?;
+        let path = dir.join(format!("{run_id}.jsonl"));
+        let (file, created) = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (
+                OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .map_err(|error| Error::storage(format!("append event log: {error}")))?,
+                false,
+            ),
+            Err(error) => {
+                return Err(Error::storage(format!("create event log: {error}")));
+            }
+        };
+        Ok((
+            Self {
+                run_id: run_id.into(),
+                component,
+                log: BufWriter::new(file),
+            },
+            created,
+        ))
     }
 
     pub(crate) fn emit(&mut self, event: &str, outcome: &'static str, data: Value) {

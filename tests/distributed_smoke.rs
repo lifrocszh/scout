@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -215,6 +216,19 @@ fn three_workers_share_coordinator_request_limits_for_local_pages() {
                 .expect("run worker process")
         })
         .collect::<Vec<_>>();
+    let worker_pids = workers
+        .iter()
+        .map(|worker| worker.id())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        worker_pids.len(),
+        3,
+        "workers must be separate OS processes"
+    );
+    assert!(
+        !worker_pids.contains(&coordinator.id()),
+        "coordinator must be a separate OS process"
+    );
     let worker_deadline = Instant::now() + Duration::from_secs(20);
     let mut workers_timed_out = false;
     while workers
