@@ -1,7 +1,7 @@
 use super::{Config, Crawler};
 use crate::corpus::{
-    IncompleteCrawl, SnapshotResult, materialize_spooled, write_incomplete,
-    write_incomplete_spooled,
+    IncompleteCrawl, IncompleteSpoolRun, SnapshotResult, SpoolMaterialization, materialize_spooled,
+    write_incomplete, write_incomplete_spooled,
 };
 use crate::error::Error;
 use crate::observability::{Events, emit_shared};
@@ -24,7 +24,7 @@ pub(crate) fn execute(
     let mut crawler = match Crawler::new(config, &crawl_dir, events.clone()) {
         Ok(crawler) => crawler,
         Err(error) => {
-            let _ = write_incomplete(
+            write_incomplete(
                 &crawl_dir,
                 run_id,
                 config,
@@ -42,16 +42,16 @@ pub(crate) fn execute(
     let crawl_result = match crawler.run() {
         Ok(result) => result,
         Err(error) => {
-            let _ = write_incomplete_spooled(
-                &crawl_dir,
+            write_incomplete_spooled(IncompleteSpoolRun {
+                crawl_dir: &crawl_dir,
                 run_id,
                 config,
-                &started_at,
-                crawler.spool(),
-                crawler.rejected_count,
-                crawler.failed_count,
-                &error,
-            );
+                started: &started_at,
+                spool: crawler.spool(),
+                rejected: crawler.rejected_count,
+                failed: crawler.failed_count,
+                error: &error,
+            });
             return Err(error);
         }
     };
@@ -67,14 +67,17 @@ pub(crate) fn execute(
             "configured_origin": config.origin_concurrency,
         }),
     );
+    let completed_at = now();
     materialize_spooled(
-        data_dir,
-        &crawl_dir,
-        run_id,
-        config,
-        &started_at,
-        &now(),
+        SpoolMaterialization {
+            data_dir,
+            crawl_dir: &crawl_dir,
+            run_id,
+            config,
+            started: &started_at,
+            completed: &completed_at,
+            spool: crawler.spool(),
+        },
         crawl_result,
-        crawler.spool(),
     )
 }

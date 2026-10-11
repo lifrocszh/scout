@@ -26,7 +26,7 @@ pub(crate) struct QueryEmbedder {
 
 enum EmbeddingBackend {
     Deterministic,
-    FastEmbed(TextEmbedding),
+    FastEmbed(Box<TextEmbedding>),
 }
 
 pub(super) struct FastEmbedModelSpec {
@@ -260,7 +260,7 @@ impl EmbeddingSession {
                 let model = TextEmbedding::try_new(options).map_err(|error| {
                     Error::storage(format!("initialize FastEmbed model: {error}"))
                 })?;
-                EmbeddingBackend::FastEmbed(model)
+                EmbeddingBackend::FastEmbed(Box::new(model))
             }
             backend => {
                 return Err(Error::invalid(format!(

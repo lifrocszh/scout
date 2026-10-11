@@ -1236,7 +1236,7 @@ impl Source {
             && self
                 .allowed_urls
                 .as_ref()
-                .map_or(true, |allowed| allowed.contains(&normalized))
+                .is_none_or(|allowed| allowed.contains(&normalized))
     }
 }
 

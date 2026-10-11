@@ -12,16 +12,67 @@ use std::io::{BufRead, BufReader, BufWriter};
 
 const SQLITE_CACHE_KIB: i64 = -8192;
 
+pub(crate) struct SpoolMaterialization<'a> {
+    pub(crate) data_dir: &'a Path,
+    pub(crate) crawl_dir: &'a Path,
+    pub(crate) run_id: &'a str,
+    pub(crate) config: &'a Config,
+    pub(crate) started: &'a str,
+    pub(crate) completed: &'a str,
+    pub(crate) spool: &'a CaptureSpool,
+}
+
+pub(crate) struct IncompleteSpoolRun<'a> {
+    pub(crate) crawl_dir: &'a Path,
+    pub(crate) run_id: &'a str,
+    pub(crate) config: &'a Config,
+    pub(crate) started: &'a str,
+    pub(crate) spool: &'a CaptureSpool,
+    pub(crate) rejected: usize,
+    pub(crate) failed: usize,
+    pub(crate) error: &'a Error,
+}
+
+struct BoundedManifestInput<'a> {
+    connection: &'a Connection,
+    run_id: &'a str,
+    config: &'a Config,
+    started: &'a str,
+    completed: &'a str,
+    snapshot_id: &'a str,
+    captured_page_count: usize,
+    page_count: usize,
+    alias_count: usize,
+    passage_count: usize,
+    rejected_count: usize,
+    failed_count: usize,
+    stop_reason: String,
+}
+
+struct ManifestPageSelection {
+    capture_row_id: i64,
+    capture: CaptureStub,
+    selection_key: String,
+    selected_row_id: i64,
+    selected: CaptureStub,
+    selected_key: String,
+    representative_row_id: i64,
+    representative: CaptureStub,
+}
+
 pub(crate) fn materialize_spooled(
-    data_dir: &Path,
-    crawl_dir: &Path,
-    run_id: &str,
-    config: &Config,
-    started: &str,
-    completed: &str,
+    input: SpoolMaterialization<'_>,
     result: CrawlResult,
-    spool: &CaptureSpool,
 ) -> Result<SnapshotResult, Error> {
+    let SpoolMaterialization {
+        data_dir,
+        crawl_dir,
+        run_id,
+        config,
+        started,
+        completed,
+        spool,
+    } = input;
     let connection = Connection::open(spool.path()).map_err(|error| {
         Error::storage(format!("open capture spool for materialization: {error}"))
     })?;
@@ -288,21 +339,21 @@ pub(crate) fn materialize_spooled(
         .map_err(|error| Error::storage(format!("finish snapshot identity: {error}")))?;
     let snapshot_id = format!("snapshot-{}", snapshot_identity.finish());
 
-    let mut manifest = bounded_manifest(
-        &connection,
+    let mut manifest = bounded_manifest(BoundedManifestInput {
+        connection: &connection,
         run_id,
         config,
         started,
         completed,
-        &snapshot_id,
+        snapshot_id: &snapshot_id,
         captured_page_count,
         page_count,
         alias_count,
         passage_count,
-        result.rejected_count,
-        result.failed_count,
-        result.stop_reason,
-    );
+        rejected_count: result.rejected_count,
+        failed_count: result.failed_count,
+        stop_reason: result.stop_reason,
+    });
     manifest.manifest_sha256 = serialized_sha256(&manifest, "manifest")?;
     write_pretty_json(&crawl_dir.join("crawl-manifest.json"), &manifest)?;
     let crawl_manifest_sha256 = manifest.manifest_sha256.clone();
@@ -342,17 +393,20 @@ pub(crate) fn materialize_spooled(
 }
 
 pub(crate) fn seal_existing_materialized_spool(
-    data_dir: &Path,
-    crawl_dir: &Path,
-    run_id: &str,
-    config: &Config,
-    started: &str,
-    completed: &str,
+    input: SpoolMaterialization<'_>,
     rejected_count: usize,
     failed_count: usize,
-    spool: &CaptureSpool,
     corpus_dir: &Path,
 ) -> Result<SnapshotResult, Error> {
+    let SpoolMaterialization {
+        data_dir,
+        crawl_dir,
+        run_id,
+        config,
+        started,
+        completed,
+        spool,
+    } = input;
     let connection = Connection::open(spool.path())
         .map_err(|error| Error::storage(format!("open capture spool for sealing: {error}")))?;
     connection
@@ -448,21 +502,21 @@ pub(crate) fn seal_existing_materialized_spool(
         )));
     }
 
-    let mut manifest = bounded_manifest(
-        &connection,
+    let mut manifest = bounded_manifest(BoundedManifestInput {
+        connection: &connection,
         run_id,
         config,
         started,
         completed,
-        &snapshot_id,
+        snapshot_id: &snapshot_id,
         captured_page_count,
         page_count,
         alias_count,
         passage_count,
         rejected_count,
         failed_count,
-        "page_target_reached".into(),
-    );
+        stop_reason: "page_target_reached".into(),
+    });
     manifest.manifest_sha256 = serialized_sha256(&manifest, "recovered Crawl manifest")?;
     write_pretty_json(&crawl_dir.join("crawl-manifest.json"), &manifest)?;
     let crawl_manifest_sha256 = manifest.manifest_sha256.clone();
@@ -853,21 +907,22 @@ fn write_aliases(connection: &Connection, path: &Path) -> Result<String, Error> 
     Ok(writer.finish())
 }
 
-fn bounded_manifest<'a>(
-    connection: &'a Connection,
-    run_id: &str,
-    config: &Config,
-    started: &str,
-    completed: &str,
-    snapshot_id: &str,
-    captured_page_count: usize,
-    page_count: usize,
-    alias_count: usize,
-    passage_count: usize,
-    rejected_count: usize,
-    failed_count: usize,
-    stop_reason: String,
-) -> BoundedManifest<'a> {
+fn bounded_manifest<'a>(input: BoundedManifestInput<'a>) -> BoundedManifest<'a> {
+    let BoundedManifestInput {
+        connection,
+        run_id,
+        config,
+        started,
+        completed,
+        snapshot_id,
+        captured_page_count,
+        page_count,
+        alias_count,
+        passage_count,
+        rejected_count,
+        failed_count,
+        stop_reason,
+    } = input;
     BoundedManifest {
         schema_version: CRAWL_SCHEMA,
         run_id: run_id.into(),
@@ -958,7 +1013,7 @@ impl Serialize for ManifestPageStream<'_> {
                 .map_err(serde::ser::Error::custom)?;
             let representative = serde_json::from_str::<CaptureStub>(&representative_json)
                 .map_err(serde::ser::Error::custom)?;
-            let value = make_manifest_page(
+            let value = make_manifest_page(ManifestPageSelection {
                 capture_row_id,
                 capture,
                 selection_key,
@@ -967,23 +1022,24 @@ impl Serialize for ManifestPageStream<'_> {
                 selected_key,
                 representative_row_id,
                 representative,
-            );
+            });
             sequence.serialize_element(&value)?;
         }
         sequence.end()
     }
 }
 
-fn make_manifest_page(
-    capture_row_id: i64,
-    capture: CaptureStub,
-    selection_key: String,
-    selected_row_id: i64,
-    selected: CaptureStub,
-    selected_key: String,
-    representative_row_id: i64,
-    representative: CaptureStub,
-) -> ManifestPage {
+fn make_manifest_page(selection: ManifestPageSelection) -> ManifestPage {
+    let ManifestPageSelection {
+        capture_row_id,
+        capture,
+        selection_key,
+        selected_row_id,
+        selected,
+        selected_key,
+        representative_row_id,
+        representative,
+    } = selection;
     let capture_id = capture_id_parts(&capture.source_id, &capture.final_url, &selection_key);
     let selected_capture_id =
         capture_id_parts(&selected.source_id, &selected.final_url, &selected_key);
@@ -1161,16 +1217,17 @@ fn write_jsonl_payload<W: Write>(
         .map_err(|error| Error::storage(format!("write {file_name}: {error}")))
 }
 
-pub(crate) fn write_incomplete_spooled(
-    crawl_dir: &Path,
-    run_id: &str,
-    config: &Config,
-    started: &str,
-    spool: &CaptureSpool,
-    rejected: usize,
-    failed: usize,
-    error: &Error,
-) {
+pub(crate) fn write_incomplete_spooled(input: IncompleteSpoolRun<'_>) {
+    let IncompleteSpoolRun {
+        crawl_dir,
+        run_id,
+        config,
+        started,
+        spool,
+        rejected,
+        failed,
+        error,
+    } = input;
     let Ok(connection) = Connection::open(spool.path()) else {
         return;
     };

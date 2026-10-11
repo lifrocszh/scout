@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"SCOUT-EMBEDDING-CHUNK-V1\0";
 pub(super) const CHECKPOINT_SCHEMA: &str = "scout.embedding-checkpoint.v1";
+pub(super) type CheckpointChunk = Vec<(u64, Vec<f32>)>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct BuildCheckpointIdentity {
@@ -108,7 +109,7 @@ impl BuildCheckpointStore {
         &self,
         chunk_number: usize,
         expected_keys: &[u64],
-    ) -> Result<Option<Vec<(u64, Vec<f32>)>>, Error> {
+    ) -> Result<Option<CheckpointChunk>, Error> {
         let path = self.chunk_path(chunk_number);
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -211,7 +212,7 @@ fn parse_chunk(
     expected_chunk_number: usize,
     expected_keys: &[u64],
     expected_dimensions: usize,
-) -> Option<Vec<(u64, Vec<f32>)>> {
+) -> Option<CheckpointChunk> {
     if bytes.len() < CHECKPOINT_MAGIC.len() + 64 + 16 + 64 {
         return None;
     }

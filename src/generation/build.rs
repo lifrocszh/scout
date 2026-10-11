@@ -2,7 +2,7 @@ use super::checkpoint::remove_checkpoint_store;
 use super::checksums::write_checksums;
 use super::keyword::build_keyword_index;
 use super::profile::build_profile;
-use super::semantic::build_semantic_index;
+use super::semantic::{SemanticBuildInput, build_semantic_index};
 use super::validation::{manifest_digest, validate_generation};
 use super::{CatalogRecord, GenerationManifest, RawBuildProfile, SEMANTIC_ARTIFACT};
 use crate::corpus::{
@@ -204,18 +204,18 @@ pub(crate) fn build_generation(
         None
     };
     let semantic = if mode.has_semantic() {
-        Some(build_semantic_index(
-            &staging,
-            &checkpoint_root,
-            &embedding_cache_root,
-            run_id,
-            &snapshot_digest,
-            &profile_digest,
-            &catalog_digest,
+        Some(build_semantic_index(SemanticBuildInput {
+            staging: &staging,
+            checkpoint_root: &checkpoint_root,
+            embedding_cache_root: &embedding_cache_root,
+            build_run_id: run_id,
+            corpus_snapshot_sha256: &snapshot_digest,
+            build_profile_sha256: &profile_digest,
+            catalog_sha256: &catalog_digest,
             resume,
-            &catalog,
-            &profile,
-        )?)
+            catalog: &catalog,
+            profile: &profile,
+        })?)
     } else {
         None
     };

@@ -323,6 +323,26 @@ struct ResourceBoundary {
     status: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct HostMemorySnapshot {
+    swap_in_counter: Option<u64>,
+    swap_out_counter: Option<u64>,
+    swap_total_bytes: Option<u64>,
+    swap_free_bytes: Option<u64>,
+    mem_available_bytes: Option<u64>,
+}
+
+struct ResourceSummaryInput<'a> {
+    run_id: &'a str,
+    root_pid: u32,
+    interval_ms: u64,
+    samples: &'a [ResourceSample],
+    boundaries: &'a [ResourceBoundary],
+    status: &'a str,
+    accelerator: &'a AcceleratorCapability,
+    runlens_metadata: Option<&'a Path>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct ResourcePhaseSummary {
     sample_count: usize,
@@ -612,19 +632,19 @@ impl ResourceSampler {
                 if actual_interval_ms.is_none() {
                     baseline_fields.push("cpu_interval_baseline".into());
                 }
-                if host.0.is_none() {
+                if host.swap_in_counter.is_none() {
                     missing_fields.push("host_swap_in_counter".into());
                 }
-                if host.1.is_none() {
+                if host.swap_out_counter.is_none() {
                     missing_fields.push("host_swap_out_counter".into());
                 }
-                if host.2.is_none() {
+                if host.swap_total_bytes.is_none() {
                     missing_fields.push("host_swap_total_bytes".into());
                 }
-                if host.3.is_none() {
+                if host.swap_free_bytes.is_none() {
                     missing_fields.push("host_swap_free_bytes".into());
                 }
-                if host.4.is_none() {
+                if host.mem_available_bytes.is_none() {
                     missing_fields.push("host_mem_available_bytes".into());
                 }
                 if filesystem_used_bytes.is_none() {
@@ -643,33 +663,33 @@ impl ResourceSampler {
                     missing_fields.push("data_dir_bytes_stale".into());
                 }
                 let host_swap_in_delta = host
-                    .0
+                    .swap_in_counter
                     .zip(previous_sample.and_then(|sample| sample.1))
                     .map(|(current, previous)| current.saturating_sub(previous));
                 let host_swap_out_delta = host
-                    .1
+                    .swap_out_counter
                     .zip(previous_sample.and_then(|sample| sample.2))
                     .map(|(current, previous)| current.saturating_sub(previous));
                 let phase_swap_baseline =
                     previous_sample.filter(|sample| sample.3 == phase_sequence);
                 let host_swap_in_phase_delta = host
-                    .0
+                    .swap_in_counter
                     .zip(phase_swap_baseline.and_then(|sample| sample.1))
                     .map(|(current, previous)| current.saturating_sub(previous));
                 let host_swap_out_phase_delta = host
-                    .1
+                    .swap_out_counter
                     .zip(phase_swap_baseline.and_then(|sample| sample.2))
                     .map(|(current, previous)| current.saturating_sub(previous));
-                if host.0.is_some() && host_swap_in_delta.is_none() {
+                if host.swap_in_counter.is_some() && host_swap_in_delta.is_none() {
                     baseline_fields.push("host_swap_in_delta_baseline".into());
                 }
-                if host.1.is_some() && host_swap_out_delta.is_none() {
+                if host.swap_out_counter.is_some() && host_swap_out_delta.is_none() {
                     baseline_fields.push("host_swap_out_delta_baseline".into());
                 }
-                if host.0.is_some() && host_swap_in_phase_delta.is_none() {
+                if host.swap_in_counter.is_some() && host_swap_in_phase_delta.is_none() {
                     baseline_fields.push("phase_swap_in_delta_baseline".into());
                 }
-                if host.1.is_some() && host_swap_out_phase_delta.is_none() {
+                if host.swap_out_counter.is_some() && host_swap_out_phase_delta.is_none() {
                     baseline_fields.push("phase_swap_out_delta_baseline".into());
                 }
                 if thread_accelerator.target.as_deref() == Some("GPU") {
@@ -713,21 +733,21 @@ impl ResourceSampler {
                     rss_scope: "sum-of-current-rss-for-visible-process-tree",
                     os_high_water_rss_bytes: process.as_ref().map(|value| value.hwm_bytes),
                     os_high_water_scope: "sampled-sum-of-per-process-lifetime-vmhwm",
-                    host_swap_in_counter: host.0,
-                    host_swap_out_counter: host.1,
+                    host_swap_in_counter: host.swap_in_counter,
+                    host_swap_out_counter: host.swap_out_counter,
                     host_swap_counter_unit: "pages",
                     host_swap_in_delta,
                     host_swap_out_delta,
                     host_swap_in_phase_delta,
                     host_swap_out_phase_delta,
-                    host_swap_total_bytes: host.2,
-                    host_swap_free_bytes: host.3,
+                    host_swap_total_bytes: host.swap_total_bytes,
+                    host_swap_free_bytes: host.swap_free_bytes,
                     host_swap_used_bytes: host
-                        .2
-                        .zip(host.3)
+                        .swap_total_bytes
+                        .zip(host.swap_free_bytes)
                         .map(|(total, free)| total.saturating_sub(free)),
                     host_observation_scope: "host-wide-proc-vmstat-and-meminfo",
-                    host_mem_available_bytes: host.4,
+                    host_mem_available_bytes: host.mem_available_bytes,
                     host_mem_available_scope: "host-wide-proc-meminfo-MemAvailable",
                     filesystem_used_bytes,
                     filesystem_used_scope: "host filesystem used bytes from df -Pk",
@@ -955,16 +975,16 @@ impl ResourceSampler {
             .expect("resource sampler boundary lock")
             .clone();
         self.write_artifacts(&samples, &boundaries, status, &self.accelerator)?;
-        Ok(resource_summary(
-            &self.run_id,
-            self.root_pid,
-            self.interval_ms,
-            samples,
-            boundaries,
+        Ok(resource_summary(ResourceSummaryInput {
+            run_id: &self.run_id,
+            root_pid: self.root_pid,
+            interval_ms: self.interval_ms,
+            samples: &samples,
+            boundaries: &boundaries,
             status,
-            &self.accelerator,
-            self.runlens_metadata.as_deref(),
-        ))
+            accelerator: &self.accelerator,
+            runlens_metadata: self.runlens_metadata.as_deref(),
+        }))
     }
 
     fn write_artifacts(
@@ -974,16 +994,16 @@ impl ResourceSampler {
         status: &str,
         accelerator: &AcceleratorCapability,
     ) -> Result<(), Error> {
-        let summary = resource_summary(
-            &self.run_id,
-            self.root_pid,
-            self.interval_ms,
-            samples.to_vec(),
-            boundaries.to_vec(),
+        let summary = resource_summary(ResourceSummaryInput {
+            run_id: &self.run_id,
+            root_pid: self.root_pid,
+            interval_ms: self.interval_ms,
+            samples,
+            boundaries,
             status,
             accelerator,
-            self.runlens_metadata.as_deref(),
-        );
+            runlens_metadata: self.runlens_metadata.as_deref(),
+        });
         write_json(&self.output_dir.join("resource-summary.json"), &summary)?;
         Ok(())
     }
@@ -1117,13 +1137,7 @@ fn read_process_snapshot(root_pid: u32) -> Option<ProcessSnapshot> {
     })
 }
 
-fn read_host_memory() -> (
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-) {
+fn read_host_memory() -> HostMemorySnapshot {
     let vmstat = fs::read_to_string("/proc/vmstat").ok();
     let counter = |name: &str| {
         vmstat.as_deref()?.lines().find_map(|line| {
@@ -1138,13 +1152,13 @@ fn read_host_memory() -> (
             (key == name).then(|| value.split_whitespace().next()?.parse::<u64>().ok())?
         })
     };
-    (
-        counter("pswpin"),
-        counter("pswpout"),
-        memory("SwapTotal").map(|value| value.saturating_mul(1024)),
-        memory("SwapFree").map(|value| value.saturating_mul(1024)),
-        memory("MemAvailable").map(|value| value.saturating_mul(1024)),
-    )
+    HostMemorySnapshot {
+        swap_in_counter: counter("pswpin"),
+        swap_out_counter: counter("pswpout"),
+        swap_total_bytes: memory("SwapTotal").map(|value| value.saturating_mul(1024)),
+        swap_free_bytes: memory("SwapFree").map(|value| value.saturating_mul(1024)),
+        mem_available_bytes: memory("MemAvailable").map(|value| value.saturating_mul(1024)),
+    }
 }
 
 fn directory_metadata_bytes(path: &Path) -> Option<u64> {
@@ -1313,16 +1327,17 @@ fn read_filesystem_used_bytes(path: &Path) -> Option<u64> {
         .map(|value| value.saturating_mul(1024))
 }
 
-fn resource_summary(
-    run_id: &str,
-    root_pid: u32,
-    interval_ms: u64,
-    samples: Vec<ResourceSample>,
-    boundaries: Vec<ResourceBoundary>,
-    status: &str,
-    accelerator: &AcceleratorCapability,
-    runlens_metadata: Option<&Path>,
-) -> ResourceSummary {
+fn resource_summary(input: ResourceSummaryInput<'_>) -> ResourceSummary {
+    let ResourceSummaryInput {
+        run_id,
+        root_pid,
+        interval_ms,
+        samples,
+        boundaries,
+        status,
+        accelerator,
+        runlens_metadata,
+    } = input;
     let measured = samples
         .iter()
         .filter_map(|sample| sample.cpu_utilization_percent)
@@ -1531,7 +1546,7 @@ fn resource_summary(
         baseline_fields,
         missing_fields,
         by_phase,
-        phase_boundaries: boundaries,
+        phase_boundaries: boundaries.to_vec(),
         accelerator: AcceleratorSummary {
             requested_provider: accelerator.requested_provider.clone(),
             target: accelerator.target.clone(),

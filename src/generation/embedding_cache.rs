@@ -84,12 +84,14 @@ impl EmbeddingReuseCache {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&vectors_path)
             .map_err(|error| Error::storage(format!("open embedding cache vectors: {error}")))?;
         let mut index = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&index_path)
             .map_err(|error| Error::storage(format!("open embedding cache index: {error}")))?;
         let mut entries = HashMap::new();
@@ -203,8 +205,8 @@ impl EmbeddingReuseCache {
             return Ok(None);
         }
         let mut vector = Vec::with_capacity(self.identity.dimensions);
-        for value in record[vector_start..payload_end].chunks_exact(4) {
-            let value = f32::from_le_bytes(value.try_into().expect("fixed width"));
+        for value in record[vector_start..payload_end].as_chunks::<4>().0 {
+            let value = f32::from_le_bytes(*value);
             if !value.is_finite() {
                 self.entries.remove(key);
                 return Ok(None);

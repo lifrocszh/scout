@@ -1351,8 +1351,9 @@ fn duration_millis(duration: Duration) -> Result<i64, Error> {
 mod tests {
     use super::{
         FrontierStore, LeaseTiming, PermitDecision, RequestPermitGrant, RequestPolicyLimits,
-        RobotsDecision, RobotsGroup, RobotsPolicy, RobotsRule, TaskStatus,
+        RobotsDecision, TaskStatus,
     };
+    use crate::crawl::{RobotsGroup, RobotsPolicy, RobotsRule};
     use crate::storage::sha256_hex;
     use std::sync::{Arc, Barrier};
     use std::thread;

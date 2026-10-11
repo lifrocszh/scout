@@ -32,18 +32,34 @@ pub(super) struct SemanticCheckpointStats {
     pub(super) local_duplicate_vectors_reused: usize,
 }
 
+pub(super) struct SemanticBuildInput<'a> {
+    pub(super) staging: &'a Path,
+    pub(super) checkpoint_root: &'a Path,
+    pub(super) embedding_cache_root: &'a Path,
+    pub(super) build_run_id: &'a str,
+    pub(super) corpus_snapshot_sha256: &'a str,
+    pub(super) build_profile_sha256: &'a str,
+    pub(super) catalog_sha256: &'a str,
+    pub(super) resume: bool,
+    pub(super) catalog: &'a [CatalogRecord],
+    pub(super) profile: &'a BuildProfile,
+}
+
 pub(super) fn build_semantic_index(
-    staging: &Path,
-    checkpoint_root: &Path,
-    embedding_cache_root: &Path,
-    build_run_id: &str,
-    corpus_snapshot_sha256: &str,
-    build_profile_sha256: &str,
-    catalog_sha256: &str,
-    resume: bool,
-    catalog: &[CatalogRecord],
-    profile: &BuildProfile,
+    input: SemanticBuildInput<'_>,
 ) -> Result<(SemanticEvidence, SemanticCheckpointStats), Error> {
+    let SemanticBuildInput {
+        staging,
+        checkpoint_root,
+        embedding_cache_root,
+        build_run_id,
+        corpus_snapshot_sha256,
+        build_profile_sha256,
+        catalog_sha256,
+        resume,
+        catalog,
+        profile,
+    } = input;
     let dimensions = profile
         .dimensions
         .ok_or_else(|| Error::invalid("semantic dimensions are required"))?;

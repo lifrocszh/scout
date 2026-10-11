@@ -185,8 +185,8 @@ pub(super) fn validate_semantic_file(
             key_error.get_or_insert("duplicate semantic vector key");
         }
         read_semantic_file_exact(&mut reader, &mut vector)?;
-        for raw in vector.chunks_exact(std::mem::size_of::<f32>()) {
-            if !f32::from_le_bytes(raw.try_into().expect("float width")).is_finite() {
+        for raw in vector.as_chunks::<{ std::mem::size_of::<f32>() }>().0 {
+            if !f32::from_le_bytes(*raw).is_finite() {
                 return Err(Error::invalid(
                     "semantic artifact contains non-finite vector",
                 ));

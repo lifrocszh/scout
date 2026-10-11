@@ -18,30 +18,14 @@ pub use app::run;
 #[cfg(test)]
 mod tests {
     use super::benchmark::{benchmark_distribution, benchmark_query_order};
-    use super::crawl::page_id;
+    use super::crawl::{Source, page_id};
     use super::evaluation::{
+        EVALUATION_INTENTS, EVALUATION_SOURCES, EvaluationJudgment, EvaluationQuery,
         compute_query_metrics, normalize_evaluation_judgments, paired_bootstrap_ci,
         validate_evaluation_queries,
     };
-    use super::*;
-    use crate::benchmark::*;
-    use crate::cli::*;
-    use crate::corpus::*;
-    use crate::crawl::*;
-    use crate::distributed::*;
-    use crate::error::Error;
-    use crate::generation::*;
-    use crate::http::*;
-    use crate::observability::*;
-    use crate::storage::*;
-    use crate::url::*;
-    use ::url::Url;
-    use serde_json::{Value, json};
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn page_id_has_stable_domain_separator() {
