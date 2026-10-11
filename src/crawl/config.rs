@@ -1,3 +1,4 @@
+use super::OriginRequestPolicy;
 use super::fetch::sources_overlap;
 use super::{CanonicalConfig, RawConfig};
 use super::{
@@ -253,7 +254,72 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
     let min_start_spacing_ms = raw
         .min_start_spacing_ms
         .or(profile.min_start_spacing_ms)
-        .unwrap_or(0);
+        .unwrap_or(500);
+    let allowed_origins = sources
+        .iter()
+        .flat_map(|source| &source.allowed_origins)
+        .collect::<HashSet<_>>();
+    let mut seen_origins = HashSet::new();
+    let mut origin_policies = Vec::new();
+    for override_policy in raw.origins {
+        let parsed = Url::parse(&override_policy.origin).map_err(|e| {
+            Error::invalid(format!(
+                "invalid origin override {:?}: {e}",
+                override_policy.origin
+            ))
+        })?;
+        let authority = override_policy
+            .origin
+            .split_once("://")
+            .map(|(_, authority)| authority)
+            .unwrap_or("");
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || authority.contains(&['/', '\\', '?', '#'][..])
+            || override_policy.origin.trim() != override_policy.origin
+        {
+            return Err(Error::invalid(format!(
+                "origin override {:?} must contain only scheme, host, and optional port",
+                override_policy.origin
+            )));
+        }
+        let origin = normalize_origin(&override_policy.origin)?;
+        if !allowed_origins.contains(&origin) {
+            return Err(Error::invalid(format!(
+                "origin override {origin:?} is not in any Source allowlist"
+            )));
+        }
+        if !seen_origins.insert(origin.clone()) {
+            return Err(Error::invalid(format!(
+                "duplicate origin override {origin:?}"
+            )));
+        }
+        let origin_concurrency = override_policy
+            .origin_concurrency
+            .unwrap_or(origin_concurrency);
+        if origin_concurrency == 0 || origin_concurrency > i32::MAX as usize {
+            return Err(Error::invalid(format!(
+                "origin_concurrency must be between 1 and {} for {origin:?}",
+                i32::MAX
+            )));
+        }
+        let min_start_spacing_ms = override_policy
+            .min_start_spacing_ms
+            .unwrap_or(min_start_spacing_ms);
+        if min_start_spacing_ms > i64::MAX as u64 {
+            return Err(Error::invalid(format!(
+                "min_start_spacing_ms is too large for {origin:?}"
+            )));
+        }
+        origin_policies.push(OriginRequestPolicy {
+            origin,
+            origin_concurrency,
+            min_start_spacing_ms,
+        });
+    }
+    origin_policies.sort_by(|left, right| left.origin.cmp(&right.origin));
     let max_attempts = raw.max_attempts.or(profile.max_attempts).unwrap_or(4);
     let retry_backoff_ms = raw
         .retry_backoff_ms
@@ -335,6 +401,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         max_extraction_millis,
         max_passage_tokens,
         sources: &sources,
+        origin_policies: &origin_policies,
     };
     let digest = sha256_hex(
         &serde_json::to_vec(&canonical)
@@ -353,6 +420,7 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         global_concurrency,
         origin_concurrency,
         min_start_spacing_ms,
+        origin_policies,
         max_attempts,
         retry_backoff_ms,
         retry_max_delay_ms,
@@ -365,4 +433,145 @@ pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
         sources,
         digest,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
+    const BASE: &str = r#"schema_version = "scout.sources.v1"
+contact_url = "https://example.com/contact"
+global_concurrency = 16
+origin_concurrency = 8
+min_start_spacing_ms = 250
+
+[[sources]]
+source_id = "rust"
+seeds = ["https://doc.rust-lang.org/book/"]
+allowed_origins = ["https://doc.rust-lang.org"]
+path_prefixes = ["/book/"]
+
+[[sources]]
+source_id = "python"
+seeds = ["https://docs.python.org/3/"]
+allowed_origins = ["https://docs.python.org"]
+path_prefixes = ["/3/"]
+
+[[sources]]
+source_id = "kubernetes"
+seeds = ["https://kubernetes.io/docs/"]
+allowed_origins = ["https://kubernetes.io"]
+path_prefixes = ["/docs/"]
+
+[[sources]]
+source_id = "postgresql"
+seeds = ["https://www.postgresql.org/docs/current/"]
+allowed_origins = ["https://www.postgresql.org"]
+path_prefixes = ["/docs/current/"]
+"#;
+
+    fn parse(text: &str) -> Result<Config, Error> {
+        let path = std::env::temp_dir().join(format!(
+            "scout-origin-policy-{}-{}.toml",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, text).unwrap();
+        let result = load_config(&path);
+        fs::remove_file(path).unwrap();
+        result
+    }
+
+    fn with_origins(entries: &str) -> String {
+        BASE.replacen("[[sources]]", &format!("{entries}\n[[sources]]"), 1)
+    }
+
+    #[test]
+    fn origin_overrides_inherit_sort_and_change_digest() {
+        let baseline = parse(BASE).unwrap();
+        assert_eq!(
+            baseline
+                .origin_policy("https://doc.rust-lang.org")
+                .min_start_spacing_ms,
+            250
+        );
+        assert!(
+            serde_json::to_value(baseline.policy())
+                .unwrap()
+                .get("origin_policies")
+                .is_none()
+        );
+        let omitted_spacing = parse(&BASE.replace("min_start_spacing_ms = 250\n", "")).unwrap();
+        assert_eq!(omitted_spacing.min_start_spacing_ms, 500);
+
+        let rust = "[[origins]]\norigin = \"https://doc.rust-lang.org\"\norigin_concurrency = 3";
+        let python = "[[origins]]\norigin = \"https://docs.python.org\"\nmin_start_spacing_ms = 0";
+        let first = parse(&with_origins(&format!("{python}\n{rust}"))).unwrap();
+        let reversed = parse(&with_origins(&format!("{rust}\n{python}"))).unwrap();
+        assert_eq!(first.digest, reversed.digest);
+        assert_ne!(first.digest, baseline.digest);
+        assert_eq!(first.origin_policies[0].origin, "https://doc.rust-lang.org");
+        assert_eq!(
+            first
+                .origin_policy("https://doc.rust-lang.org")
+                .origin_concurrency,
+            3
+        );
+        assert_eq!(
+            first
+                .origin_policy("https://doc.rust-lang.org")
+                .min_start_spacing_ms,
+            250
+        );
+        assert_eq!(
+            first
+                .origin_policy("https://docs.python.org")
+                .origin_concurrency,
+            8
+        );
+        assert_eq!(
+            first
+                .origin_policy("https://docs.python.org")
+                .min_start_spacing_ms,
+            0
+        );
+        assert_eq!(
+            first
+                .origin_policy("https://kubernetes.io")
+                .min_start_spacing_ms,
+            250
+        );
+        assert_eq!(
+            serde_json::to_value(first.policy()).unwrap()["origin_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let changed = parse(&with_origins(&format!(
+            "{python}\n{}",
+            rust.replace("= 3", "= 4")
+        )))
+        .unwrap();
+        assert_ne!(first.digest, changed.digest);
+    }
+
+    #[test]
+    fn origin_overrides_reject_invalid_keys_and_limits() {
+        for entries in [
+            "[[origins]]\norigin = \"https://unknown.example\"",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org/path\"",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org/\"",
+            "[[origins]]\norigin = \"https://user@doc.rust-lang.org\"",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org?query=1\"",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org#fragment\"",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org\"\norigin_concurrency = 0",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org\"\norigin_concurency = 2",
+            "[[origins]]\norigin = \"https://doc.rust-lang.org\"\n[[origins]]\norigin = \"https://doc.rust-lang.org:443\"",
+        ] {
+            assert!(parse(&with_origins(entries)).is_err(), "accepted {entries}");
+        }
+    }
 }

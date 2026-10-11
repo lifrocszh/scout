@@ -996,6 +996,7 @@ mod tests {
             global_concurrency: 1,
             origin_concurrency: 1,
             min_start_spacing_ms: 0,
+            origin_policies: Vec::new(),
             max_attempts: 1,
             retry_backoff_ms: 1,
             retry_max_delay_ms: 1,

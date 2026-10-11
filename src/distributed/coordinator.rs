@@ -1,6 +1,7 @@
 use super::frontier::{
     AcceptedCapture, AcceptedCaptureRecord, ClaimedTask, DiscoveredTask, FrontierStore,
-    LeaseTiming, PermitDecision, RequestPolicyLimits, RobotsDecision, TaskStatus,
+    LeaseTiming, OriginPolicyLimit, PermitDecision, RequestPolicyLimits, RobotsDecision,
+    TaskStatus,
 };
 use super::proto;
 use super::protocol::{check_protocol, safe_event_url, validate_identity};
@@ -253,7 +254,26 @@ fn coordinator_main(
         max_total_attempts: config.max_total_attempts,
         max_pending_requests: config.max_frontier,
     };
-    frontier.configure_run(&run_id, &config.digest, policy_limits)?;
+    let mut seen_origins = HashSet::new();
+    let mut origin_policies = Vec::new();
+    for source in &config.sources {
+        for origin in &source.allowed_origins {
+            if seen_origins.insert(origin.clone()) {
+                let policy = config.origin_policy(origin);
+                origin_policies.push(OriginPolicyLimit {
+                    origin: origin.clone(),
+                    schedule_key: source
+                        .politeness_group
+                        .as_ref()
+                        .map(|group| format!("group:{group}"))
+                        .unwrap_or_else(|| origin.clone()),
+                    origin_concurrency: policy.origin_concurrency,
+                    min_start_spacing_ms: policy.min_start_spacing_ms,
+                });
+            }
+        }
+    }
+    frontier.configure_run(&run_id, &config.digest, policy_limits, &origin_policies)?;
     // Pending RPC connections do not survive restart; active HTTP permits still do.
     frontier.clear_pending_request_waits(&run_id)?;
     let crawl_dir = cli.data_dir.join("crawls").join(&run_id);
@@ -568,6 +588,7 @@ mod tests {
             global_concurrency: 1,
             origin_concurrency: 1,
             min_start_spacing_ms: 0,
+            origin_policies: Vec::new(),
             max_attempts: 2,
             retry_backoff_ms: 1,
             retry_max_delay_ms: 1,

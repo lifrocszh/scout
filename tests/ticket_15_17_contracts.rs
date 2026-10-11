@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -209,9 +209,12 @@ fn robots_outage_is_item_denial_and_does_not_abort_crawl() {
 }
 
 #[test]
-fn sitemap_discovery_is_bounded_allowlisted_and_terminal_page_failures_continue() {
+fn sitemap_discovery_respects_robots_and_continues_allowed_siblings() {
     let data_dir = temp_dir("ticket-26-sitemap");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind sitemap fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("set sitemap fixture nonblocking");
     let origin = format!("http://{}", listener.local_addr().expect("fixture address"));
     let config = data_dir.join("sources.toml");
     fs::write(
@@ -243,7 +246,7 @@ path_prefixes = ["/"]
             )
         };
         let sitemap_index = format!(
-            "<?xml version=\"1.0\"?><sitemapindex><sitemap><loc>{origin}/broken.xml</loc></sitemap><sitemap><loc>{origin}/missing-sitemap.xml</loc></sitemap><sitemap><loc>{origin}/sitemap-pages.xml</loc></sitemap><sitemap><loc>{origin}/sitemap-pages.xml</loc></sitemap></sitemapindex>"
+            "<?xml version=\"1.0\"?><sitemapindex><sitemap><loc>{origin}/broken.xml</loc></sitemap><sitemap><loc>{origin}/denied-child.xml</loc></sitemap><sitemap><loc>{origin}/missing-sitemap.xml</loc></sitemap><sitemap><loc>{origin}/sitemap-pages.xml</loc></sitemap><sitemap><loc>{origin}/sitemap-pages.xml</loc></sitemap></sitemapindex>"
         );
         let sitemap_pages = format!(
             "<?xml version=\"1.0\"?><urlset><url><loc>{origin}/page-a</loc></url><url><loc>{origin}/page-a</loc></url><url><loc>{origin}/page-b?x=1&amp;y=2</loc></url><url><loc>https://outside.invalid/not-allowlisted</loc></url><url><loc>{origin}/missing</loc></url></urlset>"
@@ -251,15 +254,23 @@ path_prefixes = ["/"]
         let page_a = page("Sitemap page A");
         let page_b = page("Sitemap page B");
         let mut requests = Vec::new();
-        for _ in 0..9 {
-            let (mut stream, _) = listener.accept().expect("accept sitemap request");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while requests.len() < 9 && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept sitemap request: {error}"),
+            };
             let request = read_request(&mut stream);
             if request.starts_with("GET /robots.txt ") {
                 respond(
                     &mut stream,
                     "200 OK",
                     "text/plain",
-                    format!("User-agent: *\nAllow: /\nSitemap: {origin}/sitemap-index.xml\n")
+                    format!("User-agent: *\nAllow: /\nDisallow: /denied-root.xml\nDisallow: /denied-child.xml\nSitemap: {origin}/denied-root.xml\nSitemap: {origin}/sitemap-index.xml\n")
                         .as_bytes(),
                 );
             } else if request.starts_with("GET /sitemap-index.xml ") {
@@ -327,6 +338,24 @@ path_prefixes = ["/"]
     let requests = server.join().expect("join sitemap fixture");
 
     assert!(output.status.success(), "crawl failed: {:?}", output.stderr);
+    assert_eq!(requests.len(), 9, "allowed crawl requests must complete");
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.starts_with("GET /denied-root.xml ")
+                && !request.starts_with("GET /denied-child.xml ")),
+        "robots-denied root and child sitemaps must not be fetched"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.starts_with("GET /sitemap-pages.xml "))
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.starts_with("GET /page-a "))
+    );
     assert!(
         requests
             .iter()
@@ -336,6 +365,7 @@ path_prefixes = ["/"]
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("\"event\":\"sitemap.discovered\""));
     assert!(stderr.contains("\"event\":\"sitemap.unavailable\""));
+    assert_eq!(stderr.matches("\"reason\":\"robots_denied\"").count(), 2);
     let complete = manifest(&data_dir, "crawl-manifest.json");
     assert_eq!(complete["status"], "complete");
     assert_eq!(complete["summary"]["page_count"], 2);

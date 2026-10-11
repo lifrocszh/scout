@@ -8,13 +8,15 @@ const MIGRATION_V2: &str = include_str!("../../migrations/0002_shared_request_po
 const MIGRATION_V3: &str = include_str!("../../migrations/0003_fair_frontier_schedule.sql");
 const MIGRATION_V4: &str = include_str!("../../migrations/0004_durable_crawl_results.sql");
 const MIGRATION_V5: &str = include_str!("../../migrations/0005_shared_sitemap_discovery.sql");
+const MIGRATION_V6: &str = include_str!("../../migrations/0006_origin_request_policy.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
-const REQUEST_MIGRATION: [(i32, &str, &str); 5] = [
+const REQUEST_MIGRATION: [(i32, &str, &str); 6] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
     (2, "shared-request-policy", MIGRATION_V2),
     (3, "fair-frontier-schedule", MIGRATION_V3),
     (4, "durable-crawl-results", MIGRATION_V4),
     (5, "shared-sitemap-discovery", MIGRATION_V5),
+    (6, "origin-request-policy", MIGRATION_V6),
 ];
 
 const CLAIM_ONE_TASK: &str = r#"
@@ -205,6 +207,14 @@ pub(crate) struct RequestPolicyLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OriginPolicyLimit {
+    pub(crate) origin: String,
+    pub(crate) schedule_key: String,
+    pub(crate) origin_concurrency: usize,
+    pub(crate) min_start_spacing_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RequestPermitGrant {
     pub(crate) permit_id: i64,
     pub(crate) request_id: String,
@@ -355,8 +365,8 @@ fn duration_millis(duration: Duration) -> Result<i64, Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedCapture, FrontierStore, LeaseTiming, PermitDecision, RequestPermitGrant,
-        RequestPolicyLimits, RobotsDecision, TaskStatus,
+        AcceptedCapture, FrontierStore, LeaseTiming, OriginPolicyLimit, PermitDecision,
+        RequestPermitGrant, RequestPolicyLimits, RobotsDecision, TaskStatus,
     };
     use crate::crawl::{RobotsGroup, RobotsPolicy, RobotsRule};
     use crate::storage::sha256_hex;
@@ -415,8 +425,8 @@ mod tests {
         let mut store = FrontierStore::connect(database_url).unwrap();
         store.apply_migrations().unwrap();
         let digest = sha256_hex(run_id.as_bytes());
-        assert!(store.configure_run(&run_id, &digest, limits).unwrap());
-        assert!(!store.configure_run(&run_id, &digest, limits).unwrap());
+        assert!(store.configure_run(&run_id, &digest, limits, &[]).unwrap());
+        assert!(!store.configure_run(&run_id, &digest, limits, &[]).unwrap());
         (run_id, cleanup, store)
     }
 
@@ -752,6 +762,151 @@ mod tests {
         assert!(policy.allows("/same/page"));
     }
 
+    // Run with SCOUT_TEST_DATABASE_URL set and `cargo test --lib frontier::tests::postgres_origin_limits_and_group_spacing_survive_restart -- --ignored`.
+    #[test]
+    #[ignore = "requires a coordinator-only PostgreSQL test database"]
+    fn postgres_origin_limits_and_group_spacing_survive_restart() {
+        let database_url = std::env::var("SCOUT_TEST_DATABASE_URL")
+            .expect("set SCOUT_TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let run_id = format!(
+            "origin-policy-test-{}",
+            sha256_hex(format!("{:?}", Instant::now()).as_bytes())
+        );
+        let _cleanup = RunCleanup {
+            database_url: database_url.clone(),
+            run_id: run_id.clone(),
+        };
+        let digest = sha256_hex(run_id.as_bytes());
+        let limits = policy_limits(
+            4,
+            1,
+            Duration::ZERO,
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        );
+        let origins = vec![
+            OriginPolicyLimit {
+                origin: "https://a.example".into(),
+                schedule_key: "https://a.example".into(),
+                origin_concurrency: 2,
+                min_start_spacing_ms: 0,
+            },
+            OriginPolicyLimit {
+                origin: "https://b.example".into(),
+                schedule_key: "group:shared".into(),
+                origin_concurrency: 1,
+                min_start_spacing_ms: 600,
+            },
+            OriginPolicyLimit {
+                origin: "https://c.example".into(),
+                schedule_key: "group:shared".into(),
+                origin_concurrency: 1,
+                min_start_spacing_ms: 0,
+            },
+        ];
+        let mut store = FrontierStore::connect(&database_url).unwrap();
+        store.apply_migrations().unwrap();
+        assert!(
+            store
+                .configure_run(&run_id, &digest, limits, &origins)
+                .unwrap()
+        );
+        let acquire = |store: &mut FrontierStore, id, key, origin| {
+            store
+                .try_acquire_request_permit(&run_id, "worker", id, key, origin, "page")
+                .unwrap()
+        };
+        let a1 = acquired(acquire(
+            &mut store,
+            "a1",
+            "https://a.example",
+            "https://a.example",
+        ));
+        let a2 = acquired(acquire(
+            &mut store,
+            "a2",
+            "https://a.example",
+            "https://a.example",
+        ));
+        assert_eq!(a2.active_origin, 2);
+        assert!(matches!(
+            acquire(&mut store, "a3", "https://a.example", "https://a.example"),
+            PermitDecision::Waiting(_)
+        ));
+        let c1 = acquired(acquire(
+            &mut store,
+            "c1",
+            "group:shared",
+            "https://c.example",
+        ));
+        assert!(matches!(
+            acquire(&mut store, "b1", "group:shared", "https://b.example"),
+            PermitDecision::Waiting(_)
+        ));
+        assert_eq!(store.ready_request_id(&run_id).unwrap(), None);
+        for permit in [a1, a2, c1] {
+            assert!(
+                store
+                    .release_request_permit(&run_id, "worker", permit.permit_id, "success")
+                    .unwrap()
+            );
+        }
+        drop(store);
+
+        let mut restarted = FrontierStore::connect(&database_url).unwrap();
+        restarted.apply_migrations().unwrap();
+        assert!(
+            !restarted
+                .configure_run(&run_id, &digest, limits, &origins)
+                .unwrap()
+        );
+        let mut changed = origins.clone();
+        changed[1].min_start_spacing_ms = 0;
+        assert!(
+            restarted
+                .configure_run(&run_id, &digest, limits, &changed)
+                .is_err()
+        );
+        let mut added = origins.clone();
+        added.push(OriginPolicyLimit {
+            origin: "https://d.example".into(),
+            schedule_key: "https://d.example".into(),
+            origin_concurrency: 1,
+            min_start_spacing_ms: 0,
+        });
+        assert!(
+            restarted
+                .configure_run(&run_id, &digest, limits, &added)
+                .is_err()
+        );
+        assert!(
+            restarted
+                .configure_run(&run_id, &digest, limits, &[])
+                .is_err()
+        );
+        assert!(
+            !restarted
+                .configure_run(&run_id, &digest, limits, &origins)
+                .unwrap()
+        );
+        restarted.clear_pending_request_waits(&run_id).unwrap();
+        assert!(matches!(
+            acquire(&mut restarted, "b2", "group:shared", "https://b.example"),
+            PermitDecision::Waiting(_)
+        ));
+        thread::sleep(Duration::from_millis(650));
+        assert_eq!(
+            restarted.ready_request_id(&run_id).unwrap(),
+            Some("b2".into())
+        );
+        let _b2 = acquired(acquire(
+            &mut restarted,
+            "b2",
+            "group:shared",
+            "https://b.example",
+        ));
+    }
+
     // Run with SCOUT_TEST_DATABASE_URL set and `cargo test --lib frontier::tests::postgres_shared_request_policy_contract -- --ignored`.
     #[test]
     #[ignore = "requires a coordinator-only PostgreSQL test database"]
@@ -772,7 +927,7 @@ mod tests {
         };
         assert!(
             store
-                .configure_run(&run_id, &sha256_hex(run_id.as_bytes()), changed_limits)
+                .configure_run(&run_id, &sha256_hex(run_id.as_bytes()), changed_limits, &[])
                 .is_err()
         );
 

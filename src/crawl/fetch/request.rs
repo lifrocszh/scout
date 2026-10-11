@@ -19,6 +19,7 @@ pub(super) struct CachedRobots {
 #[derive(Default)]
 struct RequestState {
     next_start_by_key: HashMap<String, Instant>,
+    next_start_by_origin: HashMap<String, Instant>,
     total_attempts: usize,
     active_requests: usize,
     active_by_key: HashMap<String, usize>,
@@ -43,12 +44,41 @@ pub(super) struct RequestCoordinator {
     global_concurrency: usize,
     origin_concurrency: usize,
     min_start_spacing: Duration,
+    origin_policies: HashMap<String, (usize, Duration)>,
+    group_spacing: HashMap<String, Duration>,
     max_total_attempts: usize,
     deadline: Instant,
 }
 
 impl RequestCoordinator {
     pub(super) fn new(config: &Config) -> Self {
+        let origin_policies = config
+            .origin_policies
+            .iter()
+            .map(|policy| {
+                (
+                    policy.origin.clone(),
+                    (
+                        policy.origin_concurrency,
+                        Duration::from_millis(policy.min_start_spacing_ms),
+                    ),
+                )
+            })
+            .collect();
+        let mut group_spacing: HashMap<String, Duration> = HashMap::new();
+        for source in &config.sources {
+            if let Some(group) = &source.politeness_group {
+                let key = format!("group:{group}");
+                for origin in &source.allowed_origins {
+                    let spacing =
+                        Duration::from_millis(config.origin_policy(origin).min_start_spacing_ms);
+                    group_spacing
+                        .entry(key.clone())
+                        .and_modify(|maximum| *maximum = (*maximum).max(spacing))
+                        .or_insert(spacing);
+                }
+            }
+        }
         Self {
             state: Mutex::new(RequestState::default()),
             wake: Condvar::new(),
@@ -57,6 +87,8 @@ impl RequestCoordinator {
             global_concurrency: config.global_concurrency,
             origin_concurrency: config.origin_concurrency,
             min_start_spacing: Duration::from_millis(config.min_start_spacing_ms),
+            origin_policies,
+            group_spacing,
             max_total_attempts: config.max_total_attempts,
             deadline: Instant::now() + Duration::from_secs(config.max_duration_seconds),
         }
@@ -106,6 +138,21 @@ impl RequestCoordinator {
         key: &str,
         origin: &str,
     ) -> Result<RequestPermit, Error> {
+        let (origin_concurrency, origin_spacing) = self
+            .origin_policies
+            .get(origin)
+            .copied()
+            .unwrap_or((self.origin_concurrency, self.min_start_spacing));
+        let key_spacing = self
+            .group_spacing
+            .get(key)
+            .copied()
+            .unwrap_or(origin_spacing);
+        let key_concurrency = if key.starts_with("group:") {
+            self.origin_concurrency
+        } else {
+            origin_concurrency
+        };
         let mut state = self.state.lock().expect("request coordinator lock");
         loop {
             if state.total_attempts >= self.max_total_attempts {
@@ -115,10 +162,23 @@ impl RequestCoordinator {
             if now >= self.deadline {
                 return Err(Error::safety("crawl duration limit exceeded"));
             }
-            let next_start = state.next_start_by_key.get(key).copied().unwrap_or(now);
+            let next_start = state
+                .next_start_by_key
+                .get(key)
+                .copied()
+                .unwrap_or(now)
+                .max(
+                    state
+                        .next_start_by_origin
+                        .get(origin)
+                        .copied()
+                        .unwrap_or(now),
+                );
             let active_for_key = state.active_by_key.get(key).copied().unwrap_or(0);
+            let active_for_origin = state.active_by_origin.get(origin).copied().unwrap_or(0);
             if state.active_requests < self.global_concurrency
-                && active_for_key < self.origin_concurrency
+                && active_for_key < key_concurrency
+                && active_for_origin < origin_concurrency
                 && next_start <= now
             {
                 state.total_attempts += 1;
@@ -134,7 +194,10 @@ impl RequestCoordinator {
                     .or_insert(active_for_origin);
                 state
                     .next_start_by_key
-                    .insert(key.to_owned(), now + self.min_start_spacing);
+                    .insert(key.to_owned(), now + key_spacing);
+                state
+                    .next_start_by_origin
+                    .insert(origin.to_owned(), now + origin_spacing);
                 let active_origin = state.active_by_origin.get(origin).copied().unwrap_or(0);
                 let peak_origin = state
                     .max_active_by_origin
@@ -196,11 +259,26 @@ impl RequestCoordinator {
         self.wake.notify_all();
     }
 
-    fn mark_started(&self, key: &str) {
+    fn mark_started(&self, key: &str, origin: &str) {
+        let origin_spacing = self
+            .origin_policies
+            .get(origin)
+            .map(|policy| policy.1)
+            .unwrap_or(self.min_start_spacing);
+        let key_spacing = self
+            .group_spacing
+            .get(key)
+            .copied()
+            .unwrap_or(origin_spacing);
         let mut state = self.state.lock().expect("request coordinator lock");
         state
             .next_start_by_key
-            .insert(key.to_owned(), Instant::now() + self.min_start_spacing);
+            .entry(key.to_owned())
+            .and_modify(|next| *next = (*next).max(Instant::now() + key_spacing));
+        state
+            .next_start_by_origin
+            .entry(origin.to_owned())
+            .and_modify(|next| *next = (*next).max(Instant::now() + origin_spacing));
     }
 
     pub(super) fn stats(&self) -> (usize, HashMap<String, usize>) {
@@ -221,7 +299,7 @@ pub(super) struct RequestPermit {
 
 impl RequestPermit {
     pub(super) fn mark_started(&self) {
-        self.coordinator.mark_started(&self.key);
+        self.coordinator.mark_started(&self.key, &self.origin);
     }
 }
 
@@ -360,4 +438,136 @@ pub(super) fn retry_delay_without_response(attempt: usize, config: &Config) -> u
         .retry_backoff_ms
         .saturating_mul(multiplier)
         .min(config.retry_max_delay_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crawl::{OriginRequestPolicy, load_config};
+    use std::path::Path;
+    use std::sync::mpsc;
+
+    fn config() -> Config {
+        let mut config = load_config(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/data/configs/sources-500.toml"
+        )))
+        .unwrap();
+        config.global_concurrency = 8;
+        config.origin_concurrency = 1;
+        config.min_start_spacing_ms = 0;
+        config
+    }
+
+    #[test]
+    fn local_origin_caps_are_independent() {
+        let mut config = config();
+        let first = config.sources[0].allowed_origins[0].clone();
+        let second = config.sources[1].allowed_origins[0].clone();
+        config.origin_policies = vec![OriginRequestPolicy {
+            origin: first.clone(),
+            origin_concurrency: 2,
+            min_start_spacing_ms: 0,
+        }];
+        let coordinator = Arc::new(RequestCoordinator::new(&config));
+        let first_permit = coordinator.start_request(&first, &first).unwrap();
+        let second_permit = coordinator.start_request(&first, &first).unwrap();
+        let other_permit = coordinator.start_request(&second, &second).unwrap();
+        assert_eq!(second_permit.concurrency.active_origin, 2);
+        assert_eq!(other_permit.concurrency.active_origin, 1);
+        let (sender, receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let waiting = coordinator.clone();
+        let waiting_origin = first.clone();
+        let thread = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            sender
+                .send(
+                    waiting
+                        .start_request(&waiting_origin, &waiting_origin)
+                        .unwrap(),
+                )
+                .unwrap();
+        });
+        ready_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(receiver.try_recv().is_err());
+        drop(first_permit);
+        let next = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(next.concurrency.active_origin, 2);
+        drop(next);
+        drop(second_permit);
+        drop(other_permit);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn local_origin_spacing_does_not_delay_other_origins() {
+        let mut config = config();
+        let first = config.sources[0].allowed_origins[0].clone();
+        let second = config.sources[1].allowed_origins[0].clone();
+        config.origin_policies = vec![OriginRequestPolicy {
+            origin: first.clone(),
+            origin_concurrency: 1,
+            min_start_spacing_ms: 120,
+        }];
+        let coordinator = Arc::new(RequestCoordinator::new(&config));
+        let first_permit = coordinator.start_request(&first, &first).unwrap();
+        first_permit.mark_started();
+        let deadline = coordinator.state.lock().unwrap().next_start_by_origin[&first];
+        drop(first_permit);
+        assert!(Instant::now() < deadline);
+        let other_permit = coordinator.start_request(&second, &second).unwrap();
+        assert!(Instant::now() < deadline);
+        drop(other_permit);
+        let next = coordinator.start_request(&first, &first).unwrap();
+        assert!(Instant::now() >= deadline);
+        drop(next);
+    }
+
+    #[test]
+    fn local_group_budget_keeps_shared_cap_and_strictest_spacing() {
+        let mut config = config();
+        let first = config.sources[0].allowed_origins[0].clone();
+        let second = config.sources[1].allowed_origins[0].clone();
+        for source in config.sources.iter_mut().take(2) {
+            source.politeness_group = Some("shared".into());
+        }
+        config.origin_policies = vec![
+            OriginRequestPolicy {
+                origin: first.clone(),
+                origin_concurrency: 2,
+                min_start_spacing_ms: 80,
+            },
+            OriginRequestPolicy {
+                origin: second.clone(),
+                origin_concurrency: 2,
+                min_start_spacing_ms: 0,
+            },
+        ];
+        let coordinator = Arc::new(RequestCoordinator::new(&config));
+        let first_permit = coordinator.start_request("group:shared", &first).unwrap();
+        let before_start = Instant::now();
+        first_permit.mark_started();
+        let deadline = coordinator.state.lock().unwrap().next_start_by_key["group:shared"];
+        assert!(deadline >= before_start + Duration::from_millis(80));
+        let (sender, receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let waiting = coordinator.clone();
+        let thread = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            sender
+                .send(waiting.start_request("group:shared", &second).unwrap())
+                .unwrap();
+        });
+        ready_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(receiver.try_recv().is_err());
+        drop(first_permit);
+        let next = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(Instant::now() >= deadline);
+        assert_eq!(next.concurrency.active_origin, 1);
+        drop(next);
+        thread.join().unwrap();
+    }
 }

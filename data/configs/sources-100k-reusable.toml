@@ -22,6 +22,28 @@ max_duration_seconds = 86400
 robots_cache_seconds = 86400
 max_passage_tokens = 384
 
+# Each allowed origin has an explicit request budget. These match the former
+# shared defaults, so this profile keeps its existing effective rates.
+[[origins]]
+origin = "https://doc.rust-lang.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://kubernetes.io"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://learn.microsoft.com"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://www.postgresql.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
 [[sources]]
 source_id = "dotnet-api-docs"
 name = ".NET System.Collections.Generic API documentation"

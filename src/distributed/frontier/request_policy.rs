@@ -1,6 +1,6 @@
 use super::{
-    FrontierStore, PermitDecision, RequestPermitGrant, RequestPolicyLimits, duration_millis,
-    validate_request_identity, validate_schedule_key,
+    FrontierStore, OriginPolicyLimit, PermitDecision, RequestPermitGrant, RequestPolicyLimits,
+    duration_millis, validate_request_identity, validate_schedule_key,
 };
 use crate::error::Error;
 use crate::url::normalize_origin;
@@ -13,8 +13,38 @@ impl FrontierStore {
         run_id: &str,
         config_digest: &str,
         limits: RequestPolicyLimits,
+        origin_policies: &[OriginPolicyLimit],
     ) -> Result<bool, Error> {
         let persisted = request_policy_values(limits)?;
+        let mut origins = origin_policies
+            .iter()
+            .map(|policy| {
+                if normalize_origin(&policy.origin)? != policy.origin {
+                    return Err(Error::invalid(
+                        "configured request origin must be normalized",
+                    ));
+                }
+                validate_schedule_key(&policy.schedule_key)?;
+                if policy.origin_concurrency == 0 {
+                    return Err(Error::invalid("origin_concurrency must be positive"));
+                }
+                Ok(PersistedOriginPolicy {
+                    origin: policy.origin.clone(),
+                    schedule_key: policy.schedule_key.clone(),
+                    origin_concurrency: i32::try_from(policy.origin_concurrency)
+                        .map_err(|_| Error::invalid("origin_concurrency is too large"))?,
+                    min_start_spacing_ms: i64::try_from(policy.min_start_spacing_ms)
+                        .map_err(|_| Error::invalid("min_start_spacing_ms is too large"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        origins.sort_by(|left, right| left.origin.cmp(&right.origin));
+        if origins
+            .windows(2)
+            .any(|pair| pair[0].origin == pair[1].origin)
+        {
+            return Err(Error::invalid("duplicate configured request origin"));
+        }
         let inserted = self.ensure_run(run_id, config_digest)?;
         self.client
             .execute(
@@ -64,6 +94,61 @@ impl FrontierStore {
                 "crawl run {run_id:?} already has different shared request policy limits"
             )));
         }
+        let mut tx = self.client.transaction().map_err(|error| {
+            Error::storage(format!("begin origin request policy transaction: {error}"))
+        })?;
+        let configured: bool = tx.query_one(
+            "SELECT origin_policy_configured FROM scout_crawl_request_policy WHERE crawl_run_id=$1 FOR UPDATE",
+            &[&run_id],
+        )
+        .map_err(|error| Error::storage(format!("lock origin request policy: {error}")))?
+        .get(0);
+        let stored_origins = tx
+            .query(
+                "SELECT origin,schedule_key,origin_concurrency,min_start_spacing_ms
+             FROM scout_crawl_origin_request_policy WHERE crawl_run_id=$1 ORDER BY origin",
+                &[&run_id],
+            )
+            .map_err(|error| Error::storage(format!("read origin request policy: {error}")))?
+            .into_iter()
+            .map(|row| PersistedOriginPolicy {
+                origin: row.get(0),
+                schedule_key: row.get(1),
+                origin_concurrency: row.get(2),
+                min_start_spacing_ms: row.get(3),
+            })
+            .collect::<Vec<_>>();
+        if (configured || !stored_origins.is_empty()) && stored_origins != origins {
+            return Err(Error::invalid(format!(
+                "crawl run {run_id:?} already has different origin request policy limits"
+            )));
+        }
+        if !configured {
+            for policy in &origins {
+                tx.execute(
+                    "INSERT INTO scout_crawl_origin_request_policy
+                     (crawl_run_id, origin, schedule_key, origin_concurrency, min_start_spacing_ms)
+                     VALUES ($1,$2,$3,$4,$5) ON CONFLICT (crawl_run_id,origin) DO NOTHING",
+                    &[
+                        &run_id,
+                        &policy.origin,
+                        &policy.schedule_key,
+                        &policy.origin_concurrency,
+                        &policy.min_start_spacing_ms,
+                    ],
+                )
+                .map_err(|error| {
+                    Error::storage(format!("persist origin request policy: {error}"))
+                })?;
+            }
+            tx.execute(
+                "UPDATE scout_crawl_request_policy SET origin_policy_configured=TRUE WHERE crawl_run_id=$1",
+                &[&run_id],
+            )
+            .map_err(|error| Error::storage(format!("finalize origin request policy: {error}")))?;
+        }
+        tx.commit()
+            .map_err(|error| Error::storage(format!("commit origin request policy: {error}")))?;
         Ok(inserted)
     }
 
@@ -105,10 +190,9 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("lock shared request policy: {error}")))?
             .ok_or_else(|| Error::invalid(format!("crawl run {run_id:?} has no request policy")))?;
         let global_limit: i32 = limits.get(0);
-        let origin_limit: i32 = limits.get(1);
+        let default_origin_limit: i32 = limits.get(1);
         let global_limit_db = i64::from(global_limit);
-        let origin_limit_db = i64::from(origin_limit);
-        let spacing_ms: i64 = limits.get(2);
+        let default_spacing_ms: i64 = limits.get(2);
         let timeout_ms: i64 = limits.get(3);
         let safety_ms: i64 = limits.get(4);
         let max_attempts: i64 = limits.get(5);
@@ -248,29 +332,36 @@ impl FrontierStore {
 
         let candidate = tx
             .query_opt(
-                "SELECT request.request_id, request.schedule_key, request.origin
+                "SELECT request.request_id, request.schedule_key, request.origin,
+                        COALESCE(origin_policy.origin_concurrency, $3::INTEGER),
+                        COALESCE(origin_policy.min_start_spacing_ms, $4::BIGINT)
                  FROM scout_crawl_request_permits AS request
+                 LEFT JOIN scout_crawl_origin_request_policy AS origin_policy
+                   ON origin_policy.crawl_run_id=request.crawl_run_id
+                  AND origin_policy.origin=request.origin
                  WHERE request.crawl_run_id = $1 AND request.status = 'pending'
                    AND request.pending_deadline > clock_timestamp()
                    AND (SELECT count(*) FROM scout_crawl_request_permits AS active
                         WHERE active.crawl_run_id = $1 AND active.status = 'active') < $2::BIGINT
                    AND (SELECT count(*) FROM scout_crawl_request_permits AS active
                         WHERE active.crawl_run_id = $1 AND active.status = 'active'
-                          AND active.origin = request.origin) < $3::BIGINT
+                          AND active.origin = request.origin)
+                       < COALESCE(origin_policy.origin_concurrency, $3::INTEGER)
                    AND NOT EXISTS (
                        SELECT 1 FROM scout_crawl_request_spacing AS spacing
                        WHERE spacing.crawl_run_id = $1
-                         AND spacing.schedule_key = request.schedule_key
+                         AND spacing.schedule_key IN (request.origin, request.schedule_key)
                          AND spacing.next_allowed_at > clock_timestamp()
                    )
                  ORDER BY CASE
-                     WHEN $4::TEXT IS NULL OR request.schedule_key > $4 THEN 0 ELSE 1
+                     WHEN $5::TEXT IS NULL OR request.schedule_key > $5 THEN 0 ELSE 1
                  END, request.schedule_key, request.queued_at, request.request_id
                  LIMIT 1",
                 &[
                     &run_id,
                     &global_limit_db,
-                    &origin_limit_db,
+                    &default_origin_limit,
+                    &default_spacing_ms,
                     &last_schedule_key,
                 ],
             )
@@ -290,7 +381,8 @@ impl FrontierStore {
         }
         let selected_key: String = candidate.get(1);
         let selected_origin: String = candidate.get(2);
-        let spacing_ms = spacing_ms.max(0);
+        let selected_origin_limit: i32 = candidate.get(3);
+        let origin_spacing_ms: i64 = candidate.get(4);
         let active_origin: i64 = tx
             .query_one(
                 "SELECT count(*) FROM scout_crawl_request_permits
@@ -319,9 +411,28 @@ impl FrontierStore {
              VALUES ($1, $2, clock_timestamp() + ($3::BIGINT * interval '1 millisecond'))
              ON CONFLICT (crawl_run_id, schedule_key) DO UPDATE
              SET next_allowed_at = EXCLUDED.next_allowed_at",
-            &[&run_id, &selected_key, &spacing_ms],
+            &[&run_id, &selected_origin, &origin_spacing_ms],
         )
-        .map_err(|error| Error::storage(format!("persist request start spacing: {error}")))?;
+        .map_err(|error| Error::storage(format!("persist origin start spacing: {error}")))?;
+        if selected_key != selected_origin {
+            let group_spacing_ms: i64 = tx
+                .query_one(
+                    "SELECT COALESCE(max(min_start_spacing_ms), $3::BIGINT)
+                 FROM scout_crawl_origin_request_policy
+                 WHERE crawl_run_id=$1 AND schedule_key=$2",
+                    &[&run_id, &selected_key, &default_spacing_ms],
+                )
+                .map_err(|error| Error::storage(format!("read politeness group spacing: {error}")))?
+                .get(0);
+            tx.execute(
+                "INSERT INTO scout_crawl_request_spacing(crawl_run_id, schedule_key, next_allowed_at)
+                 VALUES ($1, $2, clock_timestamp() + ($3::BIGINT * interval '1 millisecond'))
+                 ON CONFLICT (crawl_run_id, schedule_key) DO UPDATE
+                 SET next_allowed_at = EXCLUDED.next_allowed_at",
+                &[&run_id, &selected_key, &group_spacing_ms],
+            )
+            .map_err(|error| Error::storage(format!("persist politeness group spacing: {error}")))?;
+        }
         let permit_id: i64 = tx
             .query_one(
                 "SELECT permit_id FROM scout_crawl_request_permits
@@ -345,7 +456,7 @@ impl FrontierStore {
             &selected_origin,
             Some(row.get(0)),
         )?;
-        debug_assert!(active_origin < i64::from(origin_limit));
+        debug_assert!(active_origin < i64::from(selected_origin_limit));
         tx.commit()
             .map_err(|error| Error::storage(format!("commit request permit: {error}")))?;
         Ok(PermitDecision::Acquired(grant))
@@ -392,11 +503,14 @@ impl FrontierStore {
         self.client.query_opt(
             "SELECT request.request_id FROM scout_crawl_request_permits AS request
              JOIN scout_crawl_request_policy AS policy USING(crawl_run_id)
+             LEFT JOIN scout_crawl_origin_request_policy AS origin_policy
+               ON origin_policy.crawl_run_id=request.crawl_run_id
+              AND origin_policy.origin=request.origin
              WHERE request.crawl_run_id=$1 AND request.status='pending' AND request.pending_deadline>clock_timestamp()
                AND (policy.total_attempts>=policy.max_total_attempts OR (
                  (SELECT count(*) FROM scout_crawl_request_permits AS active WHERE active.crawl_run_id=$1 AND active.status='active' AND active.expires_at>clock_timestamp())<policy.global_concurrency
-                 AND (SELECT count(*) FROM scout_crawl_request_permits AS active WHERE active.crawl_run_id=$1 AND active.status='active' AND active.origin=request.origin AND active.expires_at>clock_timestamp())<policy.origin_concurrency
-                 AND NOT EXISTS (SELECT 1 FROM scout_crawl_request_spacing AS spacing WHERE spacing.crawl_run_id=$1 AND spacing.schedule_key=request.schedule_key AND spacing.next_allowed_at>clock_timestamp())))
+                 AND (SELECT count(*) FROM scout_crawl_request_permits AS active WHERE active.crawl_run_id=$1 AND active.status='active' AND active.origin=request.origin AND active.expires_at>clock_timestamp())<COALESCE(origin_policy.origin_concurrency,policy.origin_concurrency)
+                 AND NOT EXISTS (SELECT 1 FROM scout_crawl_request_spacing AS spacing WHERE spacing.crawl_run_id=$1 AND spacing.schedule_key IN (request.origin,request.schedule_key) AND spacing.next_allowed_at>clock_timestamp())))
              ORDER BY CASE WHEN policy.last_schedule_key IS NULL OR request.schedule_key>policy.last_schedule_key THEN 0 ELSE 1 END,
                       request.schedule_key, request.queued_at, request.request_id LIMIT 1",
             &[&run_id])
@@ -432,7 +546,7 @@ impl FrontierStore {
                UNION ALL SELECT lease_deadline FROM scout_crawl_tasks WHERE $2 AND crawl_run_id=$1 AND status='leased' AND lease_deadline>to_timestamp($6::BIGINT/1000.0)
                UNION ALL SELECT expires_at FROM scout_crawl_request_permits WHERE $3 AND crawl_run_id=$1 AND status='active' AND expires_at>to_timestamp($6::BIGINT/1000.0)
                UNION ALL SELECT pending_deadline FROM scout_crawl_request_permits WHERE $3 AND crawl_run_id=$1 AND status='pending'
-               UNION ALL SELECT spacing.next_allowed_at FROM scout_crawl_request_spacing AS spacing WHERE $3 AND spacing.crawl_run_id=$1 AND spacing.next_allowed_at>to_timestamp($6::BIGINT/1000.0) AND EXISTS(SELECT 1 FROM scout_crawl_request_permits AS request WHERE request.crawl_run_id=$1 AND request.status='pending' AND request.schedule_key=spacing.schedule_key)
+               UNION ALL SELECT spacing.next_allowed_at FROM scout_crawl_request_spacing AS spacing WHERE $3 AND spacing.crawl_run_id=$1 AND spacing.next_allowed_at>to_timestamp($6::BIGINT/1000.0) AND EXISTS(SELECT 1 FROM scout_crawl_request_permits AS request WHERE request.crawl_run_id=$1 AND request.status='pending' AND spacing.schedule_key IN (request.origin,request.schedule_key))
                UNION ALL SELECT created_at+($5::BIGINT*interval '1 second') FROM scout_crawl_runs WHERE $2 AND crawl_run_id=$1
              ) deadlines", &[&run_id, &claims, &permits, &excluded_sources, &duration, &reference_unix_ms])
             .map(|row| row.get::<_, Option<i64>>(0).map(|millis| Duration::from_millis(millis.max(1) as u64)))
@@ -540,6 +654,14 @@ struct PersistedRequestPolicy {
     robots_cache_ms: i64,
     max_total_attempts: i64,
     max_pending_requests: i32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PersistedOriginPolicy {
+    origin: String,
+    schedule_key: String,
+    origin_concurrency: i32,
+    min_start_spacing_ms: i64,
 }
 
 fn request_policy_values(limits: RequestPolicyLimits) -> Result<PersistedRequestPolicy, Error> {

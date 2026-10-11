@@ -21,6 +21,26 @@ max_duration_seconds = 21600
 robots_cache_seconds = 86400
 max_passage_tokens = 384
 
+[[origins]]
+origin = "https://doc.rust-lang.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://docs.python.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://kubernetes.io"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://www.postgresql.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
 [[sources]]
 source_id = "rust"
 name = "Rust official documentation"

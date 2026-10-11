@@ -19,6 +19,34 @@ caches the BGE Small embedding model on first use.
    allowed origins, and path prefixes. See [`data/configs/sources-500.toml`](data/configs/sources-500.toml)
    for an example. Scout respects `robots.txt` and stays within the configured URL boundaries.
 
+   Set request budgets in the same TOML. Top-level `origin_concurrency` and
+   `min_start_spacing_ms` apply to every allowed origin unless `[[origins]]` overrides them:
+
+   ```toml
+   global_concurrency = 8
+   origin_concurrency = 1
+   min_start_spacing_ms = 500
+
+   [[origins]]
+   origin = "https://doc.rust-lang.org"
+   origin_concurrency = 2
+   min_start_spacing_ms = 1000
+
+   [[origins]]
+   origin = "https://docs.python.org"
+   min_start_spacing_ms = 750
+   ```
+
+   Omitted top-level spacing defaults to 500 ms (at most two starts per second per
+   origin); set `min_start_spacing_ms = 0` explicitly to disable spacing.
+   Concurrency caps simultaneous requests independently of start spacing. Each
+   `origin` must match an allowed scheme, host, and port. Omitted fields inherit
+   top-level values. `global_concurrency` caps all requests. Budgets cover page,
+   `robots.txt`, sitemap, redirect, and retry requests. Sources sharing a
+   `politeness_group` use the strictest member spacing for group starts. Local
+   crawls also cap combined requests in that group at top-level
+   `origin_concurrency`; distributed crawls cap concurrency per origin.
+
 3. Crawl, build an index, activate it, and start the API:
 
    ```bash
@@ -53,6 +81,9 @@ and `GET /v1/generation`.
 For a local menu-driven workflow, run `scripts/distributed-local-ui.sh`. For direct local setup and
 control, see `scripts/distributed-local.sh`. Distributed crawling requires PostgreSQL; bind the
 coordinator to a trusted private interface and restrict worker access.
+The same sources TOML drives `scout crawl` locally and `scout coordinator` with `scout worker`
+for distributed crawls. The `distributed-local` scripts start coordinator and workers on one
+machine.
 
 ## Development
 

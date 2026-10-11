@@ -118,7 +118,7 @@ impl<'a> CrawlWorker<'a> {
             drop(response);
             let body_sha256 = sha256_hex(&body);
             let rules = parse_robots(&body);
-            let sitemap_page_count = self.expand_sitemaps(&origin, &rules.sitemaps)?;
+            let sitemap_page_count = self.expand_sitemaps(&origin, &rules)?;
             let allowed = rules.allows(parsed.path());
             self.coordinator.cache_robots(
                 origin,
@@ -139,8 +139,9 @@ impl<'a> CrawlWorker<'a> {
         Ok(false)
     }
 
-    fn expand_sitemaps(&self, origin: &str, roots: &[String]) -> Result<usize, Error> {
-        let mut pending = roots
+    fn expand_sitemaps(&self, origin: &str, rules: &RobotsPolicy) -> Result<usize, Error> {
+        let mut pending = rules
+            .sitemaps
             .iter()
             .filter_map(|url| {
                 let parsed = Url::parse(url).ok()?;
@@ -160,6 +161,14 @@ impl<'a> CrawlWorker<'a> {
                 continue;
             }
             let sitemap = Url::parse(&sitemap_url).expect("normalized sitemap URL parses");
+            if !rules.allows(sitemap.path()) {
+                self.emit(
+                    "sitemap.unavailable",
+                    "failure",
+                    json!({"url": sitemap_url, "reason": "robots_denied"}),
+                );
+                continue;
+            }
             let mut response = match self.request(&sitemap, "sitemap") {
                 Ok(response) => response,
                 Err(error) if error.code == "safety_cap" => return Err(error),

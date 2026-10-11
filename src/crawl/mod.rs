@@ -23,6 +23,8 @@ pub(crate) use fetch::{
     schedule_key, sitemap_url_allowed,
 };
 use model::{CanonicalConfig, Extracted, FetchOutcome, RawConfig};
-pub(crate) use model::{Capture, Config, ContentBlock, CrawlPolicy, CrawlResult, Source};
+pub(crate) use model::{
+    Capture, Config, ContentBlock, CrawlPolicy, CrawlResult, OriginRequestPolicy, Source,
+};
 pub(crate) use robots::{RobotsGroup, RobotsPolicy, RobotsRule};
 pub(crate) use run::execute;

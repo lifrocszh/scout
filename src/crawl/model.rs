@@ -16,6 +16,8 @@ pub(crate) struct RawConfig {
     pub(crate) global_concurrency: Option<usize>,
     pub(crate) origin_concurrency: Option<usize>,
     pub(crate) min_start_spacing_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) origins: Vec<RawOriginPolicy>,
     pub(crate) max_attempts: Option<usize>,
     pub(crate) retry_backoff_ms: Option<u64>,
     pub(crate) retry_max_delay_ms: Option<u64>,
@@ -29,6 +31,21 @@ pub(crate) struct RawConfig {
     #[serde(default)]
     pub(crate) sources: Vec<RawSource>,
     pub(crate) crawl: Option<RawProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawOriginPolicy {
+    pub(crate) origin: String,
+    pub(crate) origin_concurrency: Option<usize>,
+    pub(crate) min_start_spacing_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OriginRequestPolicy {
+    pub(crate) origin: String,
+    pub(crate) origin_concurrency: usize,
+    pub(crate) min_start_spacing_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +124,7 @@ pub(crate) struct Config {
     pub(crate) global_concurrency: usize,
     pub(crate) origin_concurrency: usize,
     pub(crate) min_start_spacing_ms: u64,
+    pub(crate) origin_policies: Vec<OriginRequestPolicy>,
     pub(crate) max_attempts: usize,
     pub(crate) retry_backoff_ms: u64,
     pub(crate) retry_max_delay_ms: u64,
@@ -128,6 +146,8 @@ pub(crate) struct CrawlPolicy {
     pub(crate) global_concurrency: usize,
     pub(crate) origin_concurrency: usize,
     pub(crate) min_start_spacing_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) origin_policies: Vec<OriginRequestPolicy>,
     pub(crate) max_frontier: usize,
     pub(crate) max_decoded_body_bytes: usize,
     pub(crate) max_extraction_bytes: usize,
@@ -145,6 +165,18 @@ pub(crate) struct CrawlPolicy {
 }
 
 impl Config {
+    pub(crate) fn origin_policy(&self, origin: &str) -> OriginRequestPolicy {
+        self.origin_policies
+            .iter()
+            .find(|policy| policy.origin == origin)
+            .cloned()
+            .unwrap_or_else(|| OriginRequestPolicy {
+                origin: origin.to_owned(),
+                origin_concurrency: self.origin_concurrency,
+                min_start_spacing_ms: self.min_start_spacing_ms,
+            })
+    }
+
     pub(crate) fn policy(&self) -> CrawlPolicy {
         CrawlPolicy {
             schema_version: self.schema_version.clone(),
@@ -153,6 +185,7 @@ impl Config {
             global_concurrency: self.global_concurrency,
             origin_concurrency: self.origin_concurrency,
             min_start_spacing_ms: self.min_start_spacing_ms,
+            origin_policies: self.origin_policies.clone(),
             max_frontier: self.max_frontier,
             max_decoded_body_bytes: self.max_body_bytes,
             max_extraction_bytes: self.max_extraction_bytes,
@@ -195,6 +228,8 @@ pub(crate) struct CanonicalConfig<'a> {
     pub(crate) max_extraction_millis: u64,
     pub(crate) max_passage_tokens: usize,
     pub(crate) sources: &'a [Source],
+    #[serde(skip_serializing_if = "<[OriginRequestPolicy]>::is_empty")]
+    pub(crate) origin_policies: &'a [OriginRequestPolicy],
 }
 
 #[derive(Debug, Clone)]

@@ -21,6 +21,21 @@ robots_cache_seconds = 86400
 max_passage_tokens = 384
 min_content_chars = 100
 
+[[origins]]
+origin = "https://doc.rust-lang.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://docs.python.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
+[[origins]]
+origin = "https://www.postgresql.org"
+origin_concurrency = 1
+min_start_spacing_ms = 500
+
 [[sources]]
 source_id = "rust"
 seeds = ["https://doc.rust-lang.org/book/ch01-00-getting-started.html", "https://doc.rust-lang.org/book/ch01-01-installation.html", "https://doc.rust-lang.org/book/ch01-02-hello-world.html", "https://doc.rust-lang.org/book/ch01-03-hello-cargo.html", "https://doc.rust-lang.org/book/ch02-00-guessing-game-tutorial.html", "https://doc.rust-lang.org/book/ch03-00-common-programming-concepts.html", "https://doc.rust-lang.org/book/ch03-01-variables-and-mutability.html", "https://doc.rust-lang.org/book/ch03-02-data-types.html", "https://doc.rust-lang.org/book/ch03-03-how-functions-work.html", "https://doc.rust-lang.org/book/ch03-05-control-flow.html"]
