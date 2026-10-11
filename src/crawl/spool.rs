@@ -1,6 +1,11 @@
-use super::{Capture, Error, HashMap, Path, PathBuf, Source, SqlConnection, fs};
+use crate::crawl::{Capture, Source};
+use crate::error::Error;
+use rusqlite::Connection as SqlConnection;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -204,8 +209,8 @@ impl CaptureSpool {
             .map_err(|error| Error::storage(format!("query source group counts: {error}")))?;
         let mut counts = HashMap::new();
         for row in rows {
-            let (source_id, count) = row
-                .map_err(|error| Error::storage(format!("read source group count: {error}")))?;
+            let (source_id, count) =
+                row.map_err(|error| Error::storage(format!("read source group count: {error}")))?;
             counts.insert(source_id, count);
         }
         Ok(counts)
@@ -312,13 +317,15 @@ impl CaptureSpool {
         }
         let mut statement = connection
             .prepare("SELECT DISTINCT source_id FROM unique_content_groups")
-            .map_err(|error| Error::storage(format!("prepare content group scope check: {error}")))?;
+            .map_err(|error| {
+                Error::storage(format!("prepare content group scope check: {error}"))
+            })?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|error| Error::storage(format!("query content group scope: {error}")))?;
         for row in rows {
-            let source_id = row
-                .map_err(|error| Error::storage(format!("read content group Source: {error}")))?;
+            let source_id =
+                row.map_err(|error| Error::storage(format!("read content group Source: {error}")))?;
             if !sources.iter().any(|source| source.source_id == source_id) {
                 return Err(Error::invalid(format!(
                     "capture spool contains unknown Source {source_id:?}"
@@ -351,9 +358,7 @@ impl CaptureSpool {
         let mut count = current_count;
         {
             let mut statement = transaction
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO sitemap_pages(origin, url) VALUES (?1, ?2)",
-                )
+                .prepare_cached("INSERT OR IGNORE INTO sitemap_pages(origin, url) VALUES (?1, ?2)")
                 .map_err(|error| Error::storage(format!("prepare sitemap Page insert: {error}")))?;
             for url in urls {
                 if statement

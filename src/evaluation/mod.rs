@@ -1,14 +1,79 @@
+use serde::{Deserialize, Serialize};
+
+pub(crate) const EVALUATION_SCHEMA: &str = "scout.evaluation.v1";
+pub(crate) const EVALUATION_QUERY_COUNT: usize = 64;
+pub(crate) const EVALUATION_DEVELOPMENT_QUERY_COUNT: usize = 16;
+pub(crate) const EVALUATION_HELD_OUT_QUERY_COUNT: usize = 48;
+const EVALUATION_BOOTSTRAP_ITERATIONS: usize = 10_000;
+const EVALUATION_BOOTSTRAP_SEED: u64 = 0x5343_4f55_545f_4556;
+pub(crate) const EVALUATION_SOURCES: [&str; 4] = [
+    "rust-docs",
+    "python-docs",
+    "kubernetes-docs",
+    "postgres-docs",
+];
+pub(crate) const EVALUATION_INTENTS: [&str; 4] =
+    ["exact-api", "conceptual", "how-to", "semantic-paraphrase"];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EvaluationQuery {
+    pub(crate) query_id: String,
+    pub(crate) query: String,
+    pub(crate) source: String,
+    pub(crate) intent: String,
+    pub(crate) split: String,
+    #[serde(default)]
+    pub(crate) expected_page_candidates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct EvaluationJudgment {
+    pub(crate) query_id: String,
+    pub(crate) page_id: String,
+    #[serde(default)]
+    pub(crate) grade: Option<u8>,
+    #[serde(default)]
+    pub(crate) judge_id: Option<String>,
+    #[serde(default)]
+    pub(crate) adjudicated_grade: Option<u8>,
+    #[serde(default)]
+    pub(crate) judge_grades: BTreeMap<String, u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct EvaluationRanking {
+    pub(crate) query_id: String,
+    pub(crate) keyword: Vec<String>,
+    pub(crate) semantic: Vec<String>,
+    pub(crate) hybrid: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub(crate) struct QueryMetrics {
+    pub(crate) ndcg_at_10: f64,
+    pub(crate) mrr_at_10: f64,
+    pub(crate) recall_at_100: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub(crate) struct BootstrapInterval {
+    pub(crate) mean: f64,
+    pub(crate) lower: f64,
+    pub(crate) upper: f64,
+    pub(crate) iterations: usize,
+}
+
 use super::app::report_error;
 use super::generation::{IndexGeneration, SearchMode};
 use super::observability::Events;
 use super::storage::{new_run_id, parse_jsonl, sha256_hex, write_json};
-use super::{
-    BTreeMap, BTreeSet, BootstrapInterval, Cli, EVALUATION_BOOTSTRAP_ITERATIONS,
-    EVALUATION_BOOTSTRAP_SEED, EVALUATION_DEVELOPMENT_QUERY_COUNT, EVALUATION_HELD_OUT_QUERY_COUNT,
-    EVALUATION_INTENTS, EVALUATION_QUERY_COUNT, EVALUATION_SCHEMA, EVALUATION_SOURCES, Error,
-    EvaluationJudgment, EvaluationQuery, EvaluationRanking, HashMap, HashSet, Operation, Ordering,
-    Path, QueryMetrics, Value, fs, json,
-};
+use crate::cli::{Cli, Operation};
+use crate::error::Error;
+use serde_json::{Value, json};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 
 type PageGrades = BTreeMap<String, BTreeMap<String, u8>>;
 type NormalizedJudgments = (PageGrades, Value);
@@ -258,9 +323,7 @@ pub(crate) fn normalize_evaluation_judgments(
         if row.judge_id.is_none() && !row.judge_grades.is_empty() && final_grade.is_some() {
             adjudicated_rows += 1;
         }
-        if row.judge_id.is_none()
-            && row.judge_grades.is_empty()
-            && row.adjudicated_grade.is_some()
+        if row.judge_id.is_none() && row.judge_grades.is_empty() && row.adjudicated_grade.is_some()
         {
             adjudicated_rows += 1;
         }

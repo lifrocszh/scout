@@ -1,5 +1,6 @@
 use super::embeddings::fastembed_model_spec;
-use crate::{BuildMode, BuildProfile, Error, MAX_MODEL_PASSAGE_TOKENS, RawBuildProfile};
+use super::{BuildMode, BuildProfile, MAX_MODEL_PASSAGE_TOKENS, RawBuildProfile};
+use crate::error::Error;
 
 pub(super) fn build_profile(
     raw: RawBuildProfile,

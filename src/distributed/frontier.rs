@@ -1,12 +1,14 @@
-use super::storage::sha256_hex;
-use super::url::{normalize_origin, normalize_url, origin_key};
-use super::{Error, Url};
+use crate::crawl::RobotsPolicy;
+use crate::error::Error;
+use crate::storage::sha256_hex;
+use crate::url::{normalize_origin, normalize_url, origin_key};
+use ::url::Url;
 use postgres::{Client, NoTls};
 use std::time::Duration;
 
-const MIGRATION_V1: &str = include_str!("../migrations/0001_durable_crawl_frontier.sql");
-const MIGRATION_V2: &str = include_str!("../migrations/0002_shared_request_policy.sql");
-const MIGRATION_V3: &str = include_str!("../migrations/0003_fair_frontier_schedule.sql");
+const MIGRATION_V1: &str = include_str!("../../migrations/0001_durable_crawl_frontier.sql");
+const MIGRATION_V2: &str = include_str!("../../migrations/0002_shared_request_policy.sql");
+const MIGRATION_V3: &str = include_str!("../../migrations/0003_fair_frontier_schedule.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
 const REQUEST_MIGRATION: [(i32, &str, &str); 3] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
@@ -162,56 +164,6 @@ pub(crate) struct RequestPolicyLimits {
     pub(crate) robots_cache_ttl: Duration,
     pub(crate) max_total_attempts: usize,
     pub(crate) max_pending_requests: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RobotsPolicy {
-    pub(crate) groups: Vec<RobotsGroup>,
-    pub(crate) sitemaps: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RobotsGroup {
-    pub(crate) agents: Vec<String>,
-    pub(crate) rules: Vec<RobotsRule>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RobotsRule {
-    pub(crate) allow: bool,
-    pub(crate) path: String,
-}
-
-impl RobotsPolicy {
-    pub(crate) fn allows(&self, path: &str) -> bool {
-        let has_specific_group = self
-            .groups
-            .iter()
-            .any(|group| group.agents.iter().any(|agent| agent == "scout"));
-        let mut rules = self
-            .groups
-            .iter()
-            .filter(|group| {
-                group.agents.iter().any(|agent| {
-                    if has_specific_group {
-                        agent == "scout"
-                    } else {
-                        agent == "*"
-                    }
-                })
-            })
-            .flat_map(|group| group.rules.iter())
-            .filter(|rule| !rule.path.is_empty() && path.starts_with(&rule.path))
-            .collect::<Vec<_>>();
-        rules.sort_by(|left, right| {
-            right
-                .path
-                .len()
-                .cmp(&left.path.len())
-                .then_with(|| right.allow.cmp(&left.allow))
-        });
-        rules.first().map(|rule| rule.allow).unwrap_or(true)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1009,6 +961,7 @@ impl FrontierStore {
     }
 
     /// Add one logical URL task. Re-enqueueing the same run/source/URL is harmless.
+    #[cfg(test)]
     pub(crate) fn enqueue_url(
         &mut self,
         run_id: &str,

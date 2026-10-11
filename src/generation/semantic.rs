@@ -5,17 +5,19 @@ use super::embeddings::{
     model_cache_dir_for_staging,
 };
 use super::semantic_storage::{read_semantic_index, semantic_hits, validate_semantic_index};
-use crate::storage::write_json;
-use crate::{
-    BuildProfile, CatalogRecord, Error, MetricKind, SEMANTIC_ARTIFACT, SEMANTIC_MAGIC,
-    SEMANTIC_VECTOR_ARTIFACT, SemanticEvidence, SemanticHit, SemanticStageTimings,
+use super::{
+    BuildProfile, CatalogRecord, SEMANTIC_ARTIFACT, SEMANTIC_MAGIC, SEMANTIC_VECTOR_ARTIFACT,
+    SemanticEvidence, SemanticHit, SemanticStageTimings,
 };
+use crate::error::Error;
+use crate::storage::write_json;
 use serde_json::{Value, json};
 use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
+use usearch::MetricKind;
 use usearch::{Index as UsearchIndex, IndexOptions as UsearchIndexOptions, ScalarKind};
 
 pub(super) struct SemanticCheckpointStats {

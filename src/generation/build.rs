@@ -4,13 +4,14 @@ use super::keyword::build_keyword_index;
 use super::profile::build_profile;
 use super::semantic::build_semantic_index;
 use super::validation::{manifest_digest, validate_generation};
+use super::{CatalogRecord, GenerationManifest, RawBuildProfile, SEMANTIC_ARTIFACT};
+use crate::corpus::{
+    SNAPSHOT_SCHEMA, StoredAlias, StoredPage, StoredPassage, StoredSnapshotManifest,
+};
 use crate::crawl::page_id;
+use crate::error::Error;
 use crate::storage::{
     jsonl, normalize_text, now, parse_jsonl, sha256_hex, trim_snippet, write_if_absent, write_json,
-};
-use crate::{
-    CatalogRecord, Error, GenerationManifest, RawBuildProfile, SEMANTIC_ARTIFACT, SNAPSHOT_SCHEMA,
-    StoredAlias, StoredPage, StoredPassage, StoredSnapshotManifest,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +23,7 @@ pub(crate) fn build_generation(
     corpus_id: &str,
     run_id: &str,
     resume: bool,
-    mode: crate::BuildMode,
+    mode: super::BuildMode,
 ) -> Result<Value, Error> {
     if !valid_build_run_id(run_id) {
         return Err(Error::invalid(
@@ -85,7 +86,7 @@ pub(crate) fn build_generation(
     let corpus_model = snapshot
         .embedding_model
         .as_deref()
-        .unwrap_or(crate::DEFAULT_EMBEDDING_MODEL);
+        .unwrap_or(super::DEFAULT_EMBEDDING_MODEL);
     let profile = build_profile(raw, corpus_id, corpus_model, mode)?;
     let profile_bytes = serde_json::to_vec_pretty(&profile)
         .map_err(|e| Error::storage(format!("serialize build profile: {e}")))?;
@@ -249,7 +250,7 @@ pub(crate) fn build_generation(
             .as_ref()
             .map_or(0, |evidence| evidence.vector_count),
         semantic: semantic_evidence,
-        components: Some(crate::GenerationComponents::for_mode(mode)),
+        components: Some(super::GenerationComponents::for_mode(mode)),
         checksums_file: "checksums.sha256".into(),
         page_count,
         passage_count: catalog.len(),

@@ -1,7 +1,13 @@
-use super::{
-    Arc, BufWriter, EVENT_SCHEMA, Error, File, Mutex, OpenOptions, Path, SecondsFormat, Serialize,
-    Utc, Value, Write, fs,
-};
+use crate::error::Error;
+use chrono::{SecondsFormat, Utc};
+use serde::Serialize;
+use serde_json::Value;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+const EVENT_SCHEMA: &str = "scout.operational-event.v1";
 
 #[derive(Debug, Serialize)]
 struct Event {

@@ -1,12 +1,18 @@
-use super::generation::{
+use super::{BuildProfile, CatalogRecord, LoadedGeneration};
+use super::{
     open_semantic_index, read_pointer, register_keyword_analyzer, validate_generation,
     validate_pointer,
 };
-use super::storage::parse_jsonl;
-use super::{
-    BuildProfile, CatalogRecord, Error, HashMap, Index, LoadedGeneration, Ordering, Path,
-    QueryParser, TantivyDocument, TantivyValue, TopDocs, fs,
-};
+use crate::error::Error;
+use crate::storage::parse_jsonl;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use tantivy::collector::TopDocs;
+use tantivy::query::QueryParser;
+use tantivy::schema::Value as TantivyValue;
+use tantivy::{Index, TantivyDocument};
 
 pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration, Error> {
     for pointer_name in ["CURRENT", "PREVIOUS"] {
@@ -71,7 +77,7 @@ pub(crate) fn load_active_generation(data_dir: &Path) -> Result<LoadedGeneration
             keyword_index,
             semantic_index,
             model_cache_dir: data_dir.join("models"),
-            query_embedder: super::generation::QueryEmbedder::default(),
+            query_embedder: super::QueryEmbedder::default(),
         });
     }
     Err(Error::not_ready(

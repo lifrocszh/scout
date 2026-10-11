@@ -1,4 +1,5 @@
-use crate::{CatalogRecord, Error, SEMANTIC_MAGIC, SemanticHit, StoredSemanticIndex};
+use super::{CatalogRecord, SEMANTIC_MAGIC, SemanticHit, StoredSemanticIndex};
+use crate::error::Error;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};

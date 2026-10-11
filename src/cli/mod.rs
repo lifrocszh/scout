@@ -1,4 +1,54 @@
-use super::{BuildMode, Cli, Operation, OsStr, OsString, PathBuf};
+#[derive(Debug)]
+pub(crate) struct Cli {
+    pub(crate) operation: Operation,
+    pub(crate) data_dir: PathBuf,
+    pub(crate) json_errors: bool,
+}
+
+#[derive(Debug)]
+pub(crate) enum Operation {
+    Crawl {
+        config: PathBuf,
+        materialize_spool: Option<String>,
+    },
+    Coordinator {
+        config: PathBuf,
+        bind: String,
+        run_id: Option<String>,
+    },
+    Worker {
+        coordinator: String,
+        worker_id: Option<String>,
+        max_tasks: Option<usize>,
+    },
+    IndexBuild {
+        corpus: String,
+        resume: Option<String>,
+        mode: BuildMode,
+    },
+    IndexActivate {
+        generation: String,
+    },
+    IndexRecover,
+    IndexVerify,
+    IndexPrune {
+        retain: Vec<String>,
+    },
+    Serve {
+        bind: String,
+        access_log: Option<PathBuf>,
+    },
+    Evaluate {
+        package: PathBuf,
+    },
+    Benchmark {
+        config: PathBuf,
+    },
+}
+
+use crate::generation::BuildMode;
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 pub(crate) fn parse_cli<I>(args: I) -> Result<Cli, String>
 where

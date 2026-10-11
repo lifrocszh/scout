@@ -1,13 +1,21 @@
+use super::fetch::sources_overlap;
+use super::{CanonicalConfig, RawConfig};
 use super::{
-    CanonicalConfig, Config, DEFAULT_BODY_LIMIT, DEFAULT_CONTENT_MINIMUM, DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_FRONTIER_LIMIT, DEFAULT_PASSAGE_MAX_TOKENS, DEFAULT_TIMEOUT_SECONDS, BTreeSet, Error,
-    HashSet, MAX_MODEL_PASSAGE_TOKENS, MINILM_EMBEDDING_MODEL, Path, RawConfig, Source, Url, fs,
+    Config, DEFAULT_BODY_LIMIT, DEFAULT_CONTENT_MINIMUM, DEFAULT_FRONTIER_LIMIT,
+    DEFAULT_PASSAGE_MAX_TOKENS, DEFAULT_TIMEOUT_SECONDS, Source,
 };
-use super::{
-    crawl::sources_overlap,
+use crate::error::Error;
+use crate::generation::{
+    DEFAULT_EMBEDDING_MODEL, MAX_MODEL_PASSAGE_TOKENS, MINILM_EMBEDDING_MODEL,
+};
+use crate::{
     storage::sha256_hex,
     url::{normalize_origin, normalize_url, origin_key},
 };
+use ::url::Url;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
+use std::path::Path;
 
 pub(crate) fn load_config(path: &Path) -> Result<Config, Error> {
     let text = fs::read_to_string(path)

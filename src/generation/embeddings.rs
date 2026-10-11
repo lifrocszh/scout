@@ -1,6 +1,9 @@
+use super::BuildProfile;
+use super::MAX_MODEL_PASSAGE_TOKENS;
+use crate::error::Error;
 use crate::storage::sha256_hex;
-use crate::{BuildProfile, Error, MAX_MODEL_PASSAGE_TOKENS, json};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
@@ -38,7 +41,7 @@ pub(super) struct FastEmbedModelSpec {
 
 pub(super) fn fastembed_model_spec(name: &str) -> Result<FastEmbedModelSpec, Error> {
     match name {
-        crate::DEFAULT_EMBEDDING_MODEL => Ok(FastEmbedModelSpec {
+        super::DEFAULT_EMBEDDING_MODEL => Ok(FastEmbedModelSpec {
             model: EmbeddingModel::BGESmallENV15,
             source: "hf://Xenova/bge-small-en-v1.5",
             license: "MIT",
@@ -47,7 +50,7 @@ pub(super) fn fastembed_model_spec(name: &str) -> Result<FastEmbedModelSpec, Err
             max_tokens: 512,
             query_instruction: "Represent this sentence for searching relevant passages: ",
         }),
-        crate::MINILM_EMBEDDING_MODEL => Ok(FastEmbedModelSpec {
+        super::MINILM_EMBEDDING_MODEL => Ok(FastEmbedModelSpec {
             model: EmbeddingModel::AllMiniLML6V2,
             source: "hf://Qdrant/all-MiniLM-L6-v2-onnx",
             license: "Apache-2.0",
@@ -434,8 +437,9 @@ fn deterministic_embedding(text: &str, dimensions: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use super::BuildProfile;
     use super::QueryEmbedder;
-    use crate::{BuildProfile, json};
+    use serde_json::json;
     use std::sync::Arc;
 
     fn deterministic_profile() -> BuildProfile {

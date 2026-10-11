@@ -1,16 +1,24 @@
-use super::corpus::capture_selection_key;
 use super::extract::extract;
-use super::frontier::{RobotsGroup, RobotsPolicy, RobotsRule};
-use super::observability::Events;
+use super::robots::{RobotsGroup, RobotsPolicy, RobotsRule};
 use super::spool::CaptureSpool;
-use super::storage::{read_bounded, sha256_hex, write_if_absent};
-use super::url::{normalize_url, origin_key};
-use super::{
-    Arc, BTreeMap, BTreeSet, CONTENT_LENGTH, CONTENT_TYPE, Capture, Client, Condvar, Config,
-    CrawlResult, Duration, Error, Extracted, FetchOutcome, HashMap, HashSet, Instant, LOCATION,
-    MAX_REDIRECTS, MAX_ROBOTS_BYTES, Mutex, Path, Policy, RETRY_AFTER, Source, Url, Value,
-    VecDeque, json, thread,
-};
+use super::{Extracted, FetchOutcome};
+use super::{MAX_REDIRECTS, MAX_ROBOTS_BYTES};
+use crate::corpus::capture_selection_key;
+use crate::crawl::{Capture, Config, CrawlResult, Source};
+use crate::error::Error;
+use crate::observability::Events;
+use crate::storage::{read_bounded, sha256_hex, write_if_absent};
+use crate::url::{normalize_url, origin_key};
+use ::url::Url;
+use reqwest::blocking::Client;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION, RETRY_AFTER};
+use reqwest::redirect::Policy;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const MAX_SITEMAP_DEPTH: usize = 5;
 const MAX_SITEMAP_INDEX_LOCATIONS: usize = 100_000;

@@ -32,24 +32,22 @@ flowchart TB
     EVENTS -.-> SVC
 ```
 
-Implementation is deliberately dependency-light and single-process:
+Modules group code by domain:
 
-- `src/crawl.rs` uses blocking `reqwest` with a coordinator for global/origin concurrency,
-  politeness spacing, retries, robots policy, sitemap discovery, redirect bounds, and safety caps.
-- `src/extract.rs` uses `scraper` to select useful document content, preserve headings and code,
-  normalize text, and compute extracted-content hashes.
-- `src/corpus.rs` materializes immutable Pages, exact-content aliases, and heading-bounded Passages;
+- `src/crawl/` owns config, fetching, robots and sitemap policy, extraction, spooling, and crawl
+  orchestration. Fetching uses blocking `reqwest`, bounded retries, politeness spacing, and safety caps.
+- `src/corpus/` materializes immutable Pages, exact-content aliases, and heading-bounded Passages;
   IDs and artifact ordering are deterministic. Repeated final URLs use a recorded lexical capture
   selection key, so conflicting responses are explainable without arrival-order dependence.
-- `src/generation.rs` builds Tantivy keyword fields plus a USearch cosine index. `fastembed` provides
+- `src/generation/` builds Tantivy keyword fields plus a USearch cosine index. `fastembed` provides
   BGE-small embeddings; deterministic embeddings exist only for tests. Manifests, catalogs, counts,
   identities, and SHA-256 checksums are reopened and fully validated before build success or activation.
-- `src/search.rs` loads one valid Generation per request, retrieves keyword and semantic candidates,
-  fuses them with reciprocal rank fusion, then aggregates Passage hits to representative Pages.
-- `src/http.rs` exposes the JSON API through `TcpListener` and a small HTTP/1.1 implementation;
+- `src/distributed/` separates coordinator, worker, RPC protocol, and persistent frontier.
+- `src/http/` exposes the JSON API through `TcpListener` and a small HTTP/1.1 implementation;
   `src/observability.rs` writes structured operational events and optional NCSA access logs.
-- `src/evaluation.rs` and `src/benchmark.rs` enforce frozen inputs, relevance metrics, paired
-  bootstrap diagnostics, replayable staging runs, latency distributions, and integrity evidence.
+- `src/evaluation/` and `src/benchmark/` enforce frozen inputs, relevance metrics, paired bootstrap
+  diagnostics, replayable staging runs, latency distributions, and integrity evidence.
+- `src/app.rs` dispatches operations; `src/lib.rs` wires modules.
 
 ## Quick start
 

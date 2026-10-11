@@ -1,4 +1,5 @@
-use super::{Error, Url};
+use crate::error::Error;
+use ::url::Url;
 
 pub(crate) fn normalize_url(mut url: Url) -> Result<String, String> {
     if !matches!(url.scheme(), "http" | "https") {

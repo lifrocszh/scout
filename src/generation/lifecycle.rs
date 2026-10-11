@@ -1,7 +1,8 @@
+use super::GenerationPointer;
 use super::checksums::refresh_checksums;
 use super::validation::{load_generation_manifest, validate_generation, write_generation_manifest};
+use crate::error::Error;
 use crate::storage::new_run_id;
-use crate::{Error, GenerationPointer};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::ffi::OsStr;

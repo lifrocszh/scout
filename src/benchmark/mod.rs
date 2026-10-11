@@ -1,25 +1,228 @@
+use serde::{Deserialize, Serialize};
+
+const BENCHMARK_SCHEMA: &str = "scout.benchmark.v1";
+const BENCHMARK_DEFAULT_REPETITIONS: usize = 3;
+const BENCHMARK_DEFAULT_COLD_OPEN_RUNS: usize = 5;
+const BENCHMARK_DEFAULT_WARMUP_PASSES: usize = 2;
+const BENCHMARK_DEFAULT_MEASURED_PASSES: usize = 10;
+const BENCHMARK_DEFAULT_CONCURRENCY: [usize; 4] = [1, 4, 8, 16];
+const BENCHMARK_DEFAULT_INDEX_WORKERS: [usize; 4] = [1, 4, 8, 18];
+const BENCHMARK_INSTABILITY_LIMIT: f64 = 0.15;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct BenchmarkReferenceProfile {
+    #[serde(default)]
+    pub(crate) hardware: Option<String>,
+    #[serde(default)]
+    pub(crate) cpu_model: Option<String>,
+    #[serde(default, alias = "cpu_cache_sizes")]
+    pub(crate) cpu_cache: Option<String>,
+    #[serde(default)]
+    pub(crate) logical_cpus: Option<usize>,
+    #[serde(default)]
+    pub(crate) ram_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) swap_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) os: Option<String>,
+    #[serde(default)]
+    pub(crate) kernel: Option<String>,
+    #[serde(default)]
+    pub(crate) rust_toolchain: Option<String>,
+    #[serde(default)]
+    pub(crate) lockfile_sha256: Option<String>,
+    #[serde(default)]
+    pub(crate) filesystem: Option<String>,
+    #[serde(default)]
+    pub(crate) free_disk_bytes: Option<u64>,
+    #[serde(default)]
+    pub(crate) background_load: Option<String>,
+    #[serde(default)]
+    pub(crate) source_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) model_name: Option<String>,
+    #[serde(default)]
+    pub(crate) model_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) tokenizer_sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawBenchmarkConfig {
+    pub(crate) schema_version: Option<String>,
+    pub(crate) benchmark_id: Option<String>,
+    pub(crate) reference_profile: Option<String>,
+    #[serde(default)]
+    pub(crate) reference: Option<BenchmarkReferenceProfile>,
+    pub(crate) corpus_snapshot_id: Option<String>,
+    pub(crate) generation_id: Option<String>,
+    pub(crate) build_id: Option<String>,
+    pub(crate) evaluation_id: Option<String>,
+    pub(crate) evaluation_package: Option<PathBuf>,
+    pub(crate) seed: Option<u64>,
+    pub(crate) query_order: Option<String>,
+    pub(crate) cache_state: Option<String>,
+    pub(crate) repetitions: Option<usize>,
+    pub(crate) fresh_staging_runs: Option<usize>,
+    pub(crate) cold_open_runs: Option<usize>,
+    pub(crate) warmup_passes: Option<usize>,
+    pub(crate) measured_passes: Option<usize>,
+    #[serde(alias = "search_concurrency")]
+    pub(crate) concurrency: Option<Vec<usize>>,
+    pub(crate) index_workers: Option<Vec<usize>>,
+    #[serde(alias = "replay_crawl")]
+    pub(crate) replay_crawl_dir: Option<PathBuf>,
+    pub(crate) runlens_metadata: Option<PathBuf>,
+    #[serde(alias = "sampling_interval_ms")]
+    pub(crate) resource_sampling_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkConfig {
+    pub(crate) schema_version: String,
+    pub(crate) benchmark_id: String,
+    pub(crate) reference_profile: String,
+    pub(crate) reference: BenchmarkReferenceProfile,
+    pub(crate) corpus_snapshot_id: String,
+    pub(crate) generation_id: String,
+    pub(crate) build_id: String,
+    pub(crate) evaluation_id: String,
+    pub(crate) evaluation_package: PathBuf,
+    pub(crate) seed: u64,
+    pub(crate) query_order: String,
+    pub(crate) cache_state: String,
+    pub(crate) repetitions: usize,
+    pub(crate) fresh_staging_runs: usize,
+    pub(crate) cold_open_runs: usize,
+    pub(crate) warmup_passes: usize,
+    pub(crate) measured_passes: usize,
+    pub(crate) concurrency: Vec<usize>,
+    pub(crate) index_workers: Vec<usize>,
+    pub(crate) replay_crawl_dir: Option<PathBuf>,
+    pub(crate) runlens_metadata: Option<PathBuf>,
+    pub(crate) resource_sampling_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkPlan {
+    pub(crate) schema_version: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) run_id: String,
+    pub(crate) benchmark_id: String,
+    pub(crate) config_sha256: String,
+    pub(crate) reference_profile: String,
+    pub(crate) reference: BenchmarkReferenceProfile,
+    pub(crate) corpus_snapshot_id: String,
+    pub(crate) corpus_snapshot_sha256: String,
+    pub(crate) generation_id: String,
+    pub(crate) generation_manifest_sha256: String,
+    pub(crate) build_id: String,
+    pub(crate) build_profile_sha256: String,
+    pub(crate) evaluation_id: String,
+    pub(crate) evaluation_package: String,
+    pub(crate) evaluation_package_sha256: String,
+    pub(crate) evaluation_metadata_sha256: Option<String>,
+    pub(crate) evaluation_queries_sha256: String,
+    pub(crate) evaluation_judgments_sha256: Option<String>,
+    pub(crate) query_count: usize,
+    pub(crate) query_ids: Vec<String>,
+    pub(crate) seed: u64,
+    pub(crate) query_order: String,
+    pub(crate) cache_state: String,
+    pub(crate) repetitions: usize,
+    pub(crate) fresh_staging_runs: usize,
+    pub(crate) cold_open_runs: usize,
+    pub(crate) warmup_passes: usize,
+    pub(crate) measured_passes: usize,
+    pub(crate) concurrency: Vec<usize>,
+    pub(crate) index_workers: Vec<usize>,
+    pub(crate) replay_crawl: Value,
+    pub(crate) runlens_metadata: Option<String>,
+    pub(crate) resource_sampling_interval_ms: u64,
+    pub(crate) performance_thresholds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkDistribution {
+    pub(crate) sample_count: usize,
+    pub(crate) min_ms: f64,
+    pub(crate) p50_ms: f64,
+    pub(crate) p95_ms: f64,
+    pub(crate) p99_ms: f64,
+    pub(crate) max_ms: f64,
+    pub(crate) median_spread: f64,
+    pub(crate) unstable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkSample {
+    pub(crate) phase: String,
+    pub(crate) run: usize,
+    pub(crate) pass: Option<usize>,
+    pub(crate) mode: Option<String>,
+    pub(crate) concurrency: Option<usize>,
+    pub(crate) worker_count: Option<usize>,
+    pub(crate) cache_state: String,
+    pub(crate) duration_ms: f64,
+    pub(crate) query_count: usize,
+    pub(crate) qps: Option<f64>,
+    pub(crate) latency_ms: Option<BenchmarkDistribution>,
+    pub(crate) integrity_verified: bool,
+    pub(crate) artifact_path: Option<String>,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct BenchmarkSystemEvidence {
+    pub(crate) benchmark_run_id: String,
+    pub(crate) process_id: u32,
+    pub(crate) swap_in_before: Option<u64>,
+    pub(crate) swap_in_after: Option<u64>,
+    pub(crate) swap_out_before: Option<u64>,
+    pub(crate) swap_out_after: Option<u64>,
+    pub(crate) swap_activity_detected: bool,
+    pub(crate) oom_observed: Option<bool>,
+    pub(crate) partial_artifacts: bool,
+    pub(crate) integrity_verified: bool,
+    pub(crate) page_cache_state: String,
+    pub(crate) runlens_metadata_path: Option<String>,
+    pub(crate) runlens_metadata_sha256: Option<String>,
+    pub(crate) runlens_metadata: Value,
+    pub(crate) resource_samples_path: String,
+    pub(crate) resource_boundaries_path: String,
+    pub(crate) resource_summary_path: String,
+    pub(crate) resource_sampler: Value,
+}
+
 use super::app::{report_error, run};
 use super::evaluation::{
-    corpus_source_id, load_evaluation_metadata, metadata_string, validate_benchmark_queries,
+    EvaluationQuery, corpus_source_id, load_evaluation_metadata, metadata_string,
+    validate_benchmark_queries,
 };
 use super::generation::{
-    ActiveGeneration, IndexGeneration, SearchMode, collect_files, directory_bytes,
-    directory_digest, validate_generation,
+    ActiveGeneration, GenerationManifest, IndexGeneration, SearchMode, collect_files,
+    directory_bytes, directory_digest, validate_generation,
 };
 use super::http::read_http_request;
 use super::observability::Events;
 use super::storage::{jsonl, new_run_id, parse_jsonl, sha256_hex, write_if_absent, write_json};
-use super::{
-    Arc, AtomicBool, AtomicOrdering, BENCHMARK_DEFAULT_COLD_OPEN_RUNS,
-    BENCHMARK_DEFAULT_CONCURRENCY, BENCHMARK_DEFAULT_INDEX_WORKERS,
-    BENCHMARK_DEFAULT_MEASURED_PASSES, BENCHMARK_DEFAULT_REPETITIONS,
-    BENCHMARK_DEFAULT_WARMUP_PASSES, BENCHMARK_INSTABILITY_LIMIT, BENCHMARK_SCHEMA, BTreeMap,
-    BTreeSet, BenchmarkConfig, BenchmarkDistribution, BenchmarkPlan, BenchmarkSample,
-    BenchmarkSystemEvidence, Cli, Command, Duration, Error, EvaluationQuery, GenerationManifest,
-    HashMap, Instant, Mutex, Operation, Ordering, OsString, Path, PathBuf, RawBenchmarkConfig,
-    SNAPSHOT_SCHEMA, StoredSnapshotManifest, TcpListener, TcpStream, Value, Write, fs, io, json,
-    thread,
-};
+use crate::cli::{Cli, Operation};
+use crate::corpus::{SNAPSHOT_SCHEMA, StoredSnapshotManifest};
+use crate::error::Error;
+use crate::generation::BuildMode;
+use serde_json::{Value, json};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::OsString;
+use std::fs;
+use std::io::{self, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) fn run_benchmark(cli: &Cli) -> i32 {
     let Operation::Benchmark { config } = &cli.operation else {
@@ -1758,7 +1961,7 @@ fn benchmark_fresh_index(
     let summary = IndexGeneration::at(&workspace).build(
         snapshot_id,
         &format!("benchmark-index-run-{run}-workers-{worker_count}"),
-        crate::BuildMode::Hybrid,
+        BuildMode::Hybrid,
     )?;
     let staging = PathBuf::from(
         summary["staging_path"]

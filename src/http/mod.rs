@@ -1,14 +1,35 @@
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchRequest {
+    pub(crate) query: String,
+    #[serde(default)]
+    pub(crate) mode: Option<String>,
+    #[serde(default)]
+    pub(crate) limit: Option<usize>,
+    #[serde(default)]
+    pub(crate) source: Option<String>,
+}
+
 use super::app::report_error;
 use super::generation::{
     ActiveGeneration, IndexGeneration, LifecycleAction, PageQuery, SearchMode, read_pointer,
 };
 use super::observability::Events;
 use super::storage::{new_run_id, sha256_hex};
-use super::{
-    Arc, Cli, Duration, Error, File, Mutex, OpenOptions, Operation, Read, SearchRequest,
-    SocketAddr, TcpListener, TcpStream, Utc, Value, Write, io, json, thread,
+use crate::cli::{Cli, Operation};
+use crate::error::Error;
+use chrono::Utc;
+use serde_json::{Value, json};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{self, TrySendError},
 };
-use std::sync::mpsc::{self, TrySendError};
+use std::thread;
+use std::time::Duration;
 
 const SERVE_ACTIVE_WORKERS: usize = 1;
 const SERVE_CONNECTION_QUEUE_CAPACITY: usize = 1;

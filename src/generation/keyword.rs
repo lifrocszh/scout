@@ -1,6 +1,7 @@
 use super::checksums::{directory_bytes, directory_digest};
+use super::{BuildProfile, CatalogRecord};
+use crate::error::Error;
 use crate::storage::write_json;
-use crate::{BuildProfile, CatalogRecord, Error};
 use std::fs;
 use std::time::Instant;
 use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions};

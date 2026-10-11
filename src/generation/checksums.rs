@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::error::Error;
 use crate::storage::{sha256_hex, write_if_absent};
 use sha2::{Digest, Sha256};
 use std::fs;

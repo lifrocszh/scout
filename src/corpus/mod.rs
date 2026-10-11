@@ -1,14 +1,32 @@
-use super::{
-    AliasRecord, BTreeMap, BufWriter, CRAWL_SCHEMA, Capture, Config, ContentBlock, CrawlResult,
-    Digest, Error, HashMap, HashSet, Manifest, ManifestError, ManifestPage, OpenOptions, PageRecord,
-    PassageRecord, Path, SNAPSHOT_SCHEMA, Serialize, Sha256, SnapshotManifest, SnapshotResult,
-    Summary, Write, io,
-    crawl::page_id,
-    fs,
-    storage::{now, sha256_hex, write_json},
+mod model;
+
+pub(crate) const SNAPSHOT_SCHEMA: &str = "scout.corpus-snapshot.v1";
+const CRAWL_SCHEMA: &str = "scout.crawl-manifest.v1";
+
+use model::{
+    AliasRecord, Manifest, ManifestError, ManifestPage, PageRecord, PassageRecord,
+    SnapshotManifest, Summary,
+};
+pub(crate) use model::{
+    SnapshotResult, StoredAlias, StoredPage, StoredPassage, StoredSnapshotManifest,
 };
 
-#[path = "corpus/bounded.rs"]
+use crate::crawl::page_id;
+use crate::crawl::spool::CaptureSpool;
+use crate::crawl::{Capture, Config, ContentBlock, CrawlResult};
+use crate::error::Error;
+use crate::observability::{Events, emit_shared};
+use crate::storage::{now, sha256_hex, write_json};
+use serde::Serialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
 mod bounded;
 pub(crate) use bounded::{
     materialize_spooled, seal_existing_materialized_spool, write_incomplete_spooled,
@@ -55,11 +73,7 @@ fn serialized_sha256<T: Serialize>(value: &T, name: &str) -> Result<String, Erro
 }
 
 fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
-    let file = match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             serde_json::to_writer_pretty(io::sink(), value)
@@ -67,7 +81,10 @@ fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> 
             return Ok(());
         }
         Err(error) => {
-            return Err(Error::storage(format!("create {}: {error}", path.display())));
+            return Err(Error::storage(format!(
+                "create {}: {error}",
+                path.display()
+            )));
         }
     };
     let mut writer = BufWriter::new(file);
@@ -78,16 +95,16 @@ fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> 
         .map_err(|e| Error::storage(format!("write {}: {e}", path.display())))
 }
 
+#[cfg(test)]
 fn write_jsonl<T: Serialize>(path: &Path, values: &[T]) -> Result<String, Error> {
-    let output: Box<dyn Write> = match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let output: Box<dyn Write> = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => Box::new(BufWriter::new(file)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Box::new(io::sink()),
         Err(error) => {
-            return Err(Error::storage(format!("create {}: {error}", path.display())));
+            return Err(Error::storage(format!(
+                "create {}: {error}",
+                path.display()
+            )));
         }
     };
     let mut writer = DigestWriter::new(output);
@@ -258,6 +275,7 @@ fn capture_id(capture: &Capture) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn materialize(
     data_dir: &Path,
     crawl_dir: &Path,
@@ -556,6 +574,7 @@ pub(crate) fn materialize(
 /// Validate the immutable records before a snapshot can be sealed. Keep this
 /// stricter than the count checks in the manifest: JSONL references are the
 /// trust boundary consumed by index builds and search.
+#[cfg(test)]
 pub(crate) fn validate_snapshot_records(
     pages: &[PageRecord],
     aliases: &[AliasRecord],
@@ -641,6 +660,7 @@ pub(crate) fn validate_snapshot_records(
     Ok(())
 }
 
+#[cfg(test)]
 fn alias_identity_url(alias: &AliasRecord) -> Option<&str> {
     match alias.alias_kind {
         "exact-alias" => Some(alias.alias_url.as_str()),
@@ -734,7 +754,7 @@ pub(crate) fn write_incomplete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Source;
+    use crate::crawl::Source;
     use serde_json::Value;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -744,7 +764,7 @@ mod tests {
             schema_version: CRAWL_SCHEMA.into(),
             contact_url: "https://example.invalid/contact".into(),
             user_agent: "Scout/test".into(),
-            embedding_model: crate::DEFAULT_EMBEDDING_MODEL.into(),
+            embedding_model: crate::generation::DEFAULT_EMBEDDING_MODEL.into(),
             page_target: 1,
             min_content_chars: 1,
             max_body_bytes: 1_000_000,
@@ -927,4 +947,206 @@ mod tests {
         };
         assert!(validate_snapshot_records(&[page.clone(), page], &[], &[]).is_err());
     }
+}
+
+pub(crate) fn materialize_existing_spool(
+    data_dir: &std::path::Path,
+    source_run_id: &str,
+    config_path: &std::path::Path,
+    config: &Config,
+    events: &Arc<Mutex<Events>>,
+) -> Result<SnapshotResult, Error> {
+    let valid_run_id = source_run_id.strip_prefix("run-").is_some_and(|suffix| {
+        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if !valid_run_id {
+        return Err(Error::invalid("invalid source Crawl run ID"));
+    }
+    let crawl_dir = data_dir.join("crawls").join(source_run_id);
+    let spool_path = crawl_dir.join("capture-spool.sqlite3");
+    if !spool_path.is_file() || crawl_dir.join("crawl-manifest.json").exists() {
+        return Err(Error::invalid(
+            "source Crawl needs an unsealed capture spool and no complete manifest",
+        ));
+    }
+    let (started_at, completed_at, rejected_count, failed_count) =
+        read_source_run_summary(data_dir, source_run_id, config_path, config)?;
+    let spool = CaptureSpool::open(&crawl_dir, config.max_frontier)?;
+    spool.validate_source_scope(&config.sources)?;
+    let groups = spool.unique_groups_by_source()?;
+    let total_groups: usize = groups.values().sum();
+    let quotas_met = config.sources.iter().all(|source| {
+        source.minimum_page_quota == 0
+            || groups.get(&source.source_id).copied().unwrap_or_default()
+                >= source.minimum_page_quota
+    });
+    if total_groups < config.page_target || !quotas_met {
+        return Err(Error::invalid(format!(
+            "capture spool has {total_groups} unique groups; target {} and source quotas are not met",
+            config.page_target
+        )));
+    }
+
+    let staging = data_dir
+        .join("corpora")
+        .join(format!(".staging-{source_run_id}"));
+    let preserved = data_dir
+        .join("corpora")
+        .join(format!(".interrupted-{source_run_id}"));
+    if preserved.exists() {
+        if !["pages.jsonl", "aliases.jsonl", "passages.jsonl"]
+            .iter()
+            .all(|name| preserved.join(name).is_file())
+        {
+            return Err(Error::invalid(
+                "preserved materialization is missing a complete JSONL file set",
+            ));
+        }
+        let snapshot = seal_existing_materialized_spool(
+            data_dir,
+            &crawl_dir,
+            source_run_id,
+            config,
+            &started_at,
+            &completed_at,
+            rejected_count,
+            failed_count,
+            &spool,
+            &preserved,
+        )?;
+        emit_shared(
+            events,
+            "crawl.materialization.snapshot_sealed",
+            "success",
+            json!({"source_run_id": source_run_id, "snapshot_id": snapshot.id, "unique_groups": total_groups, "reused_preserved_jsonl": true}),
+        );
+        return Ok(snapshot);
+    }
+    if staging.exists() {
+        fs::rename(&staging, &preserved).map_err(|error| {
+            Error::storage(format!("preserve interrupted materialization: {error}"))
+        })?;
+    }
+    let result = CrawlResult {
+        captures: Vec::new(),
+        rejected_count,
+        failed_count,
+        stop_reason: "page_target_reached".into(),
+    };
+    let snapshot = materialize_spooled(
+        data_dir,
+        &crawl_dir,
+        source_run_id,
+        config,
+        &started_at,
+        &completed_at,
+        result,
+        &spool,
+    )?;
+    emit_shared(
+        events,
+        "crawl.materialization.snapshot_sealed",
+        "success",
+        json!({"source_run_id": source_run_id, "snapshot_id": snapshot.id, "unique_groups": total_groups}),
+    );
+    Ok(snapshot)
+}
+
+fn read_source_run_summary(
+    data_dir: &std::path::Path,
+    source_run_id: &str,
+    config_path: &std::path::Path,
+    config: &Config,
+) -> Result<(String, String, usize, usize), Error> {
+    let path = data_dir.join("logs").join(format!("{source_run_id}.jsonl"));
+    let file = File::open(&path)
+        .map_err(|error| Error::storage(format!("open source Crawl event log: {error}")))?;
+    let mut first_timestamp = None;
+    let mut first_event = None;
+    let mut recorded_config_path = None;
+    let mut last_timestamp = None;
+    let mut last_event = None;
+    let mut policy_matches = false;
+    let mut recorded_config_digest = None;
+    let mut rejected_count = 0;
+    let mut failed_count = 0;
+    let expected_policy = serde_json::to_value(config.policy())
+        .map_err(|error| Error::invalid(format!("serialize Crawl policy: {error}")))?;
+    for line in BufReader::new(file).lines() {
+        let line =
+            line.map_err(|error| Error::storage(format!("read source Crawl event log: {error}")))?;
+        let event: Value = serde_json::from_str(&line)
+            .map_err(|error| Error::invalid(format!("invalid source Crawl event log: {error}")))?;
+        let timestamp = event
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::invalid("source Crawl event has no timestamp"))?
+            .to_owned();
+        if event.get("run_id").and_then(Value::as_str) != Some(source_run_id) {
+            return Err(Error::invalid("source Crawl event has the wrong run ID"));
+        }
+        first_timestamp.get_or_insert_with(|| timestamp.clone());
+        last_timestamp = Some(timestamp);
+        let event_name = event
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        first_event.get_or_insert_with(|| event_name.to_owned());
+        last_event = Some(event_name.to_owned());
+        if event_name == "crawl.started" {
+            recorded_config_path = event
+                .get("data")
+                .and_then(|data| data.get("config_path"))
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from);
+        }
+        if event_name == "crawl.policy" {
+            policy_matches = event.get("data") == Some(&expected_policy);
+        }
+        if event_name == "crawl.config" {
+            let digest = event
+                .get("data")
+                .and_then(|data| data.get("source_config_sha256"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::invalid("source Crawl config event has no digest"))?;
+            if recorded_config_digest.is_some_and(|previous| previous != digest) {
+                return Err(Error::invalid("source Crawl config digest is inconsistent"));
+            }
+            recorded_config_digest = Some(digest.to_owned());
+        }
+        rejected_count += usize::from(event_name == "page.rejected");
+        failed_count += usize::from(event_name == "fetch.failed");
+    }
+    if last_event.as_deref() != Some("crawl.concurrency") {
+        return Err(Error::invalid(
+            "source Crawl did not finish capture and concurrency reporting",
+        ));
+    }
+    if first_event.as_deref() != Some("crawl.started") || !policy_matches {
+        return Err(Error::invalid(
+            "source Crawl config or policy does not match the supplied config",
+        ));
+    }
+    let current_config_path = fs::canonicalize(config_path)
+        .map_err(|error| Error::invalid(format!("resolve supplied Crawl config: {error}")))?;
+    let original_config_path = recorded_config_path
+        .ok_or_else(|| Error::invalid("source Crawl log has no config path"))?;
+    let original_config_path = fs::canonicalize(original_config_path)
+        .map_err(|error| Error::invalid(format!("resolve source Crawl config: {error}")))?;
+    if original_config_path != current_config_path {
+        return Err(Error::invalid(
+            "supplied Crawl config path differs from the source Crawl config path",
+        ));
+    }
+    if recorded_config_digest.is_some_and(|digest| digest != config.digest) {
+        return Err(Error::invalid(
+            "supplied Crawl config digest differs from the source Crawl config digest",
+        ));
+    }
+    Ok((
+        first_timestamp.ok_or_else(|| Error::invalid("source Crawl event log is empty"))?,
+        last_timestamp.ok_or_else(|| Error::invalid("source Crawl event log is empty"))?,
+        rejected_count,
+        failed_count,
+    ))
 }

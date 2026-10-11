@@ -3,12 +3,16 @@ use super::keyword::register_keyword_analyzer;
 use super::profile::validate_model_metadata;
 use super::semantic::{open_semantic_index, validate_usearch_index};
 use super::semantic_storage::validate_semantic_file;
+use super::{
+    BuildProfile, CatalogRecord, GenerationManifest, SEMANTIC_ARTIFACT, SEMANTIC_VECTOR_ARTIFACT,
+    SemanticEvidence,
+};
+use crate::error::Error;
 use crate::storage::parse_jsonl;
 use crate::storage::sha256_hex;
-use crate::{
-    BTreeMap, BTreeSet, BuildProfile, CatalogRecord, Error, GenerationManifest, Path,
-    SEMANTIC_ARTIFACT, SEMANTIC_VECTOR_ARTIFACT, SemanticEvidence, fs,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 use tantivy::Index;
 
 pub(super) fn load_generation_manifest(generation: &Path) -> Result<GenerationManifest, Error> {
@@ -74,7 +78,7 @@ pub(crate) fn validate_generation(
         .map_err(|e| Error::invalid(format!("parse Generation build profile: {e}")))?;
     match manifest.schema_version.as_str() {
         "scout.generation-manifest.v1"
-            if manifest.components.is_none() && profile.build_mode == crate::BuildMode::Hybrid => {}
+            if manifest.components.is_none() && profile.build_mode == super::BuildMode::Hybrid => {}
         "scout.generation-manifest.v2" if manifest.components.is_some() => {}
         "scout.generation-manifest.v1" => {
             return Err(Error::invalid(
@@ -94,7 +98,7 @@ pub(crate) fn validate_generation(
         return Err(Error::invalid("Generation profile compatibility mismatch"));
     }
     let components = manifest.components();
-    if components != crate::GenerationComponents::for_mode(profile.build_mode) {
+    if components != super::GenerationComponents::for_mode(profile.build_mode) {
         return Err(Error::invalid(
             "Generation component declaration does not match build profile",
         ));
@@ -369,7 +373,7 @@ fn collect_file_paths(
 
 #[cfg(test)]
 mod tests {
-    use crate::SemanticEvidence;
+    use super::super::SemanticEvidence;
 
     #[test]
     fn absent_embedding_provider_is_omitted_for_legacy_manifest_digest() {

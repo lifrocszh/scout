@@ -1,13 +1,14 @@
 use super::*;
-use crate::extract::extract;
-use crate::spool::{CaptureSpool, CaptureStub};
+use crate::crawl::extract::extract;
+use crate::crawl::spool::{CaptureSpool, CaptureStub};
+use crate::crawl::{CrawlPolicy, Source};
+use ::url::Url;
 use rusqlite::{Connection, params};
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
+use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter};
-use ::url::Url;
-use serde_json::Value;
 
 const SQLITE_CACHE_KIB: i64 = -8192;
 
@@ -21,8 +22,9 @@ pub(crate) fn materialize_spooled(
     result: CrawlResult,
     spool: &CaptureSpool,
 ) -> Result<SnapshotResult, Error> {
-    let connection = Connection::open(spool.path())
-        .map_err(|error| Error::storage(format!("open capture spool for materialization: {error}")))?;
+    let connection = Connection::open(spool.path()).map_err(|error| {
+        Error::storage(format!("open capture spool for materialization: {error}"))
+    })?;
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .and_then(|_| connection.pragma_update(None, "temp_store", "FILE"))
@@ -228,7 +230,9 @@ pub(crate) fn materialize_spooled(
         .map_err(|error| Error::storage(format!("flush pages.jsonl: {error}")))?;
     let pages_jsonl_sha256 = pages_writer.finish();
     if page_count != expected_page_count {
-        return Err(Error::invalid("bounded Page count does not match selection index"));
+        return Err(Error::invalid(
+            "bounded Page count does not match selection index",
+        ));
     }
     snapshot_identity
         .write_all(b"]\0[")
@@ -237,7 +241,9 @@ pub(crate) fn materialize_spooled(
     let aliases_jsonl_sha256 = write_aliases(&connection, &aliases_path)?;
     let alias_count = count(&connection, "SELECT COUNT(*) FROM output_aliases")?;
     if alias_count != expected_alias_count {
-        return Err(Error::invalid("bounded Alias count does not match selection index"));
+        return Err(Error::invalid(
+            "bounded Alias count does not match selection index",
+        ));
     }
 
     let mut passages_writer = new_jsonl_writer(&passages_path)?;
@@ -411,8 +417,10 @@ pub(crate) fn seal_existing_materialized_spool(
         .write_all(config.digest.as_bytes())
         .and_then(|_| snapshot_identity.write_all(b"\0["))
         .map_err(|error| Error::storage(format!("start recovered snapshot identity: {error}")))?;
-    let (pages_jsonl_sha256, page_count) =
-        hash_existing_jsonl(&corpus_dir.join("pages.jsonl"), Some(&mut snapshot_identity))?;
+    let (pages_jsonl_sha256, page_count) = hash_existing_jsonl(
+        &corpus_dir.join("pages.jsonl"),
+        Some(&mut snapshot_identity),
+    )?;
     snapshot_identity
         .write_all(b"]\0[")
         .map_err(|error| Error::storage(format!("separate recovered snapshot arrays: {error}")))?;
@@ -476,7 +484,10 @@ pub(crate) fn seal_existing_materialized_spool(
         passage_count,
         passages_jsonl_sha256,
     };
-    write_json(&corpus_dir.join("snapshot-manifest.json"), &snapshot_manifest)?;
+    write_json(
+        &corpus_dir.join("snapshot-manifest.json"),
+        &snapshot_manifest,
+    )?;
     fs::rename(corpus_dir, &final_dir)
         .map_err(|error| Error::storage(format!("seal recovered snapshot: {error}")))?;
     Ok(SnapshotResult {
@@ -563,7 +574,9 @@ fn validate_existing_materialized_records(
             .map_err(|error| Error::storage(format!("record preserved Page identity: {error}")))?
             == 0
         {
-            return Err(Error::invalid("preserved Pages contain duplicate identities"));
+            return Err(Error::invalid(
+                "preserved Pages contain duplicate identities",
+            ));
         }
         verify_jsonl_record(&mut pages, &page, "pages.jsonl", page_count)?;
         for passage in build_passages(
@@ -727,9 +740,9 @@ fn hash_existing_jsonl(
     let mut first_identity = true;
     loop {
         line.clear();
-        let bytes_read = source
-            .read_until(b'\n', &mut line)
-            .map_err(|error| Error::storage(format!("read preserved {}: {error}", path.display())))?;
+        let bytes_read = source.read_until(b'\n', &mut line).map_err(|error| {
+            Error::storage(format!("read preserved {}: {error}", path.display()))
+        })?;
         if bytes_read == 0 {
             break;
         }
@@ -739,18 +752,22 @@ fn hash_existing_jsonl(
         if payload.is_empty() {
             continue;
         }
-        serde_json::from_slice::<Value>(payload)
-            .map_err(|error| Error::invalid(format!("invalid preserved {} record: {error}", path.display())))?;
+        serde_json::from_slice::<Value>(payload).map_err(|error| {
+            Error::invalid(format!(
+                "invalid preserved {} record: {error}",
+                path.display()
+            ))
+        })?;
         if let Some(identity) = snapshot_identity.as_deref_mut() {
             if !first_identity {
-                identity
-                    .write_all(b",")
-                    .map_err(|error| Error::storage(format!("separate recovered snapshot records: {error}")))?;
+                identity.write_all(b",").map_err(|error| {
+                    Error::storage(format!("separate recovered snapshot records: {error}"))
+                })?;
             }
             first_identity = false;
-            identity
-                .write_all(payload)
-                .map_err(|error| Error::storage(format!("hash preserved {} record: {error}", path.display())))?;
+            identity.write_all(payload).map_err(|error| {
+                Error::storage(format!("hash preserved {} record: {error}", path.display()))
+            })?;
         }
         count += 1;
     }
@@ -823,7 +840,9 @@ fn write_aliases(connection: &Connection, path: &Path) -> Result<String, Error> 
                     payload_json
                 ],
             )
-            .map_err(|error| Error::invalid(format!("duplicate or invalid Corpus Alias: {error}")))?;
+            .map_err(|error| {
+                Error::invalid(format!("duplicate or invalid Corpus Alias: {error}"))
+            })?;
         write_jsonl_payload(&mut writer, &payload_json, "aliases.jsonl")?;
     }
     drop(rows);
@@ -891,8 +910,8 @@ struct BoundedManifest<'a> {
     capture_selection_policy: &'static str,
     user_agent: String,
     robots_user_agent: &'static str,
-    policy: super::super::CrawlPolicy,
-    sources: Vec<super::super::Source>,
+    policy: CrawlPolicy,
+    sources: Vec<Source>,
     pages: ManifestPageStream<'a>,
     summary: Summary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1019,25 +1038,30 @@ fn make_manifest_page(
 }
 
 fn capture_id_parts(source_id: &str, final_url: &str, selection_key: &str) -> String {
-    sha256_hex(
-        format!("scout.capture.v1\0{source_id}\0{final_url}\0{selection_key}").as_bytes(),
-    )
+    sha256_hex(format!("scout.capture.v1\0{source_id}\0{final_url}\0{selection_key}").as_bytes())
 }
 
 fn restore_capture(crawl_dir: &Path, config: &Config, stub: CaptureStub) -> Result<Capture, Error> {
     let body_path = crawl_dir.join(&stub.body_file);
-    let body = fs::read(&body_path)
-        .map_err(|error| Error::storage(format!("read capture body {}: {error}", body_path.display())))?;
+    let body = fs::read(&body_path).map_err(|error| {
+        Error::storage(format!(
+            "read capture body {}: {error}",
+            body_path.display()
+        ))
+    })?;
     if body.len() != stub.content_bytes || sha256_hex(&body) != stub.body_hash {
-        return Err(Error::invalid("spooled capture body hash or length mismatch"));
+        return Err(Error::invalid(
+            "spooled capture body hash or length mismatch",
+        ));
     }
-    let html = String::from_utf8(body)
-        .map_err(|_| Error::invalid("spooled capture body is not UTF-8"))?;
+    let html =
+        String::from_utf8(body).map_err(|_| Error::invalid("spooled capture body is not UTF-8"))?;
     let html = html.trim_start_matches('\u{feff}');
     let page_url = Url::parse(&stub.final_url)
         .map_err(|error| Error::invalid(format!("invalid spooled final URL: {error}")))?;
-    let extracted = extract(html, &page_url, config.min_content_chars)
-        .map_err(|reason| Error::invalid(format!("spooled capture no longer extracts: {reason}")))?;
+    let extracted = extract(html, &page_url, config.min_content_chars).map_err(|reason| {
+        Error::invalid(format!("spooled capture no longer extracts: {reason}"))
+    })?;
     if extracted.content_hash != stub.content_hash
         || extracted.title != stub.title
         || extracted.description != stub.description
@@ -1045,7 +1069,9 @@ fn restore_capture(crawl_dir: &Path, config: &Config, stub: CaptureStub) -> Resu
         || extracted.canonical_url != stub.canonical_url
         || extracted.extraction_method != stub.extraction_method
     {
-        return Err(Error::invalid("spooled capture metadata does not match its body"));
+        return Err(Error::invalid(
+            "spooled capture metadata does not match its body",
+        ));
     }
     Ok(Capture {
         requested_url: stub.requested_url,
@@ -1093,15 +1119,16 @@ fn validate_page(page: &PageRecord) -> Result<(), Error> {
 }
 
 fn validate_passage(page: &PageRecord, passage: &PassageRecord) -> Result<(), Error> {
-    if passage.passage_id
-        != passage_id(&passage.page_id, &page.content_identity, passage.ordinal)
+    if passage.passage_id != passage_id(&passage.page_id, &page.content_identity, passage.ordinal)
         || passage.page_id != page.page_id
         || passage.source_id != page.source_id
         || passage.normalized_final_url != page.normalized_final_url
         || passage.content.is_empty()
         || passage.content_sha256 != sha256_hex(passage.content.as_bytes())
     {
-        return Err(Error::invalid("Corpus Passage identity or reference mismatch"));
+        return Err(Error::invalid(
+            "Corpus Passage identity or reference mismatch",
+        ));
     }
     Ok(())
 }
@@ -1162,7 +1189,9 @@ pub(crate) fn write_incomplete_spooled(
         robots_user_agent: "Scout",
         policy: config.policy(),
         sources: config.sources.clone(),
-        pages: IncompleteManifestPageStream { connection: &connection },
+        pages: IncompleteManifestPageStream {
+            connection: &connection,
+        },
         summary: Summary {
             captured_page_count: count,
             page_count: count,
@@ -1194,8 +1223,8 @@ struct IncompleteSpoolManifest<'a> {
     capture_selection_policy: &'static str,
     user_agent: String,
     robots_user_agent: &'static str,
-    policy: super::super::CrawlPolicy,
-    sources: Vec<super::super::Source>,
+    policy: CrawlPolicy,
+    sources: Vec<Source>,
     pages: IncompleteManifestPageStream<'a>,
     summary: Summary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1214,17 +1243,16 @@ impl Serialize for IncompleteManifestPageStream<'_> {
         let mut sequence = serializer.serialize_seq(None)?;
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT payload_json, selection_key FROM captures ORDER BY row_id",
-            )
+            .prepare("SELECT payload_json, selection_key FROM captures ORDER BY row_id")
             .map_err(serde::ser::Error::custom)?;
         let mut rows = statement.query([]).map_err(serde::ser::Error::custom)?;
         while let Some(row) = rows.next().map_err(serde::ser::Error::custom)? {
             let payload: String = row.get(0).map_err(serde::ser::Error::custom)?;
             let selection_key: String = row.get(1).map_err(serde::ser::Error::custom)?;
-            let capture = serde_json::from_str::<CaptureStub>(&payload)
-                .map_err(serde::ser::Error::custom)?;
-            let capture_id = capture_id_parts(&capture.source_id, &capture.final_url, &selection_key);
+            let capture =
+                serde_json::from_str::<CaptureStub>(&payload).map_err(serde::ser::Error::custom)?;
+            let capture_id =
+                capture_id_parts(&capture.source_id, &capture.final_url, &selection_key);
             sequence.serialize_element(&ManifestPage {
                 requested_url: capture.requested_url,
                 final_url: capture.final_url.clone(),

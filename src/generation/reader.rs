@@ -1,9 +1,12 @@
-use super::super::search::load_active_generation;
-use super::super::storage::trim_snippet;
-use super::super::{
-    BTreeMap, BuildMode, CatalogRecord, Error, LoadedGeneration, Ordering, Path, Value,
-};
+use super::search::{hybrid_hits, keyword_hits, load_active_generation, semantic_hits_for_query};
+use super::{BuildMode, CatalogRecord, LoadedGeneration};
 use super::{activate_generation, build_generation, prune_generations, recover_generation};
+use crate::error::Error;
+use crate::storage::trim_snippet;
+use serde_json::Value;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 pub(crate) struct IndexGeneration {
     data_dir: std::path::PathBuf,
@@ -173,15 +176,9 @@ impl ActiveGeneration {
             _ => {}
         }
         let hits = match request.mode {
-            SearchMode::Keyword => {
-                super::super::search::keyword_hits(&self.inner, query, request.source)?
-            }
-            SearchMode::Semantic => {
-                super::super::search::semantic_hits_for_query(&self.inner, query, request.source)?
-            }
-            SearchMode::Hybrid => {
-                super::super::search::hybrid_hits(&self.inner, query, request.source)?
-            }
+            SearchMode::Keyword => keyword_hits(&self.inner, query, request.source)?,
+            SearchMode::Semantic => semantic_hits_for_query(&self.inner, query, request.source)?,
+            SearchMode::Hybrid => hybrid_hits(&self.inner, query, request.source)?,
         };
         let snippet_window =
             self.inner.profile.snippet_window.ok_or_else(|| {

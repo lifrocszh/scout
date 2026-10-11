@@ -1,7 +1,9 @@
-use super::{
-    BTreeSet, ContentBlock, ElementRef, Extracted, Html, Selector, Url, storage::sha256_hex,
-    url::normalize_url,
-};
+use super::{ContentBlock, Extracted};
+use crate::storage::sha256_hex;
+use crate::url::normalize_url;
+use ::url::Url;
+use scraper::{ElementRef, Html, Selector};
+use std::collections::BTreeSet;
 
 pub(crate) fn extract(html: &str, page_url: &Url, minimum: usize) -> Result<Extracted, String> {
     let document = Html::parse_document(html);
