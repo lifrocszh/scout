@@ -154,7 +154,7 @@ SCOUT_DATABASE_URL='postgresql://…' scout coordinator --config data/configs/so
 scout worker --coordinator http://100.64.0.10:50051 --data-dir ./data/worker-a
 ```
 
-Coordinator and worker negotiate protocol version 1 at registration. Tailnet ACLs control access;
+Coordinator and worker negotiate protocol version 2 at registration. Tailnet ACLs control access;
 the RPC service has no application credentials. Each worker processes one leased URL at a time,
 renews its fenced lease, and obtains shared request permits for page, redirect, robots, and sitemap
 requests. The coordinator verifies each response body and stores it under its SHA-256 before it
@@ -167,6 +167,16 @@ scout crawl --config data/configs/sources-500.toml --data-dir ./data/distributed
 ```
 
 This seals the deterministic Corpus snapshot from the durable accepted capture set.
+
+Sitemap discovery has one durable owner per run/origin, fenced by the owner's renewable page
+lease. Its eligible links are committed to the frontier before the ordinary page request; worker
+death or coordinator restart can reclaim unfinished discovery without losing committed links.
+Each scan deduplicates repeated child references and cycles. Optional sitemap failures have bounded
+scan retries and a recorded terminal reason; permanent robots/body limits do not discard the
+ordinary page. Different origin trees can still reference and fetch the same external child.
+Restart all coordinator/worker processes together when upgrading from protocol version 1; mixed
+versions are rejected. Older unfinished runs have no discovery rows and scan an origin once under
+the new protocol.
 
 ### Local macOS setup
 
@@ -183,13 +193,41 @@ scripts/distributed-local.sh status ./data/distributed
 ```
 
 For a menu-driven workflow, run `scripts/distributed-local-ui.sh`. It lists the source TOML profiles,
-builds Scout, starts or resumes a crawl, and shows accepted/rejected page counts with worker status.
+builds Scout, starts or resumes a crawl, and monitors durable crawl progress every five seconds.
+Home groups the workflow into **1. Set up PostgreSQL**, **2. Crawl pages**, **3. Build search index**,
+and **4. Search API**, with **5. Change data folder** for switching workspaces. Each action has a short
+description. Home shows local database access, the saved source file, coordinator/worker presence,
+saved collections, the latest managed index job, and API process status. Status is checked when a
+menu opens; press `r` on Home to refresh. Choose `b` in a submenu to return Home. Crawl controls,
+monitoring, and logs live in **Crawl pages**; saving a Corpus and building or monitoring a Generation
+live in **Build search index**. A Corpus is a saved page collection; a Generation is its search index.
+Keep local runtime workspaces under `data/` so crawl bodies, logs, and indexes stay ignored by Git.
+The overview distinguishes accepted captures, completed URL tasks, rejected tasks, and unique
+content toward the target. In-flight leases and overshoot explain captures beyond the target;
+duplicate captures do not count twice toward unique content. Stopped runs remain browsable.
+Monitor keys are `o` overview, `f` frontier by source/origin, `p` URL-task outcomes, `w` workers,
+`t` throughput/target ETA, `c` constraints/resources, and `g` Generation progress. Use `j`/`k`
+to scroll; in the page view, `v` cycles outcome filters and `n`/`b` changes pages. Counts come
+from a read-only PostgreSQL snapshot, while claim age and recent activity come from JSONL logs.
+An expired lease or live PID is shown explicitly; process presence is not a responsiveness check.
+Unavailable or stale DB observations are labeled. Darwin resource readings use native `ps`,
+`memory_pressure`, `vm_stat`, `sysctl`, and `df`; CPU deltas need two samples, and host swap/memory
+readings cover the entire host. Monitoring requires Python 3 with its standard library only.
 From the menu, you can stop or materialize the run, then build and activate a keyword Generation for
-a completed Corpus. The UI creates a default index profile when needed. Choose **Start Search API**
+a completed Corpus. The UI creates a default index profile when needed. Keyword builds run in the
+background; the Generation screen shows build phases and passage progress, then activation and
+verification status. **Build search index > Monitor index build** also opens this screen without a
+saved crawl. Semantic builds started through the CLI expose their existing chunk/cache/checkpoint
+progress here. Embedding
+counts and compute rate are shown only for semantic builds. Build logs/state live under
+`distributed-local-ui/`; phase events live in `logs/<build-run-id>.build-progress.jsonl`, outside immutable
+Generation artifacts. If a managed build was killed without cleanup, confirm its recorded job
+and build PIDs have exited before removing its empty `distributed-local-ui/build.lock` directory.
+Choose **Start Search API**
 to serve the active Generation; it waits for `/v1/readyz` before reporting ready. The default bind is
 `127.0.0.1:8080`; set `SCOUT_SERVE_BIND` or enter another address when prompted. Choose **Stop
 Search API** to stop it. In the crawl monitor, press `s` to stop or `m` to return to the menu.
-Quitting the UI leaves active crawl and API processes running after confirmation. The API log is
+Quitting the UI leaves active crawl, build, and API processes running after confirmation. The API log is
 `data/distributed/logs/serve.log`.
 
 The launcher builds Scout if needed, creates a local `scout` database, and writes separate
