@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LAUNCHER="$ROOT/scripts/distributed-local.sh"
+MONITOR="$ROOT/scripts/distributed-local-monitor.py"
 SCOUT_BIN="$ROOT/target/release/scout"
 DATA_DIR=./data/distributed
 REFRESH_SECONDS=5
@@ -77,28 +78,79 @@ coordinator_state() {
   fi
 }
 
+postgres_status() {
+  local psql version candidate
+  psql=
+  for candidate in /opt/homebrew/opt/postgresql@17/bin/psql /usr/local/opt/postgresql@17/bin/psql; do
+    if [[ -x "$candidate" ]]; then
+      psql=$candidate
+      break
+    fi
+  done
+  psql=${psql:-$(command -v psql || true)}
+  if [[ -z "$psql" ]]; then
+    printf 'client not found — Home > 1 to set up\n'
+  elif version=$(PGCONNECT_TIMEOUT=2 PGOPTIONS='-c statement_timeout=1500' \
+      "$psql" -XAtqw -h /tmp -d scout -c 'SHOW server_version_num' 2>/dev/null); then
+    if [[ "$version" =~ ^17[0-9]{4}$ ]]; then
+      printf 'ready — local scout database accessible\n'
+    else
+      printf 'connected, but PostgreSQL 17 required — Home > 1\n'
+    fi
+  else
+    printf 'unavailable — server down or database inaccessible; Home > 1\n'
+  fi
+}
+
 draw_header() {
   clear_screen
   printf '%s\n' "${BOLD}${CYAN}SCOUT  /  LOCAL DISTRIBUTED CRAWL${RESET}"
   printf '%s\n' '──────────────────────────────────────────────'
+  printf '%s\n' 'Scout collects web pages and turns them into a local search index.'
   printf 'Data folder: %s\n' "$DATA_DIR"
-  local run_id status workers coordinator serve_state
+  printf 'PostgreSQL:  %s\n' "$(postgres_status)"
+  local run_id status workers coordinator config phase path snapshots=0
   run_id=$(state_value run_id)
+  status=$(active_status)
+  workers=$(active_workers "$status")
+  coordinator=$(coordinator_state "$status")
   if [[ -n "$run_id" ]]; then
-    status=$(active_status)
-    workers=$(active_workers "$status")
-    coordinator=$(coordinator_state "$status")
-    printf 'Saved run:   %s\n' "$run_id"
-    printf 'Processes:   coordinator %s · workers %s/3\n' "$coordinator" "$workers"
+    if [[ "$coordinator" == UP ]]; then
+      printf 'Crawl:       running — coordinator up, %s/3 workers present\n' "$workers"
+    elif ((workers > 0)); then
+      printf 'Crawl:       needs attention — coordinator down, %s/3 workers present\n' "$workers"
+    else
+      printf 'Crawl:       stopped — saved run available to inspect or resume\n'
+    fi
+    config=$(state_value source_config_path)
+    config=${config:-unknown}
+    printf 'Source file: %s\n' "${config##*/}"
   else
-    printf 'Saved run:   none\n'
+    printf 'Crawl:       no saved run in this folder\n'
+  fi
+  for path in "$DATA_DIR"/corpora/snapshot-*/snapshot-manifest.json; do
+    [[ ! -f "$path" ]] || snapshots=$((snapshots + 1))
+  done
+  phase=$(sed -n 's/^phase=//p' "$DATA_DIR/distributed-local-ui/build-state" 2>/dev/null | head -n 1 || true)
+  if managed_build_job; then
+    printf 'Collections: %s saved · index build running (%s)\n' "$snapshots" "${phase:-starting}"
+  elif [[ -d "$DATA_DIR/distributed-local-ui/build.lock" ]]; then
+    printf 'Collections: %s saved · build lock needs attention (Build > Monitor)\n' "$snapshots"
+  elif [[ -n "$phase" ]]; then
+    printf 'Collections: %s saved · last index job: %s\n' "$snapshots" "$phase"
+  else
+    printf 'Collections: %s saved · no index job recorded\n' "$snapshots"
+  fi
+  if [[ -s "$DATA_DIR/CURRENT" ]]; then
+    printf 'Search index: selected (checked before serving)'
+  else
+    printf 'Search index: none selected'
   fi
   if managed_serve_pid >/dev/null; then
-    serve_state=UP
+    printf ' · API process running\n'
   else
-    serve_state=down
+    printf ' · API stopped\n'
   fi
-  printf 'Search API:  %s\n' "$serve_state"
   printf '%s\n' '──────────────────────────────────────────────'
 }
 
@@ -114,6 +166,7 @@ choose_config() {
   shopt -u nullglob
 
   printf '\n%sSource configuration%s\n' "$BOLD" "$RESET"
+  printf 'Source files list websites to crawl and limits on how much to collect.\n'
   if ((${#configs[@]} == 0)); then
     echo 'No data/configs/sources*.toml files found.'
     return 1
@@ -151,16 +204,6 @@ choose_data_dir() {
   DATA_DIR=${selected:-$DATA_DIR}
 }
 
-event_count() {
-  local event=$1 file=$2 count
-  if [[ -f "$file" ]]; then
-    count=$(grep -c "\"event\":\"$event\"" "$file" 2>/dev/null || true)
-    printf '%s\n' "${count:-0}"
-  else
-    printf '?\n'
-  fi
-}
-
 choose_snapshot() {
   local path choice index
   local candidates=() snapshots=()
@@ -172,10 +215,11 @@ choose_snapshot() {
   done
 
   if ((${#snapshots[@]} == 0)); then
-    echo 'No completed Corpus snapshots found in this data folder.'
+    echo 'No saved collections here yet. Use Build search index > Save collected pages first.'
     return 1
   fi
   printf '\n%sCorpus snapshot%s\n' "$BOLD" "$RESET"
+  printf 'Choose the saved page collection to turn into a search index.\n'
   for index in "${!snapshots[@]}"; do
     printf '  %d) %s\n' "$((index + 1))" "${snapshots[$index]}"
   done
@@ -225,8 +269,28 @@ prepare_index_profile() {
   fi
 }
 
+managed_build_job() {
+  local file pid command absolute_data
+  file="$DATA_DIR/distributed-local-ui/build-job.pid"
+  [[ -f "$file" ]] || return 1
+  pid=$(cat "$file")
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  absolute_data=$(cd "$DATA_DIR" && pwd -P)
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in
+    *"$ROOT/scripts/distributed-local-build.sh"*"$absolute_data"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 build_keyword_index() {
-  local output generation
+  local absolute_data state_dir
+  if [[ -d "$DATA_DIR/distributed-local-ui/build.lock" ]]; then
+    echo 'Managed build lock exists. Opening Generation monitor.'
+    monitor_run --view generation
+    return
+  fi
   if ! choose_snapshot; then
     pause
     return
@@ -241,32 +305,13 @@ build_keyword_index() {
     pause
     return
   fi
-  printf '\n%sBuilding keyword index for %s…%s\n' "$BOLD" "$SELECTED_SNAPSHOT" "$RESET"
-  if ! output=$("$SCOUT_BIN" index build --corpus "$SELECTED_SNAPSHOT" \
-    --data-dir "$DATA_DIR" --mode keyword-only); then
-    echo 'Index build failed; see the operational log for details.'
-    pause
-    return
-  fi
-  printf '%s\n' "$output"
-  generation=$(printf '%s\n' "$output" | \
-    sed -n 's/^index build complete: generation_id=\([^ ]*\).*/\1/p')
-  if [[ -z "$generation" ]]; then
-    echo 'Could not read the Generation ID from build output.'
-    pause
-    return
-  fi
-  printf '\n%sActivating Generation %s…%s\n' "$GREEN" "$generation" "$RESET"
-  if ! "$SCOUT_BIN" index activate --generation "$generation" --data-dir "$DATA_DIR"; then
-    pause
-    return
-  fi
-  if ! "$SCOUT_BIN" index verify --data-dir "$DATA_DIR"; then
-    pause
-    return
-  fi
-  printf '\nKeyword search ready. Search mode: keyword.\n'
-  pause
+  absolute_data=$(cd "$DATA_DIR" && pwd -P)
+  state_dir="$absolute_data/distributed-local-ui"
+  mkdir -p "$state_dir"
+  nohup bash "$ROOT/scripts/distributed-local-build.sh" "$SCOUT_BIN" "$SELECTED_SNAPSHOT" "$absolute_data" \
+    > "$state_dir/build-launch-$(date '+%Y%m%d-%H%M%S')-$$.log" 2>&1 < /dev/null &
+  printf '\nKeyword build started. Activation and verification follow successful build.\n'
+  monitor_run --view generation
 }
 
 wait_for_serve() {
@@ -305,13 +350,11 @@ start_serve() {
     pause
     return
   fi
-  if [[ ! -x "$SCOUT_BIN" ]]; then
-    printf '\n%sCompiling Scout release build…%s\n' "$BOLD" "$RESET"
-    if ! (cd "$ROOT" && cargo build --release --bin scout); then
-      echo 'Build failed; scroll up for compiler details.'
-      pause
-      return
-    fi
+  printf '\n%sCompiling Scout release build…%s\n' "$BOLD" "$RESET"
+  if ! (cd "$ROOT" && cargo build --release --bin scout); then
+    echo 'Build failed; scroll up for compiler details.'
+    pause
+    return
   fi
   printf '\n%sChecking active Generation…%s\n' "$BOLD" "$RESET"
   if ! "$SCOUT_BIN" index verify --data-dir "$DATA_DIR"; then
@@ -338,7 +381,7 @@ start_serve() {
     return
   fi
   printf '\nSearch API ready at %s (pid=%s).\n' "$url" "$pid"
-  printf 'Keyword search: curl -X POST %s/v1/search -H \'content-type: application/json\' -d \'{"query":"ownership and borrowing","mode":"keyword","limit":10}\'\n' "$url"
+  printf '%s\n' "Keyword search: curl -X POST $url/v1/search -H 'content-type: application/json' -d '{\"query\":\"ownership and borrowing\",\"mode\":\"keyword\",\"limit\":10}'"
   pause
 }
 
@@ -358,60 +401,16 @@ stop_serve() {
 }
 
 monitor_run() {
-  local run_id config log status workers coordinator accepted rejected target key
-  run_id=$(state_value run_id)
-  if [[ -z "$run_id" ]]; then
-    echo 'No saved crawl run for this data folder.'
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo 'Monitoring requires Python 3 (standard library only).'
     pause
     return
   fi
-  config=$(state_value source_config_path)
-  log="$DATA_DIR/logs/$run_id.jsonl"
-  target=
-  if [[ -f "$config" ]]; then
-    target=$(sed -n 's/^[[:space:]]*page_target[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$config" | head -n 1)
+  if ! python3 -B "$MONITOR" --data-dir "$DATA_DIR" --binary "$SCOUT_BIN" \
+    --refresh "$REFRESH_SECONDS" "$@"; then
+    echo 'Monitor failed; see the error above.'
+    pause
   fi
-
-  while true; do
-    status=$(active_status)
-    workers=$(active_workers "$status")
-    coordinator=$(coordinator_state "$status")
-    accepted=$(event_count capture.accepted "$log")
-    rejected=$(event_count page.rejected "$log")
-    draw_header
-    printf '\n%sRUN MONITOR%s\n\n' "$BOLD" "$RESET"
-    printf 'Run ID:            %s\n' "$run_id"
-    if [[ -n "$target" && "$accepted" != '?' ]]; then
-      printf 'Accepted captures: %s / %s\n' "$accepted" "$target"
-    else
-      printf 'Accepted captures: %s\n' "$accepted"
-    fi
-    printf 'Rejected pages:    %s\n' "$rejected"
-    printf 'Coordinator:       %s\n' "$coordinator"
-    printf 'Workers:           %s / 3\n' "$workers"
-    printf 'Updated:           %s\n' "$(date '+%H:%M:%S')"
-    printf '\n%s[m]%s menu   %s[s]%s stop crawl   Refreshes every %s seconds\n' \
-      "$GREEN" "$RESET" "$YELLOW" "$RESET" "$REFRESH_SECONDS"
-
-    if [[ "$coordinator" == down && "$workers" == 0 ]]; then
-      printf '\n%sNo Scout processes detected. Choose Materialize after the crawl is stopped.%s\n' "$YELLOW" "$RESET"
-      pause
-      return
-    fi
-
-    key=
-    if read -r -s -n 1 -t "$REFRESH_SECONDS" key; then
-      case "$key" in
-        m|M) return ;;
-        s|S)
-          printf '\nStopping coordinator and workers…\n'
-          "$LAUNCHER" stop "$DATA_DIR"
-          pause
-          return
-          ;;
-      esac
-    fi
-  done
 }
 
 start_run() {
@@ -471,7 +470,7 @@ materialize_run() {
   fi
   status=$(active_status)
   if printf '%s\n' "$status" | grep -qE '^(coordinator|worker-[1-3]) pid='; then
-    echo 'Stop the coordinator and workers before materializing. Choose Stop from the menu.'
+    echo 'Stop the crawl first: Home > Crawl pages > Stop crawl.'
     pause
     return
   fi
@@ -510,41 +509,89 @@ view_log() {
 quit_ui() {
   local status answer
   status=$(active_status)
-  if printf '%s\n' "$status" | grep -qE '^(coordinator|worker-[1-3]) pid=' || managed_serve_pid >/dev/null; then
-    read -r -p 'Crawl or Search API still active. Leave it running in background? [y/N] ' answer
+  if printf '%s\n' "$status" | grep -qE '^(coordinator|worker-[1-3]) pid=' || managed_serve_pid >/dev/null || managed_build_job; then
+    read -r -p 'Crawl, Generation build, or Search API still active. Leave it running in background? [y/N] ' answer
     [[ "$answer" == y || "$answer" == Y ]] || return 1
   fi
   return 0
+}
+
+menu_option() {
+  printf '  %s) %s\n     %s\n' "$1" "$2" "$3"
+}
+
+workflow_menu() {
+  local section=$1 choice run_id
+  while true; do
+    draw_header
+    case "$section" in
+      crawl)
+        printf '\n%sCRAWL PAGES%s\n' "$BOLD" "$RESET"
+        printf 'A source file chooses websites, crawl limits, and the page target.\n'
+        run_id=$(state_value run_id)
+        printf 'Saved run: %s\n\n' "${run_id:-none}"
+        menu_option 1 'Start or resume crawl' 'Choose websites and a folder; collect pages in the background.'
+        menu_option 2 'Monitor pages and workers' 'See pages, remaining URLs, workers, speed, and machine resources.'
+        menu_option 3 'Stop crawl' 'Stop the coordinator and workers; saved progress stays available.'
+        menu_option 4 'View recent crawl log' 'Show recent coordinator messages to help investigate problems.'
+        ;;
+      build)
+        printf '\n%sBUILD SEARCH INDEX%s\n' "$BOLD" "$RESET"
+        printf 'First save collected pages as a Corpus; then build a searchable Generation.\n'
+        printf 'Stop the crawl before saving its collection.\n\n'
+        menu_option 1 'Save collected pages' 'Seal the saved crawl into a Corpus snapshot for indexing.'
+        menu_option 2 'Build keyword search index' 'Build, select, and verify an index from a saved collection.'
+        menu_option 3 'Monitor index build' 'Follow build phases, passage progress, and activation or validation errors.'
+        ;;
+      search)
+        printf '\n%sSEARCH API%s\n' "$BOLD" "$RESET"
+        printf 'The API lets applications search the selected index over local HTTP.\n'
+        printf 'Build an index first. Starting the API prints its address and an example query.\n\n'
+        menu_option 1 'Start Search API' 'Check the selected index, then serve it at a local address.'
+        menu_option 2 'Stop Search API' 'Stop serving searches; saved pages and index remain available.'
+        ;;
+    esac
+    printf '\n  b) Back to home\n\n'
+    read -r -p 'Select an option, then press Enter: ' choice
+    case "$section:$choice" in
+      crawl:1) start_run ;;
+      crawl:2) monitor_run ;;
+      crawl:3) stop_run ;;
+      crawl:4) view_log ;;
+      build:1) materialize_run ;;
+      build:2) build_keyword_index ;;
+      build:3) monitor_run --view generation ;;
+      search:1) start_serve ;;
+      search:2) stop_serve ;;
+      *:b|*:B) return ;;
+      *) echo 'Choose a listed option or b to return home.'; pause ;;
+    esac
+  done
 }
 
 main() {
   local choice
   while true; do
     draw_header
-    printf '\n%sWhat next?%s\n\n' "$BOLD" "$RESET"
-    printf '  1) Start or resume a crawl\n'
-    printf '  2) Monitor this crawl\n'
-    printf '  3) Stop coordinator and workers\n'
-    printf '  4) Materialize Corpus\n'
-    printf '  5) Build and activate keyword index\n'
-    printf '  6) Start Search API\n'
-    printf '  7) Stop Search API\n'
-    printf '  8) Set up local PostgreSQL\n'
-    printf '  9) View coordinator log\n'
-    printf ' 10) Change data folder\n'
-    printf '  q) Quit\n\n'
-    read -r -p 'Select: ' choice
+    printf '%sHOME — follow steps 1–4 · checked %s%s\n\n' "$BOLD" "$(date '+%H:%M:%S')" "$RESET"
+    menu_option 1 'Set up PostgreSQL' 'Install or start the local database needed for crawling.'
+    menu_option 2 'Crawl pages' 'Choose websites; start, resume, monitor, or stop collecting pages.'
+    menu_option 3 'Build search index' 'Save collected pages, then build and monitor a keyword index.'
+    menu_option 4 'Search API' 'Start or stop the local HTTP service for searching your index.'
+    menu_option 5 'Change data folder' 'Switch workspace; running jobs stay in their original folder.'
+    printf '  r) Refresh status    q) Quit menu (running jobs need confirmation)\n'
+    read -r -p 'Select an option, then press Enter: ' choice
     case "$choice" in
-      1) start_run ;;
-      2) monitor_run ;;
-      3) stop_run ;;
-      4) materialize_run ;;
-      5) build_keyword_index ;;
-      6) start_serve ;;
-      7) stop_serve ;;
-      8) setup_postgres ;;
-      9) view_log ;;
-      10) choose_data_dir ;;
+      1) setup_postgres ;;
+      2) workflow_menu crawl ;;
+      3) workflow_menu build ;;
+      4) workflow_menu search ;;
+      5)
+        printf '\nChoose a workspace to inspect or use for the next action.\n'
+        printf 'This does not move data or stop jobs in the previous folder.\n'
+        choose_data_dir
+        ;;
+      r|R) ;;
       q|Q)
         if quit_ui; then
           clear_screen
@@ -552,7 +599,7 @@ main() {
           return 0
         fi
         ;;
-      *) echo 'Choose 1–10 or q.'; pause ;;
+      *) echo 'Choose 1–5, r to refresh, or q to quit.'; pause ;;
     esac
   done
 }

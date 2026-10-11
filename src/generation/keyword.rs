@@ -1,6 +1,7 @@
 use super::checksums::{directory_bytes, directory_digest};
 use super::{BuildProfile, CatalogRecord};
 use crate::error::Error;
+use crate::observability::Events;
 use crate::storage::write_json;
 use std::fs;
 use std::time::Instant;
@@ -23,6 +24,7 @@ pub(super) fn build_keyword_index(
     staging: &std::path::Path,
     catalog: &[CatalogRecord],
     profile: &BuildProfile,
+    progress: &mut Option<Events>,
 ) -> Result<(String, usize, u128, u64), Error> {
     let started = Instant::now();
     let directory = staging.join("keyword");
@@ -51,7 +53,7 @@ pub(super) fn build_keyword_index(
     let mut writer = index
         .writer_with_num_threads(profile.worker_count.max(1), profile.writer_memory_bytes)
         .map_err(|e| Error::storage(format!("open Tantivy writer: {e}")))?;
-    for record in catalog {
+    for (ordinal, record) in catalog.iter().enumerate() {
         let mut document = TantivyDocument::default();
         document.add_text(title, &record.title);
         document.add_text(heading, record.heading_path.join(" "));
@@ -64,6 +66,19 @@ pub(super) fn build_keyword_index(
         writer
             .add_document(document)
             .map_err(|e| Error::storage(format!("add Tantivy document: {e}")))?;
+        if ((ordinal + 1) % 128 == 0 || ordinal + 1 == catalog.len())
+            && let Some(events) = progress.as_mut()
+        {
+            events.emit(
+                "index.progress",
+                "success",
+                serde_json::json!({
+                    "phase": "keyword",
+                    "passages_completed": ordinal + 1,
+                    "passage_count": catalog.len(),
+                }),
+            );
+        }
     }
     writer
         .commit()

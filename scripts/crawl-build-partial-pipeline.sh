@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 5 ]]; then
-  echo "Internal usage: $0 <semantic-only|keyword-only> <coreml|cpu> <sources.toml> <index-profile-template.toml> <data-dir>" >&2
+  echo "Internal usage: $0 <hybrid|semantic-only|keyword-only> <coreml|cpu> <sources.toml> <index-profile-template.toml> <data-dir>" >&2
   exit 2
 fi
 
@@ -11,8 +11,8 @@ BACKEND=$2
 CONFIG=$3
 PROFILE_TEMPLATE=$4
 DATA=$5
-if [[ "$MODE" != semantic-only && "$MODE" != keyword-only ]]; then
-  echo "Mode must be semantic-only or keyword-only" >&2
+if [[ "$MODE" != hybrid && "$MODE" != semantic-only && "$MODE" != keyword-only ]]; then
+  echo "Mode must be hybrid, semantic-only, or keyword-only" >&2
   exit 2
 fi
 if [[ "$BACKEND" != coreml && "$BACKEND" != cpu ]]; then

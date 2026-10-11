@@ -9,6 +9,16 @@ use ::url::Url;
 use std::time::Duration;
 
 impl FrontierStore {
+    pub(crate) fn mark_run_failed(&mut self, run_id: &str) -> Result<(), Error> {
+        self.client
+            .execute(
+                "UPDATE scout_crawl_runs SET status = 'failed' WHERE crawl_run_id = $1",
+                &[&run_id],
+            )
+            .map_err(|error| Error::storage(format!("mark crawl run failed: {error}")))?;
+        Ok(())
+    }
+
     /// Insert a run once; an existing ID is resumable only with the original digest.
     pub(crate) fn ensure_run(&mut self, run_id: &str, config_digest: &str) -> Result<bool, Error> {
         validate_digest(config_digest, "crawl config digest")?;
@@ -25,14 +35,19 @@ impl FrontierStore {
             )
             .map_err(|error| Error::storage(format!("persist crawl run identity: {error}")))?
             > 0;
-        let stored_digest: String = self
+        let stored = self
             .client
             .query_one(
-                "SELECT config_digest FROM scout_crawl_runs WHERE crawl_run_id = $1",
+                "SELECT config_digest,status FROM scout_crawl_runs WHERE crawl_run_id = $1",
                 &[&run_id],
             )
-            .map_err(|error| Error::storage(format!("read crawl run identity: {error}")))?
-            .get(0);
+            .map_err(|error| Error::storage(format!("read crawl run identity: {error}")))?;
+        let stored_digest: String = stored.get(0);
+        if stored.get::<_, String>(1) == "failed" {
+            return Err(Error::invalid(
+                "failed crawl run cannot resume; start a new run after repairing storage",
+            ));
+        }
         if stored_digest != config_digest {
             return Err(Error::invalid(format!(
                 "crawl run {run_id:?} has config digest {stored_digest}; refusing resume with {config_digest}"
@@ -166,6 +181,7 @@ impl FrontierStore {
             return Err(Error::invalid("worker_id must not be empty"));
         }
         let lease_ms = duration_millis(timing.lease_for)?;
+        let _measurement = crate::distributed::metrics::DatabaseScope::new("claim_one_autocommit");
         self.client
             .query_opt(
                 CLAIM_ONE_TASK,
@@ -181,6 +197,8 @@ impl FrontierStore {
         timing: LeaseTiming,
     ) -> Result<bool, Error> {
         let lease_ms = duration_millis(timing.lease_for)?;
+        let _measurement =
+            crate::distributed::metrics::DatabaseScope::new("renew_lease_autocommit");
         self.client
             .execute(
                 "UPDATE scout_crawl_tasks
@@ -309,13 +327,18 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("validate crawl task lease: {error}")))
     }
 
-    pub(crate) fn unfinished_task_count(&mut self, run_id: &str) -> Result<usize, Error> {
+    pub(crate) fn unfinished_task_count_excluding(
+        &mut self,
+        run_id: &str,
+        excluded: &[String],
+    ) -> Result<usize, Error> {
         let count: i64 = self
             .client
             .query_one(
                 "SELECT count(*) FROM scout_crawl_tasks
-                 WHERE crawl_run_id = $1 AND status IN ('pending', 'leased')",
-                &[&run_id],
+                 WHERE crawl_run_id = $1 AND (status = 'leased'
+                    OR (status = 'pending' AND NOT (source_id = ANY($2))))",
+                &[&run_id, &excluded],
             )
             .map_err(|error| Error::storage(format!("count unfinished crawl tasks: {error}")))?
             .get(0);

@@ -10,6 +10,7 @@ use crate::corpus::{
 };
 use crate::crawl::page_id;
 use crate::error::Error;
+use crate::observability::Events;
 use crate::storage::{
     jsonl, normalize_text, now, parse_jsonl, sha256_hex, trim_snippet, write_if_absent, write_json,
 };
@@ -30,6 +31,13 @@ pub(crate) fn build_generation(
             "build run ID must be run- followed by 64 hexadecimal characters",
         ));
     }
+    // Progress is operational evidence outside the immutable Generation artifacts.
+    // Losing telemetry must not make an otherwise valid build fail.
+    let mut progress =
+        Events::open_or_append(data_dir, &format!("{run_id}.build-progress"), "index")
+            .ok()
+            .map(|(events, _)| events);
+    emit_build_phase(&mut progress, "verify_corpus", None);
     let corpus_dir = data_dir.join("corpora").join(corpus_id);
     let manifest_path = corpus_dir.join("snapshot-manifest.json");
     let manifest_bytes = fs::read(&manifest_path).map_err(|e| {
@@ -91,6 +99,8 @@ pub(crate) fn build_generation(
     let profile_bytes = serde_json::to_vec_pretty(&profile)
         .map_err(|e| Error::storage(format!("serialize build profile: {e}")))?;
     let profile_digest = sha256_hex(&profile_bytes);
+
+    emit_build_phase(&mut progress, "catalog", Some(passages.len()));
 
     let mut aliases_by_page = BTreeMap::<String, BTreeSet<String>>::new();
     for alias in &aliases {
@@ -178,6 +188,7 @@ pub(crate) fn build_generation(
         drop(catalog);
         if let Ok(validated) = validate_generation(&staging, "validated") {
             remove_checkpoint_store(&checkpoint_root)?;
+            emit_build_phase(&mut progress, "validated", Some(validated.passage_count));
             return completed_build_summary(&staging, &validated);
         }
         remove_incomplete_artifacts(&staging)?;
@@ -199,11 +210,18 @@ pub(crate) fn build_generation(
         drop(catalog_bytes);
     }
     let keyword = if mode.has_keyword() {
-        Some(build_keyword_index(&staging, &catalog, &profile)?)
+        emit_build_phase(&mut progress, "keyword", Some(catalog.len()));
+        Some(build_keyword_index(
+            &staging,
+            &catalog,
+            &profile,
+            &mut progress,
+        )?)
     } else {
         None
     };
     let semantic = if mode.has_semantic() {
+        emit_build_phase(&mut progress, "semantic", Some(catalog.len()));
         Some(build_semantic_index(SemanticBuildInput {
             staging: &staging,
             checkpoint_root: &checkpoint_root,
@@ -225,6 +243,7 @@ pub(crate) fn build_generation(
     let keyword_artifact_bytes = keyword.as_ref().map(|result| result.3);
     let semantic_evidence = semantic.as_ref().map(|result| result.0.clone());
     let checkpoint_stats = semantic.as_ref().map(|result| &result.1);
+    emit_build_phase(&mut progress, "manifest", Some(catalog.len()));
     let mut generation = GenerationManifest {
         schema_version: "scout.generation-manifest.v2".into(),
         generation_id: generation_id.clone(),
@@ -267,8 +286,10 @@ pub(crate) fn build_generation(
     // Build success is meaningful only after reopening every persisted artifact
     // through the same full validator activation uses. This also keeps a bad
     // staging directory from being reported as a usable Generation.
+    emit_build_phase(&mut progress, "validation", None);
     let validated = validate_generation(&staging, "validated")?;
     remove_checkpoint_store(&checkpoint_root)?;
+    emit_build_phase(&mut progress, "validated", Some(validated.passage_count));
     Ok(json!({
         "generation_id": validated.generation_id,
         "staging_path": staging,
@@ -298,6 +319,16 @@ pub(crate) fn build_generation(
         })),
         "checksums_sha256": checksums_sha256,
     }))
+}
+
+fn emit_build_phase(progress: &mut Option<Events>, phase: &str, passage_count: Option<usize>) {
+    if let Some(events) = progress.as_mut() {
+        events.emit(
+            "index.phase",
+            "success",
+            json!({"phase": phase, "passage_count": passage_count}),
+        );
+    }
 }
 
 fn valid_build_run_id(run_id: &str) -> bool {

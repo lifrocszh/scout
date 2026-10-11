@@ -1,0 +1,46 @@
+# Ticket 7: fixed 30-page explicit allowlist; every HTTP hop still requires robots and permits.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
+embedding_model = "BAAI/bge-small-en-v1.5"
+page_target = 30
+global_concurrency = 3
+origin_concurrency = 1
+min_start_spacing_ms = 500
+max_frontier = 200
+max_decoded_body_bytes = 2097152
+max_extraction_bytes = 2097152
+max_extraction_millis = 5000
+request_timeout_seconds = 10
+max_attempts = 2
+retry_backoff_ms = 500
+retry_max_delay_ms = 2000
+max_total_attempts = 100
+max_duration_seconds = 120
+robots_cache_seconds = 86400
+max_passage_tokens = 384
+min_content_chars = 100
+
+[[sources]]
+source_id = "rust"
+seeds = ["https://doc.rust-lang.org/book/ch01-00-getting-started.html", "https://doc.rust-lang.org/book/ch01-01-installation.html", "https://doc.rust-lang.org/book/ch01-02-hello-world.html", "https://doc.rust-lang.org/book/ch01-03-hello-cargo.html", "https://doc.rust-lang.org/book/ch02-00-guessing-game-tutorial.html", "https://doc.rust-lang.org/book/ch03-00-common-programming-concepts.html", "https://doc.rust-lang.org/book/ch03-01-variables-and-mutability.html", "https://doc.rust-lang.org/book/ch03-02-data-types.html", "https://doc.rust-lang.org/book/ch03-03-how-functions-work.html", "https://doc.rust-lang.org/book/ch03-05-control-flow.html"]
+allowed_urls = ["https://doc.rust-lang.org/book/ch01-00-getting-started.html", "https://doc.rust-lang.org/book/ch01-01-installation.html", "https://doc.rust-lang.org/book/ch01-02-hello-world.html", "https://doc.rust-lang.org/book/ch01-03-hello-cargo.html", "https://doc.rust-lang.org/book/ch02-00-guessing-game-tutorial.html", "https://doc.rust-lang.org/book/ch03-00-common-programming-concepts.html", "https://doc.rust-lang.org/book/ch03-01-variables-and-mutability.html", "https://doc.rust-lang.org/book/ch03-02-data-types.html", "https://doc.rust-lang.org/book/ch03-03-how-functions-work.html", "https://doc.rust-lang.org/book/ch03-05-control-flow.html"]
+allowed_origins = ["https://doc.rust-lang.org"]
+path_prefixes = ["/book/"]
+minimum_page_quota = 10
+
+[[sources]]
+source_id = "python"
+seeds = ["https://docs.python.org/3/tutorial/index.html", "https://docs.python.org/3/tutorial/introduction.html", "https://docs.python.org/3/tutorial/interpreter.html", "https://docs.python.org/3/tutorial/stdlib.html", "https://docs.python.org/3/tutorial/controlflow.html", "https://docs.python.org/3/tutorial/datastructures.html", "https://docs.python.org/3/tutorial/modules.html", "https://docs.python.org/3/tutorial/inputoutput.html", "https://docs.python.org/3/tutorial/errors.html", "https://docs.python.org/3/tutorial/classes.html"]
+allowed_urls = ["https://docs.python.org/3/tutorial/index.html", "https://docs.python.org/3/tutorial/introduction.html", "https://docs.python.org/3/tutorial/interpreter.html", "https://docs.python.org/3/tutorial/stdlib.html", "https://docs.python.org/3/tutorial/controlflow.html", "https://docs.python.org/3/tutorial/datastructures.html", "https://docs.python.org/3/tutorial/modules.html", "https://docs.python.org/3/tutorial/inputoutput.html", "https://docs.python.org/3/tutorial/errors.html", "https://docs.python.org/3/tutorial/classes.html"]
+allowed_origins = ["https://docs.python.org"]
+path_prefixes = ["/3/tutorial/"]
+minimum_page_quota = 10
+
+[[sources]]
+source_id = "postgresql"
+seeds = ["https://www.postgresql.org/docs/current/index.html", "https://www.postgresql.org/docs/current/tutorial-start.html", "https://www.postgresql.org/docs/current/tutorial-install.html", "https://www.postgresql.org/docs/current/tutorial-arch.html", "https://www.postgresql.org/docs/current/tutorial-createdb.html", "https://www.postgresql.org/docs/current/tutorial-accessdb.html", "https://www.postgresql.org/docs/current/tutorial-sql.html", "https://www.postgresql.org/docs/current/tutorial-concepts.html", "https://www.postgresql.org/docs/current/tutorial-table.html", "https://www.postgresql.org/docs/current/tutorial-populate.html"]
+allowed_urls = ["https://www.postgresql.org/docs/current/index.html", "https://www.postgresql.org/docs/current/tutorial-start.html", "https://www.postgresql.org/docs/current/tutorial-install.html", "https://www.postgresql.org/docs/current/tutorial-arch.html", "https://www.postgresql.org/docs/current/tutorial-createdb.html", "https://www.postgresql.org/docs/current/tutorial-accessdb.html", "https://www.postgresql.org/docs/current/tutorial-sql.html", "https://www.postgresql.org/docs/current/tutorial-concepts.html", "https://www.postgresql.org/docs/current/tutorial-table.html", "https://www.postgresql.org/docs/current/tutorial-populate.html"]
+allowed_origins = ["https://www.postgresql.org"]
+path_prefixes = ["/docs/current/"]
+minimum_page_quota = 10

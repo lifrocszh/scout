@@ -427,7 +427,8 @@ pub(super) fn build_semantic_index(
     ))
 }
 
-fn write_progress(progress: &mut BufWriter<File>, event: Value) -> Result<(), Error> {
+fn write_progress(progress: &mut BufWriter<File>, mut event: Value) -> Result<(), Error> {
+    event["timestamp"] = json!(crate::storage::now());
     serde_json::to_writer(&mut *progress, &event)
         .map_err(|e| Error::storage(format!("serialize semantic progress: {e}")))?;
     progress

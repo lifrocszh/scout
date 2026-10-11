@@ -13,6 +13,8 @@ service Coordinator {
   rpc RobotsDecision(RobotsDecisionRequest) returns (RobotsDecisionResponse);
   rpc CommitRobotsRefresh(CommitRobotsRefreshRequest) returns (BoolResponse);
   rpc FailRobotsRefresh(FailRobotsRefreshRequest) returns (BoolResponse);
+  rpc ClaimSitemapDiscovery(SitemapDiscoveryRequest) returns (SitemapDiscoveryResponse);
+  rpc CommitSitemapDiscovery(CommitSitemapDiscoveryRequest) returns (CommitSitemapDiscoveryResponse);
   rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
   rpc FailTask(FailTaskRequest) returns (FailTaskResponse);
 }
@@ -255,4 +257,32 @@ message FailTaskRequest {
 message FailTaskResponse {
   uint32 protocol_version = 1;
   string status = 2;
+}
+
+// Discovery uses the existing renewable URL task lease; no independent heartbeat.
+message SitemapDiscoveryRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string origin = 3;
+}
+message SitemapDiscoveryResponse {
+  uint32 protocol_version = 1;
+  bool claimed = 2;
+  int64 scan_epoch = 3;
+}
+message CommitSitemapDiscoveryRequest {
+  uint32 protocol_version = 1;
+  Lease lease = 2;
+  string origin = 3;
+  int64 scan_epoch = 4;
+  repeated string discovered_urls = 5;
+  string error_reason = 6;
+  bool retryable = 7;
+}
+message CommitSitemapDiscoveryResponse {
+  uint32 protocol_version = 1;
+  bool committed = 2;
+  bool terminal = 3;
+  uint64 accepted_discovered_count = 4;
+  uint64 rejected_discovered_count = 5;
 }

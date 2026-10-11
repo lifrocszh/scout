@@ -33,6 +33,8 @@ pub(crate) fn run_worker(cli: &Cli) -> i32 {
     }
 }
 
+mod sitemaps;
+
 struct WorkerConfig {
     run_id: String,
     timeout: Duration,
@@ -56,7 +58,6 @@ struct WorkerContext {
     worker_id: String,
     config: Arc<WorkerConfig>,
     events: Arc<Mutex<Events>>,
-    processed_sitemaps: Arc<Mutex<HashSet<String>>>,
 }
 
 struct TaskReport {
@@ -154,7 +155,6 @@ fn worker_main(
             worker_id: worker_id.clone(),
             config: worker_config,
             events: events.clone(),
-            processed_sitemaps: Arc::new(Mutex::new(HashSet::new())),
         };
         emit_shared(
             &events,
@@ -175,6 +175,7 @@ fn worker_main(
             {
                 break;
             }
+            let rpc_measurement = super::metrics::RpcScope::new("claim_one");
             let response = ctx
                 .rpc
                 .clone()
@@ -185,6 +186,7 @@ fn worker_main(
                 .await
                 .map_err(|error| Error::storage(format!("claim task: {error}")))?
                 .into_inner();
+            drop(rpc_measurement);
             check_protocol(response.protocol_version)
                 .map_err(|error| Error::invalid(error.message().to_owned()))?;
             let Some(lease) = response.lease else {
@@ -204,6 +206,7 @@ fn worker_main(
             let report = run_with_lease_renewal(&ctx, lease.clone()).await;
             match report {
                 Ok(report) => {
+                    let rpc_measurement = super::metrics::RpcScope::new("complete_task");
                     let response = ctx
                         .rpc
                         .clone()
@@ -217,6 +220,7 @@ fn worker_main(
                         .await
                         .map_err(|error| Error::storage(format!("report task completion: {error}")))?
                         .into_inner();
+                    drop(rpc_measurement);
                     if response.protocol_version != PROTOCOL_VERSION {
                         return Err(Error::invalid("coordinator protocol changed during run"));
                     }
@@ -309,10 +313,12 @@ async fn run_with_lease_renewal(
                 };
             }
             _ = renew.tick() => {
+                let rpc_measurement = super::metrics::RpcScope::new("renew_lease");
                 let response = ctx.rpc.clone().renew_lease(proto::LeaseRequest {
                     protocol_version: PROTOCOL_VERSION,
                     lease: Some(lease.clone()),
                 }).await.map_err(|error| Error::storage(format!("renew task lease: {error}")))?.into_inner();
+                drop(rpc_measurement);
                 if response.protocol_version != PROTOCOL_VERSION || !response.renewed {
                     return Err(Error::safety("task lease renewal was rejected"));
                 }
@@ -333,28 +339,8 @@ async fn process_task(ctx: &WorkerContext, lease: &proto::Lease) -> Result<TaskR
             discovered_urls: Vec::new(),
         });
     }
+    sitemaps::discover_origin(ctx, lease, &requested_origin, &robots.sitemaps).await?;
     let mut discovered = BTreeSet::new();
-    let should_scan_sitemaps = ctx
-        .processed_sitemaps
-        .lock()
-        .expect("processed sitemap lock")
-        .insert(requested_origin.clone());
-    if should_scan_sitemaps {
-        let sitemap_result = async {
-            for sitemap in robots.sitemaps {
-                discover_sitemap(ctx, lease, &sitemap, 0, &mut discovered).await?;
-            }
-            Ok::<(), Error>(())
-        }
-        .await;
-        if let Err(error) = sitemap_result {
-            ctx.processed_sitemaps
-                .lock()
-                .expect("processed sitemap lock")
-                .remove(&requested_origin);
-            return Err(error);
-        }
-    }
     let mut current = requested_url.clone();
     let mut redirects = Vec::new();
     let mut source_id = lease.source_id.clone();
@@ -601,6 +587,7 @@ async fn request(
     for attempt in 1..=ctx.config.max_attempts {
         let request_id = new_run_id();
         let permit_id = loop {
+            let rpc_measurement = super::metrics::RpcScope::new("acquire_request_permit");
             let response = ctx
                 .rpc
                 .clone()
@@ -614,6 +601,7 @@ async fn request(
                 .await
                 .map_err(|error| Error::storage(format!("acquire request permit: {error}")))?
                 .into_inner();
+            drop(rpc_measurement);
             if response.protocol_version != PROTOCOL_VERSION {
                 return Err(Error::invalid(
                     "coordinator protocol changed during request",
@@ -638,10 +626,18 @@ async fn request(
                 }
             }
         };
+        let measurement = super::metrics::HttpAttempt::new(
+            &ctx.config.run_id,
+            &ctx.worker_id,
+            value,
+            request_kind,
+            permit_id,
+        );
         let sent = ctx.http.get(value).send().await;
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
+                measurement.finish("transport_error", 0);
                 release_permit(ctx, permit_id, "transport_error").await?;
                 if attempt == ctx.config.max_attempts {
                     return Err(Error::fetch(format!(
@@ -674,12 +670,14 @@ async fn request(
             .content_length()
             .is_some_and(|length| length > body_limit as u64)
         {
+            measurement.finish("body_limit", 0);
             release_permit(ctx, permit_id, "body_limit").await?;
             return Err(Error::safety("response body exceeded configured limit"));
         }
         let body = match read_limited(response, body_limit).await {
             Ok(body) => body,
             Err(error) => {
+                measurement.finish("body_read_error", 0);
                 release_permit(ctx, permit_id, "body_read_error").await?;
                 return Err(error);
             }
@@ -689,6 +687,7 @@ async fn request(
         } else {
             format!("http_{status}")
         };
+        measurement.finish(&outcome, body.len());
         release_permit(ctx, permit_id, &outcome).await?;
         if retryable_status_code(status) && attempt < ctx.config.max_attempts {
             let delay = retry_after
@@ -876,67 +875,6 @@ async fn ensure_robots(
             }
         }
     }
-}
-
-async fn discover_sitemap(
-    ctx: &WorkerContext,
-    lease: &proto::Lease,
-    value: &str,
-    depth: usize,
-    discovered: &mut BTreeSet<String>,
-) -> Result<(), Error> {
-    if depth > 5 || discovered.len() >= ctx.config.max_frontier {
-        return Ok(());
-    }
-    let Some(normalized) = normalize_sitemap_url(value) else {
-        return Ok(());
-    };
-    if !sitemap_url_allowed_worker(ctx, &normalized) {
-        return Ok(());
-    }
-    let robots = ensure_robots(ctx, lease, &normalized).await?;
-    if !robots.allowed {
-        return Ok(());
-    }
-    let response = match request(
-        ctx,
-        lease,
-        &normalized,
-        "sitemap",
-        ctx.config.max_body_bytes,
-    )
-    .await
-    {
-        Ok(response) if (200..300).contains(&response.status) => response,
-        Ok(_) => return Ok(()),
-        Err(error) if error.code == "safety_cap" => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let xml = String::from_utf8_lossy(&response.body).into_owned();
-    let (is_index, locations) = tokio::task::spawn_blocking(move || {
-        let is_index = is_sitemap_index(&xml);
-        (is_index, extract_sitemap_locations(&xml))
-    })
-    .await
-    .map_err(|error| Error::storage(format!("parse sitemap response in worker: {error}")))?;
-    for location in locations {
-        if is_index {
-            Box::pin(discover_sitemap(
-                ctx,
-                lease,
-                &location,
-                depth + 1,
-                discovered,
-            ))
-            .await?;
-        } else if let Some(page) = normalize_sitemap_url(&location) {
-            discovered.insert(page);
-        }
-        if discovered.len() >= ctx.config.max_frontier {
-            break;
-        }
-    }
-    Ok(())
 }
 
 fn policy_to_proto(policy: &RobotsPolicy) -> proto::RobotsPolicy {

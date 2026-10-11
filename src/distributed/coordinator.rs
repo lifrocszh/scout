@@ -31,6 +31,7 @@ use tonic::{Request, Response, Status, transport::Server};
 
 mod capture;
 mod rpc;
+mod sitemaps;
 use capture::{
     StoredCapture, completion_result_sha256, eligible_discoveries, replay_accepted_captures,
     validate_capture, write_body_file,
@@ -38,6 +39,7 @@ use capture::{
 
 struct CoordinatorState {
     core: Mutex<CoordinatorCore>,
+    shutdown: tokio::sync::Notify,
 }
 
 struct CoordinatorCore {
@@ -48,6 +50,7 @@ struct CoordinatorCore {
     run_id: String,
     lease_timing: LeaseTiming,
     registered_workers: HashSet<String>,
+    fatal_error: Option<String>,
     events: Arc<Mutex<Events>>,
 }
 
@@ -224,6 +227,16 @@ fn coordinator_main(
         .unwrap_or_else(new_run_id);
     validate_identity(&run_id, "crawl run ID")
         .map_err(|status| Error::invalid(status.message().to_owned()))?;
+    if !run_id.strip_prefix("run-").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err(Error::invalid(
+            "crawl run ID must be run- followed by 64 lowercase hexadecimal characters",
+        ));
+    }
     let mut frontier = FrontierStore::connect(&database_url)?;
     frontier.apply_migrations()?;
     let timeout = Duration::from_secs(config.timeout_seconds);
@@ -240,10 +253,21 @@ fn coordinator_main(
     };
     frontier.configure_run(&run_id, &config.digest, policy_limits)?;
     let crawl_dir = cli.data_dir.join("crawls").join(&run_id);
-    fs::create_dir_all(crawl_dir.join("bodies"))
-        .map_err(|error| Error::storage(format!("create distributed crawl directory: {error}")))?;
-    let spool = CaptureSpool::open(&crawl_dir, config.max_frontier)?;
-    replay_accepted_captures(&mut frontier, &run_id, &crawl_dir, &spool)?;
+    let recovered = (|| {
+        fs::create_dir_all(crawl_dir.join("bodies")).map_err(|error| {
+            Error::storage(format!("create distributed crawl directory: {error}"))
+        })?;
+        let spool = CaptureSpool::open(&crawl_dir, config.max_frontier)?;
+        replay_accepted_captures(&mut frontier, &run_id, &crawl_dir, &spool)?;
+        Ok::<_, Error>(spool)
+    })();
+    let spool = match recovered {
+        Ok(spool) => spool,
+        Err(error) => {
+            let _ = frontier.mark_run_failed(&run_id);
+            return Err(Error::storage(error.message));
+        }
+    };
     let (run_events, first_start) = Events::open_or_append(&cli.data_dir, &run_id, "coordinator")?;
     let events = Arc::new(Mutex::new(run_events));
     if first_start {
@@ -311,8 +335,10 @@ fn coordinator_main(
             run_id,
             lease_timing,
             registered_workers: HashSet::new(),
+            fatal_error: None,
             events,
         }),
+        shutdown: tokio::sync::Notify::new(),
     });
     let service = CoordinatorRpc {
         state: state.clone(),
@@ -321,6 +347,7 @@ fn coordinator_main(
         .enable_all()
         .build()
         .map_err(|error| Error::storage(format!("start coordinator runtime: {error}")))?;
+    let shutdown_state = state.clone();
     let result = runtime.block_on(async move {
         Server::builder()
             .add_service(
@@ -328,18 +355,22 @@ fn coordinator_main(
                     .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
                     .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES),
             )
-            .serve_with_shutdown(address, async {
-                let _ = tokio::signal::ctrl_c().await;
+            .serve_with_shutdown(address, async move {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = shutdown_state.shutdown.notified() => {},
+                }
             })
             .await
             .map_err(|error| Error::storage(format!("coordinator gRPC server: {error}")))
     });
-    let (run_events, global_concurrency, origin_concurrency) = {
+    let (run_events, global_concurrency, origin_concurrency, fatal_error) = {
         let core = state.core.lock().expect("coordinator state lock");
         (
             core.events.clone(),
             core.config.global_concurrency,
             core.config.origin_concurrency,
+            core.fatal_error.clone(),
         )
     };
     emit_shared(
@@ -355,7 +386,11 @@ fn coordinator_main(
     );
     // Drop the synchronous PostgreSQL client outside Tokio; its destructor drives its own runtime.
     drop(state);
-    result
+    result?;
+    match fatal_error {
+        Some(message) => Err(Error::storage(message)),
+        None => Ok(()),
+    }
 }
 
 fn claimed_task(lease: &proto::Lease) -> Result<ClaimedTask, Status> {
@@ -400,7 +435,9 @@ fn validate_allowed_origin(config: &Config, value: &str) -> Result<(), Status> {
 }
 
 fn to_status(error: Error) -> Status {
-    if error.exit_code == 2 {
+    if error.code == "safety_cap" {
+        Status::resource_exhausted(error.message)
+    } else if error.exit_code == 2 {
         Status::invalid_argument(error.message)
     } else {
         Status::internal(error.message)
@@ -586,8 +623,8 @@ mod tests {
         let encoded = prost::Message::encode_to_vec(&request);
         let decoded = <proto::LeaseRequest as prost::Message>::decode(encoded.as_slice()).unwrap();
         assert_eq!(decoded, request);
-        assert!(check_protocol(1).is_ok());
-        assert!(check_protocol(2).is_err());
+        assert!(check_protocol(PROTOCOL_VERSION).is_ok());
+        assert!(check_protocol(PROTOCOL_VERSION + 1).is_err());
     }
 
     #[test]

@@ -1,16 +1,47 @@
 use super::*;
 
-async fn with_coordinator_core<T, F>(
+pub(super) async fn with_coordinator_core<T, F>(
     state: Arc<CoordinatorState>,
+    operation_name: &'static str,
     operation: F,
 ) -> Result<T, Status>
 where
     T: Send + 'static,
     F: FnOnce(&mut CoordinatorCore) -> Result<T, Status> + Send + 'static,
 {
+    let started = std::time::Instant::now();
     tokio::task::spawn_blocking(move || {
+        let queued = started.elapsed();
+        let locking = std::time::Instant::now();
         let mut core = state.core.lock().expect("coordinator state lock");
-        operation(&mut core)
+        let lock_wait = locking.elapsed();
+        let servicing = std::time::Instant::now();
+        if let Some(message) = core.fatal_error.as_ref() {
+            return Err(Status::internal(message.clone()));
+        }
+        let result = operation(&mut core);
+        if let Err(error) = &result {
+            if error.code() == tonic::Code::Internal {
+                let run_id = core.run_id.clone();
+                let _ = core.frontier.mark_run_failed(&run_id);
+                emit_shared(
+                    &core.events,
+                    "coordinator.failed",
+                    "failure",
+                    serde_json::json!({"crawl_run_id": run_id, "error": error.message()}),
+                );
+                core.fatal_error = Some(error.message().to_owned());
+                state.shutdown.notify_one();
+            }
+        }
+        super::super::metrics::rpc(
+            operation_name,
+            queued.as_nanos(),
+            lock_wait.as_nanos(),
+            servicing.elapsed().as_nanos(),
+            started.elapsed().as_nanos(),
+        );
+        result
     })
     .await
     .map_err(|error| Status::internal(format!("coordinator request task failed: {error}")))?
@@ -32,7 +63,7 @@ impl Coordinator for CoordinatorRpc {
                 "no mutually supported protocol version",
             ));
         }
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "register_worker", move |core| {
             core.registered_workers.insert(request.worker_id.clone());
             emit_shared(
                 &core.events,
@@ -85,7 +116,7 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::WorkerResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "heartbeat", move |core| {
             require_worker(core, &request.worker_id)?;
             Ok(proto::WorkerResponse {
                 protocol_version: PROTOCOL_VERSION,
@@ -103,17 +134,22 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::ClaimOneResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "claim_one", move |core| {
             require_worker(core, &request.worker_id)?;
             let run_id = core.run_id.clone();
             let quota_satisfied = core.quota_satisfied_source_ids()?;
             if core.target_reached()?
                 || core
                     .frontier
-                    .unfinished_task_count(&run_id)
+                    .unfinished_task_count_excluding(&run_id, &quota_satisfied)
                     .map_err(to_status)?
                     == 0
             {
+                let abandoned = core.frontier.finalize_abandoned_sitemap_discovery(&run_id).map_err(to_status)?;
+                if abandoned > 0 {
+                    emit_shared(&core.events, "sitemap.discovery_abandoned", "failure",
+                        serde_json::json!({"count":abandoned,"reason":"frontier/run stopped before discovery committed"}));
+                }
                 return Ok(proto::ClaimOneResponse {
                     protocol_version: PROTOCOL_VERSION,
                     lease: None,
@@ -162,7 +198,7 @@ impl Coordinator for CoordinatorRpc {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "renew_lease", move |core| {
             let task = core.validate_lease(&lease)?;
             let timing = core.lease_timing;
             let renewed = core
@@ -197,48 +233,50 @@ impl Coordinator for CoordinatorRpc {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
-            let task = core.validate_lease(&lease)?;
-            let (origin, url) = core.validate_request_url(&request.url, &request.request_kind)?;
-            let key = schedule_key(&core.config, &url);
-            let run_id = core.run_id.clone();
-            let decision = core
-                .frontier
-                .try_acquire_request_permit(
-                    &run_id,
-                    &task.lease_owner,
-                    &request.request_id,
-                    &key,
-                    &origin,
-                    &request.request_kind,
-                )
-                .map_err(to_status)?;
-            Ok(match decision {
-                PermitDecision::Acquired(grant) => proto::AcquireRequestPermitResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    decision: proto::acquire_request_permit_response::Decision::Acquired as i32,
-                    permit_id: grant.permit_id,
-                    expires_at_unix_ms: grant.expires_at_unix_ms,
-                    retry_after_ms: 0,
-                },
-                PermitDecision::Waiting(wait) => proto::AcquireRequestPermitResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    decision: proto::acquire_request_permit_response::Decision::Waiting as i32,
-                    permit_id: 0,
-                    expires_at_unix_ms: 0,
-                    retry_after_ms: wait.as_millis().max(1) as u64,
-                },
-                PermitDecision::AlreadyCompleted => proto::AcquireRequestPermitResponse {
-                    protocol_version: PROTOCOL_VERSION,
-                    decision: proto::acquire_request_permit_response::Decision::AlreadyCompleted
-                        as i32,
-                    permit_id: 0,
-                    expires_at_unix_ms: 0,
-                    retry_after_ms: 0,
-                },
+        let response =
+            with_coordinator_core(self.state.clone(), "acquire_request_permit", move |core| {
+                let task = core.validate_lease(&lease)?;
+                let (origin, url) =
+                    core.validate_request_url(&request.url, &request.request_kind)?;
+                let key = schedule_key(&core.config, &url);
+                let run_id = core.run_id.clone();
+                let decision = core
+                    .frontier
+                    .try_acquire_request_permit(
+                        &run_id,
+                        &task.lease_owner,
+                        &request.request_id,
+                        &key,
+                        &origin,
+                        &request.request_kind,
+                    )
+                    .map_err(to_status)?;
+                Ok(match decision {
+                    PermitDecision::Acquired(grant) => proto::AcquireRequestPermitResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        decision: proto::acquire_request_permit_response::Decision::Acquired as i32,
+                        permit_id: grant.permit_id,
+                        expires_at_unix_ms: grant.expires_at_unix_ms,
+                        retry_after_ms: 0,
+                    },
+                    PermitDecision::Waiting(wait) => proto::AcquireRequestPermitResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        decision: proto::acquire_request_permit_response::Decision::Waiting as i32,
+                        permit_id: 0,
+                        expires_at_unix_ms: 0,
+                        retry_after_ms: wait.as_millis().max(1) as u64,
+                    },
+                    PermitDecision::AlreadyCompleted => proto::AcquireRequestPermitResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        decision: proto::acquire_request_permit_response::Decision::AlreadyCompleted
+                            as i32,
+                        permit_id: 0,
+                        expires_at_unix_ms: 0,
+                        retry_after_ms: 0,
+                    },
+                })
             })
-        })
-        .await?;
+            .await?;
         Ok(Response::new(response))
     }
 
@@ -248,22 +286,23 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::BoolResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
-            require_worker(core, &request.worker_id)?;
-            let success = core
-                .frontier
-                .cancel_request_wait(
-                    &request.crawl_run_id,
-                    &request.worker_id,
-                    &request.request_id,
-                )
-                .map_err(to_status)?;
-            Ok(proto::BoolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                success,
+        let response =
+            with_coordinator_core(self.state.clone(), "cancel_request_wait", move |core| {
+                require_worker(core, &request.worker_id)?;
+                let success = core
+                    .frontier
+                    .cancel_request_wait(
+                        &request.crawl_run_id,
+                        &request.worker_id,
+                        &request.request_id,
+                    )
+                    .map_err(to_status)?;
+                Ok(proto::BoolResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    success,
+                })
             })
-        })
-        .await?;
+            .await?;
         Ok(Response::new(response))
     }
 
@@ -273,26 +312,27 @@ impl Coordinator for CoordinatorRpc {
     ) -> Result<Response<proto::BoolResponse>, Status> {
         let request = request.into_inner();
         check_protocol(request.protocol_version)?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
-            require_worker(core, &request.worker_id)?;
-            if request.crawl_run_id != core.run_id {
-                return Err(Status::failed_precondition("crawl run ID mismatch"));
-            }
-            let success = core
-                .frontier
-                .release_request_permit(
-                    &request.crawl_run_id,
-                    &request.worker_id,
-                    request.permit_id,
-                    &request.outcome,
-                )
-                .map_err(to_status)?;
-            Ok(proto::BoolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                success,
+        let response =
+            with_coordinator_core(self.state.clone(), "release_request_permit", move |core| {
+                require_worker(core, &request.worker_id)?;
+                if request.crawl_run_id != core.run_id {
+                    return Err(Status::failed_precondition("crawl run ID mismatch"));
+                }
+                let success = core
+                    .frontier
+                    .release_request_permit(
+                        &request.crawl_run_id,
+                        &request.worker_id,
+                        request.permit_id,
+                        &request.outcome,
+                    )
+                    .map_err(to_status)?;
+                Ok(proto::BoolResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    success,
+                })
             })
-        })
-        .await?;
+            .await?;
         Ok(Response::new(response))
     }
 
@@ -305,7 +345,7 @@ impl Coordinator for CoordinatorRpc {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "robots_decision", move |core| {
             let task = core.validate_lease(&lease)?;
             let origin = normalize_origin(&request.origin)
                 .map_err(|_| Status::invalid_argument("robots origin is invalid"))?;
@@ -400,27 +440,28 @@ impl Coordinator for CoordinatorRpc {
                 .collect(),
             sitemaps: policy.sitemaps,
         };
-        let response = with_coordinator_core(self.state.clone(), move |core| {
-            let task = core.validate_lease(&lease)?;
-            validate_allowed_origin(&core.config, &request.origin)?;
-            let run_id = core.run_id.clone();
-            let success = core
-                .frontier
-                .commit_robots_refresh(
-                    &run_id,
-                    &task.lease_owner,
-                    &request.origin,
-                    request.refresh_epoch,
-                    &policy,
-                    &request.body_sha256,
-                )
-                .map_err(to_status)?;
-            Ok(proto::BoolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                success,
+        let response =
+            with_coordinator_core(self.state.clone(), "commit_robots_refresh", move |core| {
+                let task = core.validate_lease(&lease)?;
+                validate_allowed_origin(&core.config, &request.origin)?;
+                let run_id = core.run_id.clone();
+                let success = core
+                    .frontier
+                    .commit_robots_refresh(
+                        &run_id,
+                        &task.lease_owner,
+                        &request.origin,
+                        request.refresh_epoch,
+                        &policy,
+                        &request.body_sha256,
+                    )
+                    .map_err(to_status)?;
+                Ok(proto::BoolResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    success,
+                })
             })
-        })
-        .await?;
+            .await?;
         Ok(Response::new(response))
     }
 
@@ -433,26 +474,41 @@ impl Coordinator for CoordinatorRpc {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
-            let task = core.validate_lease(&lease)?;
-            validate_allowed_origin(&core.config, &request.origin)?;
-            let run_id = core.run_id.clone();
-            let success = core
-                .frontier
-                .fail_robots_refresh(
-                    &run_id,
-                    &task.lease_owner,
-                    &request.origin,
-                    request.refresh_epoch,
-                )
-                .map_err(to_status)?;
-            Ok(proto::BoolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                success,
+        let response =
+            with_coordinator_core(self.state.clone(), "fail_robots_refresh", move |core| {
+                let task = core.validate_lease(&lease)?;
+                validate_allowed_origin(&core.config, &request.origin)?;
+                let run_id = core.run_id.clone();
+                let success = core
+                    .frontier
+                    .fail_robots_refresh(
+                        &run_id,
+                        &task.lease_owner,
+                        &request.origin,
+                        request.refresh_epoch,
+                    )
+                    .map_err(to_status)?;
+                Ok(proto::BoolResponse {
+                    protocol_version: PROTOCOL_VERSION,
+                    success,
+                })
             })
-        })
-        .await?;
+            .await?;
         Ok(Response::new(response))
+    }
+
+    async fn claim_sitemap_discovery(
+        &self,
+        request: Request<proto::SitemapDiscoveryRequest>,
+    ) -> Result<Response<proto::SitemapDiscoveryResponse>, Status> {
+        super::sitemaps::claim(self.state.clone(), request).await
+    }
+
+    async fn commit_sitemap_discovery(
+        &self,
+        request: Request<proto::CommitSitemapDiscoveryRequest>,
+    ) -> Result<Response<proto::CommitSitemapDiscoveryResponse>, Status> {
+        super::sitemaps::commit(self.state.clone(), request).await
     }
 
     async fn complete_task(
@@ -464,7 +520,7 @@ impl Coordinator for CoordinatorRpc {
         let lease = request
             .lease
             .ok_or_else(|| Status::invalid_argument("lease is required"))?;
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "complete_task", move |core| {
             let task = claimed_task(&lease)?;
             core.validate_task_identity(&task)?;
             let capture_received = request.capture.is_some();
@@ -518,7 +574,7 @@ impl Coordinator for CoordinatorRpc {
                             .map_err(to_status)?;
                         core.spool
                             .insert_capture(&capture, &capture_selection_key(&capture))
-                            .map_err(to_status)?;
+                            .map_err(|error| to_status(Error::storage(error.message)))?;
                     }
                     (true, accepted_discovered_count as u64, rejected_discovered_count as u64)
                 }
@@ -577,7 +633,7 @@ impl Coordinator for CoordinatorRpc {
                 "task failure detail exceeds size limit",
             ));
         }
-        let response = with_coordinator_core(self.state.clone(), move |core| {
+        let response = with_coordinator_core(self.state.clone(), "fail_task", move |core| {
             let task = core.validate_lease(&lease)?;
             let state = core
                 .frontier

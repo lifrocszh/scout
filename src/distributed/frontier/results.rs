@@ -49,6 +49,7 @@ impl FrontierStore {
             i64::try_from(max_frontier).map_err(|_| Error::invalid("max_frontier is too large"))?;
         let initial_rejected = i64::try_from(initially_rejected_discoveries)
             .map_err(|_| Error::invalid("rejected discovery count is too large"))?;
+        let _measurement = crate::distributed::metrics::DatabaseScope::new("accept_task_result");
         let mut tx = self
             .client
             .transaction()
@@ -139,7 +140,7 @@ impl FrontierStore {
                 )
                 .map_err(|error| Error::storage(format!("read unique content group: {error}")))?;
             if group.is_some_and(|row| row.get::<_, Vec<u8>>(0) != capture.identity.as_bytes()) {
-                return Err(Error::safety(
+                return Err(Error::storage(
                     "extracted content SHA-256 collision within a Source",
                 ));
             }
@@ -158,35 +159,15 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("record unique content group: {error}")))?;
         }
 
-        let mut unfinished: i64 = tx
-            .query_one(
-                "SELECT count(*) FROM scout_crawl_tasks
-                 WHERE crawl_run_id = $1 AND status IN ('pending', 'leased')",
-                &[&task.crawl_run_id],
-            )
-            .map_err(|error| Error::storage(format!("count capture frontier: {error}")))?
-            .get(0);
-        let mut accepted_discovered_count = 0_i64;
-        let mut rejected_discovered_count = initial_rejected;
-        let mut persisted_discoveries = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for discovery in discovered {
-            if !seen.insert((
-                discovery.source_id.as_str(),
-                discovery.normalized_url.as_str(),
-            )) {
-                continue;
-            }
-            if unfinished >= max_frontier {
-                rejected_discovered_count += 1;
-                continue;
-            }
-            if enqueue_discovered_in(&mut tx, &task.crawl_run_id, discovery, max_task_attempts)? {
-                accepted_discovered_count += 1;
-                unfinished += 1;
-                persisted_discoveries.push(discovery.normalized_url.clone());
-            }
-        }
+        let (accepted_discovered_count, rejected_discovered_count, persisted_discoveries) =
+            enqueue_bounded_discoveries(
+                &mut tx,
+                &task.crawl_run_id,
+                discovered,
+                initial_rejected,
+                max_task_attempts,
+                max_frontier,
+            )?;
 
         let (source_id, content_hash, body_hash, body_size, metadata_json) = capture
             .map(|capture| {
@@ -342,4 +323,50 @@ fn enqueue_discovered_in(
     )
     .map(|count| count > 0)
     .map_err(|error| Error::storage(format!("enqueue discovered crawl URL: {error}")))
+}
+
+/// Caller holds the run scheduler lock; shared by capture and sitemap acceptance.
+pub(super) fn enqueue_bounded_discoveries(
+    tx: &mut postgres::Transaction<'_>,
+    run_id: &str,
+    discovered: &[DiscoveredTask],
+    initially_rejected: i64,
+    max_task_attempts: i32,
+    max_frontier: i64,
+) -> Result<(i64, i64, Vec<String>), Error> {
+    let mut unfinished: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM scout_crawl_tasks
+         WHERE crawl_run_id = $1 AND status IN ('pending', 'leased')",
+            &[&run_id],
+        )
+        .map_err(|error| Error::storage(format!("count capture frontier: {error}")))?
+        .get(0);
+    let mut accepted_discovered_count = 0_i64;
+    let mut rejected_discovered_count = initially_rejected;
+    let mut persisted_discoveries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for discovery in discovered {
+        if !seen.insert((
+            discovery.source_id.as_str(),
+            discovery.normalized_url.as_str(),
+        )) {
+            continue;
+        }
+        if unfinished >= max_frontier {
+            rejected_discovered_count += 1;
+            continue;
+        }
+        if enqueue_discovered_in(tx, run_id, discovery, max_task_attempts)? {
+            accepted_discovered_count += 1;
+            unfinished += 1;
+            persisted_discoveries.push(discovery.normalized_url.clone());
+        }
+    }
+
+    Ok((
+        accepted_discovered_count,
+        rejected_discovered_count,
+        persisted_discoveries,
+    ))
 }

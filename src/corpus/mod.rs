@@ -759,23 +759,18 @@ pub(crate) fn materialize_existing_spool(
     config: &Config,
     events: &Arc<Mutex<Events>>,
 ) -> Result<SnapshotResult, Error> {
-    let valid_run_id = source_run_id
-        .strip_prefix("run-")
-        .is_some_and(|suffix| {
-            suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        || source_run_id
-            .strip_prefix("local-")
-            .is_some_and(|uuid| {
-                uuid.len() == 36
-                    && uuid.bytes().enumerate().all(|(index, byte)| {
-                        if matches!(index, 8 | 13 | 18 | 23) {
-                            byte == b'-'
-                        } else {
-                            byte.is_ascii_hexdigit()
-                        }
-                    })
-            });
+    let valid_run_id = source_run_id.strip_prefix("run-").is_some_and(|suffix| {
+        suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) || source_run_id.strip_prefix("local-").is_some_and(|uuid| {
+        uuid.len() == 36
+            && uuid.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+    });
     if !valid_run_id {
         return Err(Error::invalid("invalid source Crawl run ID"));
     }
@@ -982,6 +977,10 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    mod completion_order {
+        include!("completion_order_tests.rs");
+    }
 
     fn config() -> Config {
         Config {

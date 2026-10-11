@@ -20,6 +20,7 @@ impl FrontierStore {
         if normalized_origin != origin || !path.starts_with('/') {
             return Err(Error::invalid("robots origin or path is not normalized"));
         }
+        let _measurement = crate::distributed::metrics::DatabaseScope::new("robots_decision");
         let mut tx = self
             .client
             .transaction()

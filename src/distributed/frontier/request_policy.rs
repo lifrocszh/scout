@@ -87,6 +87,8 @@ impl FrontierStore {
         if normalized_origin != origin {
             return Err(Error::invalid("request origin must already be normalized"));
         }
+        let _measurement =
+            crate::distributed::metrics::DatabaseScope::new("acquire_request_permit");
         let mut tx = self.client.transaction().map_err(|error| {
             Error::storage(format!("begin request permit transaction: {error}"))
         })?;
@@ -356,6 +358,7 @@ impl FrontierStore {
         worker_id: &str,
         request_id: &str,
     ) -> Result<bool, Error> {
+        let _measurement = crate::distributed::metrics::DatabaseScope::new("cancel_request_wait");
         let mut tx = self.client.transaction().map_err(|error| {
             Error::storage(format!("begin pending request cancellation: {error}"))
         })?;
@@ -389,6 +392,8 @@ impl FrontierStore {
         outcome: &str,
     ) -> Result<bool, Error> {
         validate_request_identity(outcome, "request outcome")?;
+        let _measurement =
+            crate::distributed::metrics::DatabaseScope::new("release_request_permit");
         let mut tx = self.client.transaction().map_err(|error| {
             Error::storage(format!("begin request release transaction: {error}"))
         })?;

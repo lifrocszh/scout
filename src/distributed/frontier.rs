@@ -7,12 +7,14 @@ const MIGRATION_V1: &str = include_str!("../../migrations/0001_durable_crawl_fro
 const MIGRATION_V2: &str = include_str!("../../migrations/0002_shared_request_policy.sql");
 const MIGRATION_V3: &str = include_str!("../../migrations/0003_fair_frontier_schedule.sql");
 const MIGRATION_V4: &str = include_str!("../../migrations/0004_durable_crawl_results.sql");
+const MIGRATION_V5: &str = include_str!("../../migrations/0005_shared_sitemap_discovery.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
-const REQUEST_MIGRATION: [(i32, &str, &str); 4] = [
+const REQUEST_MIGRATION: [(i32, &str, &str); 5] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
     (2, "shared-request-policy", MIGRATION_V2),
     (3, "fair-frontier-schedule", MIGRATION_V3),
     (4, "durable-crawl-results", MIGRATION_V4),
+    (5, "shared-sitemap-discovery", MIGRATION_V5),
 ];
 
 const CLAIM_ONE_TASK: &str = r#"
@@ -238,6 +240,9 @@ pub(crate) struct FrontierStore {
 mod request_policy;
 mod results;
 mod robots;
+#[cfg(test)]
+mod sitemap_tests;
+mod sitemaps;
 mod tasks;
 
 impl FrontierStore {
@@ -1612,4 +1617,11 @@ mod tests {
             Some(&1)
         );
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SitemapCompletion {
+    pub(crate) terminal: bool,
+    pub(crate) accepted_discovered_count: usize,
+    pub(crate) rejected_discovered_count: usize,
 }
