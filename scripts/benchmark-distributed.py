@@ -305,6 +305,8 @@ def summarize(path, duration, config, state, processes):
                "duplicate_same_epoch_claims": len(claim_keys) - len(set(claim_keys)),
                "reclaimed_or_retried_tasks": sum(r["task_attempt_count"] > 1 for r in state["tasks"]),
                "duplicate_successful_completion_reports": len(completion_keys) - len(set(completion_keys)),
+               "database_result_rows": len(state["results"]),
+               "duplicate_database_result_rows": len(state["results"]) - len({r["task_id"] for r in state["results"]}),
                "http_attempts": len(http),
                "http_outcomes": dict(collections.Counter(r["outcome"] for r in http)),
                "uncompleted_permits": sum(r["status"] != "completed" for r in state["permits"]),

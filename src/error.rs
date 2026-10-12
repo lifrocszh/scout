@@ -40,6 +40,14 @@ impl Error {
         }
     }
 
+    pub(crate) fn stale_lease(message: impl Into<String>) -> Self {
+        Self {
+            code: "stale_lease".into(),
+            message: message.into(),
+            exit_code: 1,
+        }
+    }
+
     pub(crate) fn not_ready(message: impl Into<String>) -> Self {
         Self {
             code: "not_ready".into(),

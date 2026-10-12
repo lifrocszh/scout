@@ -9,7 +9,7 @@ use crate::corpus::capture_selection_key;
 use crate::crawl::Config;
 use crate::crawl::spool::CaptureSpool;
 use crate::error::Error;
-use crate::observability::{Events, emit_shared};
+use crate::observability::Events;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
@@ -203,29 +203,11 @@ impl ResultPool {
                     while let Some(job) = receiver.blocking_recv() {
                         let mut job = job;
                         let reply = job.reply.take().expect("completion reply");
-                        let result = process(
-                            &mut frontier,
-                            &config,
-                            &run_id,
-                            &spool,
-                            &events,
-                            job,
-                        );
+                        let result = process(&mut frontier, &config, &run_id, &spool, &events, job);
                         if let Err(message) = &result {
                             if message.code() == tonic::Code::Internal {
-                                emit_shared(
-                                    &events,
-                                    "coordinator.failed",
-                                    "failure",
-                                    serde_json::json!({"crawl_run_id": run_id, "error": message.message()}),
-                                );
                                 if let Some(state) = state.upgrade() {
-                                    let mut core = state.core.lock().expect("coordinator state lock");
-                                    if core.fatal_error.is_none() {
-                                        let _ = core.frontier.mark_run_failed(&run_id);
-                                        core.fatal_error = Some(message.message().to_owned());
-                                        state.shutdown.notify_one();
-                                    }
+                                    super::rpc::fail_coordinator(&state, message.message());
                                 }
                             }
                         }

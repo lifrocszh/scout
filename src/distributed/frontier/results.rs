@@ -73,8 +73,7 @@ impl FrontierStore {
         let row = tx
             .query_opt(
                 "SELECT crawl_run_id, source_id, origin, normalized_url, schedule_key,
-                        idempotency_key, status, lease_owner, lease_epoch,
-                        COALESCE(lease_deadline > clock_timestamp(), FALSE)
+                        idempotency_key, status, lease_owner, lease_epoch
                  FROM scout_crawl_tasks WHERE task_id = $1 FOR UPDATE",
                 &[&task.task_id],
             )
@@ -129,7 +128,7 @@ impl FrontierStore {
         if row.get::<_, &str>(6) != "leased"
             || row.get::<_, Option<String>>(7).as_deref() != Some(task.lease_owner.as_str())
             || row.get::<_, i64>(8) != task.lease_epoch
-            || !row.get::<_, bool>(9)
+            || !super::task_lease_is_live_locked(&mut tx, task)?
         {
             return Ok(CompletionAcceptance::Stale);
         }
@@ -293,6 +292,7 @@ impl FrontierStore {
 
 fn enqueue_discovered_in(
     tx: &mut postgres::Transaction<'_>,
+    insert_statement: &mut Option<postgres::Statement>,
     run_id: &str,
     discovery: &DiscoveredTask,
     max_task_attempts: i32,
@@ -317,12 +317,21 @@ fn enqueue_discovered_in(
         )
         .as_bytes(),
     );
+    let statement = match insert_statement {
+        Some(statement) => statement,
+        None => insert_statement.insert(
+            tx.prepare(
+                "INSERT INTO scout_crawl_tasks(
+                     crawl_run_id, source_id, origin, normalized_url, schedule_key,
+                     max_task_attempts, idempotency_key
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (crawl_run_id, source_id, normalized_url) DO NOTHING",
+            )
+            .map_err(|error| Error::storage(format!("enqueue discovered crawl URL: {error}")))?,
+        ),
+    };
     tx.execute(
-        "INSERT INTO scout_crawl_tasks(
-             crawl_run_id, source_id, origin, normalized_url, schedule_key,
-             max_task_attempts, idempotency_key
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (crawl_run_id, source_id, normalized_url) DO NOTHING",
+        statement,
         &[
             &run_id,
             &discovery.source_id,
@@ -360,6 +369,7 @@ pub(super) fn enqueue_bounded_discoveries(
     let mut accepted_discovered_count = 0_i64;
     let mut rejected_discovered_count = initially_rejected;
     let mut persisted_discoveries = Vec::new();
+    let mut insert_statement = None;
     let mut seen = std::collections::HashSet::new();
     for discovery in discovered {
         if !seen.insert((
@@ -372,7 +382,13 @@ pub(super) fn enqueue_bounded_discoveries(
             rejected_discovered_count += 1;
             continue;
         }
-        if enqueue_discovered_in(tx, run_id, discovery, max_task_attempts)? {
+        if enqueue_discovered_in(
+            tx,
+            &mut insert_statement,
+            run_id,
+            discovery,
+            max_task_attempts,
+        )? {
             accepted_discovered_count += 1;
             unfinished += 1;
             persisted_discoveries.push(discovery.normalized_url.clone());

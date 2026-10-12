@@ -13,11 +13,21 @@ fn emit(data: serde_json::Value) {
     }
 }
 
-pub(super) fn rpc(name: &str, queued: u128, lock_wait: u128, service: u128, total: u128) {
+pub(super) fn rpc(
+    name: &str,
+    queued: u128,
+    lock_wait: u128,
+    state_lock_hold: u128,
+    db_pool_wait: u128,
+    service: u128,
+    total: u128,
+) {
     emit(serde_json::json!({
         "metric": "rpc", "operation": name, "end_unix_ns": unix_ns(),
         "blocking_queue_ns": queued as u64,
         "core_lock_wait_ns": lock_wait as u64,
+        "state_lock_hold_ns": state_lock_hold as u64,
+        "db_pool_wait_ns": db_pool_wait as u64,
         "service_ns": service as u64,
         "server_total_ns": total as u64,
     }));

@@ -154,6 +154,7 @@ impl FrontierStore {
 
     /// Queue one outbound request and grant only when DB-wide limits and fairness permit it.
     /// Acquired marks the shared start time; caller must dispatch HTTP immediately.
+    #[cfg(test)]
     pub(crate) fn try_acquire_request_permit(
         &mut self,
         run_id: &str,
@@ -163,6 +164,75 @@ impl FrontierStore {
         origin: &str,
         request_kind: &str,
     ) -> Result<PermitDecision, Error> {
+        self.try_acquire_request_permit_inner(
+            None,
+            false,
+            run_id,
+            worker_id,
+            request_id,
+            schedule_key,
+            origin,
+            request_kind,
+        )?
+        .ok_or_else(|| Error::storage("request permit acquisition unexpectedly skipped"))
+    }
+
+    /// Validate the durable worker lease while holding the policy transaction that grants HTTP.
+    pub(crate) fn try_acquire_request_permit_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        worker_id: &str,
+        request_id: &str,
+        schedule_key: &str,
+        origin: &str,
+        request_kind: &str,
+    ) -> Result<PermitDecision, Error> {
+        self.try_acquire_request_permit_inner(
+            Some(task),
+            false,
+            &task.crawl_run_id,
+            worker_id,
+            request_id,
+            schedule_key,
+            origin,
+            request_kind,
+        )?
+        .ok_or_else(|| Error::storage("request permit acquisition unexpectedly skipped"))
+    }
+
+    /// Grant only an existing pending row; cancellation may delete it while the dispatcher waits.
+    pub(crate) fn grant_pending_request_permit_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        worker_id: &str,
+        request_id: &str,
+        schedule_key: &str,
+        origin: &str,
+        request_kind: &str,
+    ) -> Result<Option<PermitDecision>, Error> {
+        self.try_acquire_request_permit_inner(
+            Some(task),
+            true,
+            &task.crawl_run_id,
+            worker_id,
+            request_id,
+            schedule_key,
+            origin,
+            request_kind,
+        )
+    }
+
+    fn try_acquire_request_permit_inner(
+        &mut self,
+        task: Option<&super::ClaimedTask>,
+        pending_only: bool,
+        run_id: &str,
+        worker_id: &str,
+        request_id: &str,
+        schedule_key: &str,
+        origin: &str,
+        request_kind: &str,
+    ) -> Result<Option<PermitDecision>, Error> {
         // ponytail: per-run row lock keeps permit counts atomic; shard only if this becomes a throughput limit.
         validate_request_identity(worker_id, "worker_id")?;
         validate_request_identity(request_id, "request_id")?;
@@ -203,6 +273,16 @@ impl FrontierStore {
             .checked_add(safety_ms)
             .ok_or_else(|| Error::invalid("request permit lifetime is too large"))?;
 
+        if let Some(task) = task {
+            if task.crawl_run_id != run_id || task.lease_owner != worker_id {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+            let live = super::lock_live_task(&mut tx, task)?;
+            if !live {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+        }
+
         tx.execute(
             "UPDATE scout_crawl_request_permits
              SET status = 'expired', finished_at = clock_timestamp(), outcome = 'permit_timeout'
@@ -228,6 +308,12 @@ impl FrontierStore {
                 &[&run_id, &request_id],
             )
             .map_err(|error| Error::storage(format!("read request permit: {error}")))?;
+        if pending_only && prior.is_none() {
+            tx.commit().map_err(|error| {
+                Error::storage(format!("commit cancelled request grant lookup: {error}"))
+            })?;
+            return Ok(None);
+        }
         if let Some(row) = prior {
             let metadata_matches = row.get::<_, String>(1) == worker_id
                 && row.get::<_, String>(2) == schedule_key
@@ -240,6 +326,12 @@ impl FrontierStore {
             }
             let permit_id: i64 = row.get(0);
             let status: String = row.get(5);
+            if pending_only && status != "pending" {
+                tx.commit().map_err(|error| {
+                    Error::storage(format!("commit inactive request grant lookup: {error}"))
+                })?;
+                return Ok(None);
+            }
             match status.as_str() {
                 "active" => {
                     let grant = request_permit_grant(
@@ -253,13 +345,13 @@ impl FrontierStore {
                     tx.commit().map_err(|error| {
                         Error::storage(format!("commit existing request permit: {error}"))
                     })?;
-                    return Ok(PermitDecision::Acquired(grant));
+                    return Ok(Some(PermitDecision::Acquired(grant)));
                 }
                 "completed" => {
                     tx.commit().map_err(|error| {
                         Error::storage(format!("commit completed request lookup: {error}"))
                     })?;
-                    return Ok(PermitDecision::AlreadyCompleted);
+                    return Ok(Some(PermitDecision::AlreadyCompleted));
                 }
                 "expired" => {
                     return Err(Error::safety(
@@ -313,6 +405,26 @@ impl FrontierStore {
                 ],
             )
             .map_err(|error| Error::storage(format!("queue request permit: {error}")))?;
+        }
+
+        if let Some(task) = task {
+            tx.execute(
+                "UPDATE scout_crawl_request_permits AS request
+                 SET pending_deadline=task.lease_deadline
+                 FROM scout_crawl_tasks AS task
+                 WHERE request.crawl_run_id=$1 AND request.request_id=$2
+                   AND request.status='pending' AND task.task_id=$3
+                   AND task.status='leased' AND task.lease_owner=$4 AND task.lease_epoch=$5
+                   AND task.lease_deadline>clock_timestamp()",
+                &[
+                    &run_id,
+                    &request_id,
+                    &task.task_id,
+                    &task.lease_owner,
+                    &task.lease_epoch,
+                ],
+            )
+            .map_err(|error| Error::storage(format!("bind request wait to task lease: {error}")))?;
         }
 
         if total_attempts >= max_attempts {
@@ -370,14 +482,14 @@ impl FrontierStore {
             tx.commit().map_err(|error| {
                 Error::storage(format!("commit queued request permit: {error}"))
             })?;
-            return Ok(PermitDecision::Waiting(Duration::from_millis(25)));
+            return Ok(Some(PermitDecision::Waiting(Duration::from_millis(25))));
         };
         let selected_id: String = candidate.get(0);
         if selected_id != request_id {
             tx.commit().map_err(|error| {
                 Error::storage(format!("commit waiting request permit: {error}"))
             })?;
-            return Ok(PermitDecision::Waiting(Duration::from_millis(25)));
+            return Ok(Some(PermitDecision::Waiting(Duration::from_millis(25))));
         }
         let selected_key: String = candidate.get(1);
         let selected_origin: String = candidate.get(2);
@@ -459,7 +571,7 @@ impl FrontierStore {
         debug_assert!(active_origin < i64::from(selected_origin_limit));
         tx.commit()
             .map_err(|error| Error::storage(format!("commit request permit: {error}")))?;
-        Ok(PermitDecision::Acquired(grant))
+        Ok(Some(PermitDecision::Acquired(grant)))
     }
 
     /// RPC waiters vanish on coordinator restart. Never clear active HTTP permits here.
@@ -479,13 +591,63 @@ impl FrontierStore {
             return Ok(());
         }
         self.client.execute(
-            "UPDATE scout_crawl_request_permits AS request SET pending_deadline=task.lease_deadline
+            "UPDATE scout_crawl_request_permits AS request
+             SET pending_deadline=GREATEST(request.pending_deadline, task.lease_deadline)
              FROM scout_crawl_tasks AS task WHERE request.crawl_run_id=$1 AND request.request_id=ANY($2::TEXT[])
                AND request.status='pending' AND task.task_id=$3 AND task.crawl_run_id=$1
                AND task.status='leased' AND task.lease_owner=$4 AND task.lease_epoch=$5",
             &[&task.crawl_run_id, &request_ids, &task.task_id, &task.lease_owner, &task.lease_epoch])
             .map_err(|error| Error::storage(format!("bind queued requests to task lease: {error}")))?;
         Ok(())
+    }
+
+    /// Repair an expired in-memory wait after lease renewal committed but its bind job has not.
+    pub(crate) fn refresh_pending_request_wait_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        request_id: &str,
+    ) -> Result<bool, Error> {
+        let mut tx = self.client.transaction().map_err(|error| {
+            Error::storage(format!("begin pending request lease refresh: {error}"))
+        })?;
+        if !super::lock_live_task(&mut tx, task)? {
+            return Ok(false);
+        }
+        let request = tx
+            .query_opt(
+                "SELECT request_id FROM scout_crawl_request_permits
+                 WHERE crawl_run_id=$1 AND request_id=$2 AND worker_id=$3 AND status='pending'
+                 FOR UPDATE",
+                &[&task.crawl_run_id, &request_id, &task.lease_owner],
+            )
+            .map_err(|error| Error::storage(format!("lock pending request wait: {error}")))?;
+        if request.is_none() || !super::task_lease_is_live_locked(&mut tx, task)? {
+            return Ok(false);
+        }
+        let changed = tx
+            .execute(
+                "UPDATE scout_crawl_request_permits AS request
+                 SET pending_deadline=GREATEST(request.pending_deadline, task.lease_deadline)
+                 FROM scout_crawl_tasks AS task
+                 WHERE request.crawl_run_id=$1 AND request.request_id=$2
+                   AND request.worker_id=$3 AND request.status='pending'
+                   AND request.pending_deadline<=clock_timestamp()
+                   AND task.task_id=$4 AND task.crawl_run_id=$1
+                   AND task.status='leased' AND task.lease_owner=$3 AND task.lease_epoch=$5
+                   AND task.lease_deadline>clock_timestamp()",
+                &[
+                    &task.crawl_run_id,
+                    &request_id,
+                    &task.lease_owner,
+                    &task.task_id,
+                    &task.lease_epoch,
+                ],
+            )
+            .map_err(|error| Error::storage(format!("refresh pending request lease: {error}")))?;
+        tx.commit().map_err(|error| {
+            Error::storage(format!("commit pending request lease refresh: {error}"))
+        })?;
+        Ok(changed == 1)
     }
 
     pub(crate) fn expired_request_waits(

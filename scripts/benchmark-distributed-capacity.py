@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 import platform
 import shutil
@@ -26,9 +27,10 @@ measurement = sweep.measurement
 
 class CapacityFixtures:
     """One async event loop serves four origins without one OS thread per request."""
-    def __init__(self, ports=None):
+    def __init__(self, ports=None, discovery=False):
         self.records, self.loop_lag_ms, self.servers = [], [], []
         self.delay = .12
+        self.discovery = discovery
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever)
         self.thread.start()
@@ -48,12 +50,14 @@ class CapacityFixtures:
                         else:
                             page = int(path.rsplit("/", 1)[1])
                             assert 0 <= page < 125
+                            links = "".join(f'<a href="/page/{(page + offset) % 125}">next</a>'
+                                            for offset in range(1, 9)) if self.discovery else ""
                             body = (f"<html><head><title>Capacity origin {number} page {page}</title></head>"
                                     f"<body><main><h1>Capacity origin {number} page {page}</h1>"
                                     f"<p>Unique deterministic capacity benchmark document, origin {number}, page {page}. "
                                     "Durable coordination assigns crawl tasks, observes request policy and preserves "
                                     "accepted content. This prose produces stable extracted passages and a sealed Corpus. "
-                                    "</p></main></body></html>").encode()
+                                    f"</p><p>{links}</p></main></body></html>").encode()
                             mime = "text/html"
                         await asyncio.sleep(self.delay)
                         writer.write(f"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {len(body)}\r\nConnection: keep-alive\r\n\r\n".encode() + body)
@@ -82,10 +86,20 @@ class CapacityFixtures:
         text = text.replace("max_frontier = 200", "max_frontier = 1000")
         text = text.replace("max_total_attempts = 100", "max_total_attempts = 2000")
         text = text.replace("max_duration_seconds = 120", "max_duration_seconds = 300")
+        origin_cap = 1 if constrained else 192
         for number, port in enumerate(self.ports):
             origin = f"http://127.0.0.1:{port}"
-            text += measurement.source(f"capacity-{number}", origin,
-                                       [f"{origin}/page/{page}" for page in range(125)], "/page/", quota=125)
+            text += f'''\n[[origins]]
+origin = "{origin}"
+origin_concurrency = {origin_cap}
+min_start_spacing_ms = 0
+'''
+            all_pages = [f"{origin}/page/{page}" for page in range(125)]
+            source_text = measurement.source(f"capacity-{number}", origin, all_pages, "/page/", quota=125)
+            if self.discovery:
+                source_text = source_text.replace(f"seeds = {json.dumps(all_pages)}",
+                                                  f"seeds = {json.dumps(all_pages[:8])}")
+            text += source_text + f'politeness_group = "capacity-{number}"\n'
         if constrained:
             text = text.replace("global_concurrency = 192", "global_concurrency = 4")
             text = text.replace("origin_concurrency = 192", "origin_concurrency = 1")
@@ -157,6 +171,13 @@ def derived(path, summary, config, fixture, lag_before):
     assert summary["uncompleted_permits"] == summary["unfinished_tasks"] == 0
     assert summary["failed_tasks"] == summary["task_failure_events"] == summary["rejected_pages"] == 0
     assert summary["source_quotas_met"] and summary["unique_successful_pages"] == 500
+    result_ids = [row["data"]["task_id"] for file in path.glob("worker-*.stderr")
+                  for row in measurement.json_lines(file) if row.get("event") == "worker.task_completed"]
+    claimed = [row["data"]["task_id"] for row in rows if row.get("event") == "task.claimed"]
+    assert summary["database_result_rows"] == len(result_ids) == len(set(result_ids))
+    assert summary["duplicate_database_result_rows"] == 0
+    assert len(claimed) == len(set(claimed)) == 500
+    assert summary["reclaimed_or_retried_tasks"] == 0
     source_counts = collections.Counter(urllib.parse.urlsplit(r["url"]).netloc for r in requests if "/page/" in r["url"])
     assert len(source_counts) == 4 and set(source_counts.values()) == {125}
     service = sum(r["service_ns"] for r in before) / 1e9
@@ -166,12 +187,31 @@ def derived(path, summary, config, fixture, lag_before):
         operations[operation] = {"calls": len(selected), "service_fraction": sum(r["service_ns"] for r in selected) / 1e9 / seconds,
                                  "mutex_wait": measurement.percentile([r["core_lock_wait_ns"] for r in selected]),
                                  "service": measurement.percentile([r["service_ns"] for r in selected])}
+    accepted = [row["data"] for row in rows if row.get("event") == "capture.accepted"]
+    admitted = sum(row["accepted_discovered_count"] for row in accepted)
+    rejected = sum(row["rejected_discovered_count"] for row in accepted)
+    assert admitted == (468 if fixture.discovery else 0) and rejected == 0
+    phases = collections.defaultdict(list)
+    for row in rows:
+        if row.get("metric") == "completion_phase":
+            phases[row["phase"]].append(row["elapsed_ns"])
+    lane_events = [row for row in rows if row.get("event") == "coordinator.started"]
+    expected_lanes = int(os.environ.get("SCOUT_COMPLETION_LANES", "4"))
+    assert len(lane_events) == 1 and lane_events[0]["data"]["completion_lanes"] == expected_lanes
     summary.update({"time_to_target_seconds": seconds, "drain_seconds": metadata["measurement_end_unix"] - target,
                     "overshoot_pages": summary["unique_successful_pages"] - 500,
                     "target_pages_per_minute": 500 / seconds * 60,
                     "pre_target_service_occupancy_fraction": service / seconds,
                     "pre_target_rpc_per_second": len(before) / seconds,
-                    "pre_target_operations": operations, "observed_task_slots": dict(maximum),
+                    "pre_target_operations": operations,
+                    "dispatch_service_fraction": operations.get("dispatch", {}).get("service_fraction", 0),
+                    "complete_task_service_fraction": operations.get("complete_task", {}).get("service_fraction", 0),
+                    "completion_phase_timings": {key: measurement.percentile(values) for key, values in phases.items()},
+                    "admitted_discoveries": admitted, "rejected_discoveries": rejected,
+                    "captures_with_admissions": sum(row["accepted_discovered_count"] > 0 for row in accepted),
+                    "reported_completion_lanes": lane_events[0]["data"]["completion_lanes"],
+                    "unique_result_rows": len(result_ids), "unique_claimed_tasks": len(claimed),
+                    "observed_task_slots": dict(maximum),
                     "fixture_server_policy": measurement.policy(requests, 0),
                     "fixture_loop_lag": measurement.percentile([v * 1e6 for v in fixture.loop_lag_ms[lag_before:]]),
                     "fixture_server_http_duration": measurement.percentile([(r["end"] - r["start"]) * 1e9 for r in requests]),
@@ -185,6 +225,7 @@ def main():
     parser.add_argument("--binary", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--variant", choices=("baseline", "candidate"), required=True)
+    parser.add_argument("--workload", choices=("page-only", "discovery"), default="page-only")
     parser.add_argument("--policy-constrained", action="store_true")
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--concurrency", nargs="+", type=int, default=[1, 4, 8, 16, 32])
@@ -197,7 +238,7 @@ def main():
     ports = None
     if config_path.exists():
         ports = [urllib.parse.urlsplit(s["allowed_origins"][0]).port for s in tomllib.loads(config_path.read_text())["sources"]]
-    fixture = CapacityFixtures(ports)
+    fixture = CapacityFixtures(ports, discovery=args.workload == "discovery")
     args.cleanup_crawl_data, args.max_run_seconds = True, 300
     original = measurement.summarize
     measurement.summarize = lambda *values: sweep.analyze(*values, args, original)
@@ -208,9 +249,10 @@ def main():
         assert probe["completed"] == 192 and probe["server_observed_policy"]["max_active_global"] == 192
         assert probe["latency"]["p95_ms"] < 250, "fixture server lacks benchmark headroom"
         measurement.save(root / f"{args.variant}-fixture-probe.json", probe)
-        environment = {"variant": args.variant, "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+        environment = {"variant": args.variant, "workload": args.workload, "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                        "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(), "platform": platform.platform(),
                        "workers": 3, "concurrency_levels": args.concurrency, "repetitions": args.repetitions,
+                       "completion_lanes": int(os.environ.get("SCOUT_COMPLETION_LANES", "4")),
                        "fixture_latency_ms": 120, "fixture_origins": 4, "pages_per_origin": 125,
                        "global_http_cap": 4 if args.policy_constrained else 192,
                        "origin_http_cap": 1 if args.policy_constrained else 192, "spacing_ms": 0,
@@ -222,7 +264,7 @@ def main():
                 args.worker_concurrency = concurrency
                 args.output = root / args.variant / f"c{concurrency}"
                 args.output.mkdir(parents=True, exist_ok=True)
-                print(json.dumps({"variant": args.variant, "concurrency": concurrency, "repetition": repetition, "started_unix": time.time()}), flush=True)
+                print(json.dumps({"variant": args.variant, "workload": args.workload, "concurrency": concurrency, "repetition": repetition, "started_unix": time.time()}), flush=True)
                 lag_before = len(fixture.loop_lag_ms)
                 result = measurement.run_once(args, config_path, 3, repetition, "capacity", fixture)
                 path = args.output / f"capacity-w3-r{repetition}"

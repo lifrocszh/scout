@@ -216,9 +216,15 @@ impl FrontierStore {
         timing: LeaseTiming,
     ) -> Result<bool, Error> {
         let lease_ms = duration_millis(timing.lease_for)?;
-        let _measurement =
-            crate::distributed::metrics::DatabaseScope::new("renew_lease_autocommit");
-        self.client
+        let _measurement = crate::distributed::metrics::DatabaseScope::new("renew_lease");
+        let mut tx = self
+            .client
+            .transaction()
+            .map_err(|error| Error::storage(format!("begin crawl task lease renewal: {error}")))?;
+        if !super::lock_live_task(&mut tx, task)? {
+            return Ok(false);
+        }
+        let changed = tx
             .execute(
                 "UPDATE scout_crawl_tasks
                  SET lease_deadline = clock_timestamp() + ($4::BIGINT * interval '1 millisecond'),
@@ -241,8 +247,10 @@ impl FrontierStore {
                     &task.idempotency_key,
                 ],
             )
-            .map(|count| count == 1)
-            .map_err(|error| Error::storage(format!("renew crawl task lease: {error}")))
+            .map_err(|error| Error::storage(format!("renew crawl task lease: {error}")))?;
+        tx.commit()
+            .map_err(|error| Error::storage(format!("commit crawl task lease renewal: {error}")))?;
+        Ok(changed == 1)
     }
 
     #[cfg(test)]
@@ -281,8 +289,14 @@ impl FrontierStore {
         retry_delay: Duration,
     ) -> Result<Option<TaskStatus>, Error> {
         let delay_ms = duration_millis(retry_delay)?;
-        let row = self
+        let mut tx = self
             .client
+            .transaction()
+            .map_err(|error| Error::storage(format!("begin crawl task failure: {error}")))?;
+        if !super::lock_live_task(&mut tx, task)? {
+            return Ok(None);
+        }
+        let row = tx
             .query_opt(
                 "UPDATE scout_crawl_tasks
                  SET status = CASE
@@ -318,8 +332,12 @@ impl FrontierStore {
                 ],
             )
             .map_err(|error| Error::storage(format!("record crawl task failure: {error}")))?;
-        row.map(|row| TaskStatus::parse(row.get::<_, &str>(0)))
-            .transpose()
+        let result = row
+            .map(|row| TaskStatus::parse(row.get::<_, &str>(0)))
+            .transpose()?;
+        tx.commit()
+            .map_err(|error| Error::storage(format!("commit crawl task failure: {error}")))?;
+        Ok(result)
     }
 
     pub(crate) fn lease_is_live(&mut self, task: &ClaimedTask) -> Result<bool, Error> {

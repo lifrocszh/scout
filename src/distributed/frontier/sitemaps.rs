@@ -34,7 +34,7 @@ impl FrontierStore {
             crate::distributed::metrics::DatabaseScope::new("claim_sitemap_discovery");
         let mut tx = self.client.transaction().map_err(storage)?;
         lock_frontier(&mut tx, &task.crawl_run_id)?;
-        if !lock_live_task(&mut tx, task)? {
+        if !super::lock_live_task(&mut tx, task)? {
             return Ok(None);
         }
         let inserted = tx.execute(
@@ -46,25 +46,31 @@ impl FrontierStore {
             tx.commit().map_err(storage)?;
             return Ok(Some(1));
         }
-        let row = tx.query_one(
-            "SELECT scan.state,scan.owner_task_id,scan.owner_lease_epoch,scan.scan_epoch,
-                    scan.attempt_count,scan.max_attempts,
-                    COALESCE(owner.status='leased' AND owner.lease_epoch=scan.owner_lease_epoch
-                        AND owner.lease_deadline>clock_timestamp(),FALSE)
-             FROM scout_crawl_sitemap_discovery scan LEFT JOIN scout_crawl_tasks owner ON owner.task_id=scan.owner_task_id
-             WHERE scan.crawl_run_id=$1 AND scan.origin=$2 FOR UPDATE OF scan",
-            &[&task.crawl_run_id,&task.origin],
-        ).map_err(storage)?;
+        let row = tx
+            .query_one(
+                "SELECT state,owner_task_id,owner_lease_epoch,scan_epoch,attempt_count,max_attempts
+             FROM scout_crawl_sitemap_discovery
+             WHERE crawl_run_id=$1 AND origin=$2 FOR UPDATE",
+                &[&task.crawl_run_id, &task.origin],
+            )
+            .map_err(storage)?;
         if row.get::<_, i32>(5) != max_attempts {
             return Err(Error::storage("sitemap attempt policy changed"));
         }
         let state: String = row.get(0);
         let epoch: i64 = row.get(3);
-        if state == "running" && row.get::<_, bool>(6) {
-            let same_owner =
-                row.get::<_, i64>(1) == task.task_id && row.get::<_, i64>(2) == task.lease_epoch;
-            tx.commit().map_err(storage)?;
-            return Ok(same_owner.then_some(epoch));
+        // The scan row lock may have waited; recheck both leases only after acquiring it.
+        if !super::task_lease_is_live_locked(&mut tx, task)? {
+            return Ok(None);
+        }
+        if state == "running" {
+            let owner_live = lock_sitemap_owner_and_check_live(&mut tx, row.get(1), row.get(2))?;
+            if owner_live {
+                let same_owner = row.get::<_, i64>(1) == task.task_id
+                    && row.get::<_, i64>(2) == task.lease_epoch;
+                tx.commit().map_err(storage)?;
+                return Ok(same_owner.then_some(epoch));
+            }
         }
         if state == "completed" || state == "failed" {
             tx.commit().map_err(storage)?;
@@ -112,7 +118,7 @@ impl FrontierStore {
         let mut tx = self.client.transaction().map_err(storage)?;
         lock_frontier(&mut tx, &task.crawl_run_id)?;
         // Lock task before discovery, matching claims and capture completion lock order.
-        let live = lock_live_task(&mut tx, task)?;
+        let mut live = super::lock_live_task(&mut tx, task)?;
         let row = tx.query_opt("SELECT owner_task_id,owner_lease_epoch,scan_epoch,state,result_sha256,attempt_count,max_attempts,accepted_discovered_count,rejected_discovered_count FROM scout_crawl_sitemap_discovery WHERE crawl_run_id=$1 AND origin=$2 FOR UPDATE", &[&task.crawl_run_id,&origin]).map_err(storage)?;
         let Some(row) = row else {
             return Ok(None);
@@ -136,6 +142,9 @@ impl FrontierStore {
                 accepted_discovered_count: row.get::<_, i64>(7) as usize,
                 rejected_discovered_count: row.get::<_, i64>(8) as usize,
             }));
+        }
+        if live {
+            live = super::task_lease_is_live_locked(&mut tx, task)?;
         }
         if !live || state != "running" {
             return Ok(None);
@@ -171,6 +180,30 @@ impl FrontierStore {
     }
 }
 
+fn lock_sitemap_owner_and_check_live(
+    tx: &mut postgres::Transaction<'_>,
+    task_id: i64,
+    lease_epoch: i64,
+) -> Result<bool, Error> {
+    let locked = tx
+        .query_opt(
+            "SELECT task_id FROM scout_crawl_tasks WHERE task_id=$1 FOR UPDATE",
+            &[&task_id],
+        )
+        .map_err(storage)?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    tx.query_opt(
+        "SELECT task_id FROM scout_crawl_tasks
+         WHERE task_id=$1 AND status='leased' AND lease_epoch=$2
+           AND lease_deadline>clock_timestamp()",
+        &[&task_id, &lease_epoch],
+    )
+    .map(|row| row.is_some())
+    .map_err(storage)
+}
+
 fn lock_frontier(tx: &mut postgres::Transaction<'_>, run_id: &str) -> Result<(), Error> {
     tx.query_opt(
         "SELECT crawl_run_id FROM scout_crawl_task_scheduler WHERE crawl_run_id=$1 FOR UPDATE",
@@ -179,21 +212,6 @@ fn lock_frontier(tx: &mut postgres::Transaction<'_>, run_id: &str) -> Result<(),
     .map_err(storage)?
     .ok_or_else(|| Error::storage("crawl task scheduler is missing"))?;
     Ok(())
-}
-fn lock_live_task(tx: &mut postgres::Transaction<'_>, task: &ClaimedTask) -> Result<bool, Error> {
-    let row = tx.query_opt("SELECT crawl_run_id,source_id,origin,normalized_url,schedule_key,idempotency_key,status,lease_owner,lease_epoch,COALESCE(lease_deadline>clock_timestamp(),FALSE) FROM scout_crawl_tasks WHERE task_id=$1 FOR UPDATE", &[&task.task_id]).map_err(storage)?;
-    Ok(row.is_some_and(|row| {
-        row.get::<_, String>(0) == task.crawl_run_id
-            && row.get::<_, String>(1) == task.source_id
-            && row.get::<_, String>(2) == task.origin
-            && row.get::<_, String>(3) == task.normalized_url
-            && row.get::<_, String>(4) == task.schedule_key
-            && row.get::<_, String>(5) == task.idempotency_key
-            && row.get::<_, String>(6) == "leased"
-            && row.get::<_, Option<String>>(7).as_deref() == Some(&task.lease_owner)
-            && row.get::<_, i64>(8) == task.lease_epoch
-            && row.get::<_, bool>(9)
-    }))
 }
 fn storage(error: postgres::Error) -> Error {
     Error::storage(format!("shared sitemap discovery: {error}"))

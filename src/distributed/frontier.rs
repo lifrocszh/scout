@@ -247,6 +247,64 @@ pub(crate) struct FrontierStore {
     client: Client,
 }
 
+/// Lock and revalidate the full durable lease identity inside a caller's transaction.
+pub(crate) fn lock_live_task(
+    tx: &mut postgres::Transaction<'_>,
+    task: &ClaimedTask,
+) -> Result<bool, Error> {
+    let locked = tx
+        .query_opt(
+            "SELECT task_id FROM scout_crawl_tasks
+         WHERE task_id=$1 AND crawl_run_id=$2 AND source_id=$3 AND origin=$4
+           AND normalized_url=$5 AND schedule_key=$6 AND idempotency_key=$7
+           AND status='leased' AND lease_owner=$8 AND lease_epoch=$9
+         FOR UPDATE",
+            &[
+                &task.task_id,
+                &task.crawl_run_id,
+                &task.source_id,
+                &task.origin,
+                &task.normalized_url,
+                &task.schedule_key,
+                &task.idempotency_key,
+                &task.lease_owner,
+                &task.lease_epoch,
+            ],
+        )
+        .map_err(|error| Error::storage(format!("lock request task lease: {error}")))?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    task_lease_is_live_locked(tx, task)
+}
+
+/// Check lease time only after the caller holds the task row lock.
+pub(crate) fn task_lease_is_live_locked(
+    tx: &mut postgres::Transaction<'_>,
+    task: &ClaimedTask,
+) -> Result<bool, Error> {
+    tx.query_opt(
+        "SELECT task_id FROM scout_crawl_tasks
+         WHERE task_id=$1 AND crawl_run_id=$2 AND source_id=$3 AND origin=$4
+           AND normalized_url=$5 AND schedule_key=$6 AND idempotency_key=$7
+           AND status='leased' AND lease_owner=$8 AND lease_epoch=$9
+           AND lease_deadline>clock_timestamp()",
+        &[
+            &task.task_id,
+            &task.crawl_run_id,
+            &task.source_id,
+            &task.origin,
+            &task.normalized_url,
+            &task.schedule_key,
+            &task.idempotency_key,
+            &task.lease_owner,
+            &task.lease_epoch,
+        ],
+    )
+    .map(|row| row.is_some())
+    .map_err(|error| Error::storage(format!("recheck request task lease deadline: {error}")))
+}
+
 mod request_policy;
 mod results;
 mod robots;

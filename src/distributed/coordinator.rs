@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::{Request, Response, Status, transport::Server};
 
 mod capture;
+mod database;
 mod results;
 mod rpc;
 mod scheduling;
@@ -38,29 +39,39 @@ use capture::{
 };
 
 struct CoordinatorState {
-    core: Mutex<CoordinatorCore>,
+    context: CoordinatorContext,
+    memory: Mutex<CoordinatorMemory>,
+    frontier: database::FrontierPool,
+    scheduler: scheduling::SchedulerHandle,
     shutdown: tokio::sync::Notify,
     schedule_changed: Arc<tokio::sync::Notify>,
     results: Arc<results::ResultPool>,
 }
 
-struct CoordinatorCore {
-    frontier: FrontierStore,
+struct CoordinatorContext {
     spool: CaptureSpool,
     crawl_dir: PathBuf,
     config: Config,
     run_id: String,
     lease_timing: LeaseTiming,
-    registered_workers: HashSet<String>,
-    fatal_error: Option<String>,
     events: Arc<Mutex<Events>>,
-    waits: scheduling::Waits,
 }
 
-impl CoordinatorCore {
-    fn target_reached(&mut self) -> Result<bool, Status> {
-        let counts = self
-            .frontier
+#[derive(Default)]
+struct CoordinatorMemory {
+    registered_workers: HashSet<String>,
+    fatal_error: Option<String>,
+}
+
+#[derive(Clone)]
+struct CoordinatorSnapshot {
+    registered_workers: HashSet<String>,
+    fatal_error: Option<String>,
+}
+
+impl CoordinatorContext {
+    fn target_reached(&self, frontier: &mut FrontierStore) -> Result<bool, Status> {
+        let counts = frontier
             .content_group_counts_by_source(&self.run_id)
             .map_err(to_status)?;
         let total: usize = counts.values().sum();
@@ -72,7 +83,7 @@ impl CoordinatorCore {
         if total >= self.config.page_target && quotas_met {
             return Ok(true);
         }
-        self.frontier
+        frontier
             .run_duration_exceeded(
                 &self.run_id,
                 Duration::from_secs(self.config.max_duration_seconds),
@@ -80,9 +91,11 @@ impl CoordinatorCore {
             .map_err(to_status)
     }
 
-    fn quota_satisfied_source_ids(&mut self) -> Result<Vec<String>, Status> {
-        let counts = self
-            .frontier
+    fn quota_satisfied_source_ids(
+        &self,
+        frontier: &mut FrontierStore,
+    ) -> Result<Vec<String>, Status> {
+        let counts = frontier
             .content_group_counts_by_source(&self.run_id)
             .map_err(to_status)?;
         let total: usize = counts.values().sum();
@@ -107,10 +120,15 @@ impl CoordinatorCore {
             .collect())
     }
 
-    fn validate_lease(&mut self, lease: &proto::Lease) -> Result<ClaimedTask, Status> {
+    fn validate_lease(
+        &self,
+        lease: &proto::Lease,
+        snapshot: &CoordinatorSnapshot,
+        frontier: &mut FrontierStore,
+    ) -> Result<ClaimedTask, Status> {
         let task = claimed_task(lease)?;
-        self.validate_task_identity(&task)?;
-        if !self.frontier.lease_is_live(&task).map_err(to_status)? {
+        self.validate_task_identity(&task, snapshot)?;
+        if !frontier.lease_is_live(&task).map_err(to_status)? {
             return Err(Status::failed_precondition(
                 "task lease is stale or unknown",
             ));
@@ -118,8 +136,13 @@ impl CoordinatorCore {
         Ok(task)
     }
 
-    fn validate_task_identity(&self, task: &ClaimedTask) -> Result<(), Status> {
-        if task.crawl_run_id != self.run_id || !self.registered_workers.contains(&task.lease_owner)
+    fn validate_task_identity(
+        &self,
+        task: &ClaimedTask,
+        snapshot: &CoordinatorSnapshot,
+    ) -> Result<(), Status> {
+        if task.crawl_run_id != self.run_id
+            || !snapshot.registered_workers.contains(&task.lease_owner)
         {
             return Err(Status::failed_precondition(
                 "task lease is stale or unknown",
@@ -340,6 +363,7 @@ fn coordinator_main(
             )?;
         }
     }
+    let general_database_lanes = database::FrontierPool::lane_count()?;
     emit_shared(
         &events,
         "coordinator.started",
@@ -351,23 +375,26 @@ fn coordinator_main(
             "page_target": config.page_target,
             "database_credentials": "coordinator_only",
             "auth": "tailnet_acl",
+            "general_database_lanes": general_database_lanes,
             "completion_lanes": completion_lanes,
         }),
     );
     println!("scout coordinator listening on {address}");
+    drop(frontier);
+    let frontier_pool = database::FrontierPool::connect(&database_url, general_database_lanes)?;
+    let (scheduler, scheduler_receiver) = scheduling::channel(config.max_frontier);
     let state = Arc::new(CoordinatorState {
-        core: Mutex::new(CoordinatorCore {
-            frontier,
+        context: CoordinatorContext {
             spool,
             crawl_dir,
             config,
             run_id,
             lease_timing,
-            registered_workers: HashSet::new(),
-            fatal_error: None,
             events,
-            waits: scheduling::Waits::default(),
-        }),
+        },
+        memory: Mutex::new(CoordinatorMemory::default()),
+        frontier: frontier_pool,
+        scheduler,
         shutdown: tokio::sync::Notify::new(),
         schedule_changed: results.notify(),
         results: results.clone(),
@@ -382,24 +409,15 @@ fn coordinator_main(
     let shutdown_state = state.clone();
     let runtime_state = state.clone();
     let result = runtime.block_on(async move {
-        let (config, run_id, spool, events) = {
-            let core = runtime_state.core.lock().expect("coordinator state lock");
-            (
-                core.config.clone(),
-                core.run_id.clone(),
-                core.spool.clone(),
-                core.events.clone(),
-            )
-        };
         let result_handles = runtime_state.results.start(
             result_workers,
             Arc::downgrade(&runtime_state),
-            config,
-            run_id,
-            spool,
-            events,
+            runtime_state.context.config.clone(),
+            runtime_state.context.run_id.clone(),
+            runtime_state.context.spool.clone(),
+            runtime_state.context.events.clone(),
         );
-        let dispatcher = tokio::spawn(scheduling::run(runtime_state.clone()));
+        let dispatcher = tokio::spawn(scheduling::run(runtime_state.clone(), scheduler_receiver));
         let server_result = Server::builder()
             .add_service(
                 CoordinatorServer::new(service)
@@ -421,12 +439,12 @@ fn coordinator_main(
     });
     let (server_result, result_handles) = result;
     let (run_events, global_concurrency, origin_concurrency, fatal_error) = {
-        let core = state.core.lock().expect("coordinator state lock");
+        let memory = state.memory.lock().expect("coordinator state lock");
         (
-            core.events.clone(),
-            core.config.global_concurrency,
-            core.config.origin_concurrency,
-            core.fatal_error.clone(),
+            state.context.events.clone(),
+            state.context.config.global_concurrency,
+            state.context.config.origin_concurrency,
+            memory.fatal_error.clone(),
         )
     };
     emit_shared(
@@ -497,7 +515,9 @@ fn validate_allowed_origin(config: &Config, value: &str) -> Result<(), Status> {
 }
 
 fn to_status(error: Error) -> Status {
-    if error.code == "safety_cap" {
+    if error.code == "stale_lease" {
+        Status::failed_precondition(error.message)
+    } else if error.code == "safety_cap" {
         Status::resource_exhausted(error.message)
     } else if error.exit_code == 2 {
         Status::invalid_argument(error.message)

@@ -256,6 +256,97 @@ fn postgres_sitemap_competing_claims_and_atomic_idempotent_commit_survive_restar
 
 #[test]
 #[ignore = "requires disposable PostgreSQL database in SCOUT_TEST_DATABASE_URL"]
+fn postgres_concurrent_sitemap_admission_respects_shared_frontier_limit() {
+    let (run, mut store) = SitemapRun::new("concurrent-frontier-limit");
+    let tasks = [
+        run.task(&mut store, "https://one.invalid/seed", "scanner-one"),
+        run.task(&mut store, "https://two.invalid/seed", "scanner-two"),
+    ];
+    let epochs = tasks
+        .iter()
+        .map(|task| store.claim_sitemap_discovery(task, 2).unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = tasks
+        .into_iter()
+        .zip(epochs)
+        .enumerate()
+        .map(|(index, (task, epoch))| {
+            let database_url = run.database_url.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                let mut store = FrontierStore::connect(&database_url).unwrap();
+                barrier.wait();
+                store
+                    .commit_sitemap_discovery(
+                        &task,
+                        &task.origin,
+                        epoch,
+                        &sha256_hex(format!("concurrent-sitemap-{index}").as_bytes()),
+                        &[discovery(&format!(
+                            "https://{}.invalid/discovered",
+                            if index == 0 { "one" } else { "two" }
+                        ))],
+                        0,
+                        4,
+                        3,
+                        "",
+                        false,
+                    )
+                    .unwrap()
+                    .expect("fenced sitemap commit should complete")
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let completions = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(completions.iter().all(|completion| completion.terminal));
+    assert_eq!(
+        completions
+            .iter()
+            .map(|completion| completion.accepted_discovered_count)
+            .sum::<usize>(),
+        1,
+        "only one of two independent sitemap commits can use the remaining slot"
+    );
+    assert_eq!(
+        completions
+            .iter()
+            .map(|completion| completion.rejected_discovered_count)
+            .sum::<usize>(),
+        1
+    );
+    let discovered_count: i64 = store
+        .client
+        .query_one(
+            "SELECT count(*) FROM scout_crawl_tasks
+             WHERE crawl_run_id=$1 AND normalized_url LIKE '%/discovered'",
+            &[&run.run_id],
+        )
+        .unwrap()
+        .get(0);
+    let unfinished_count: i64 = store
+        .client
+        .query_one(
+            "SELECT count(*) FROM scout_crawl_tasks
+             WHERE crawl_run_id=$1 AND status IN ('pending','leased')",
+            &[&run.run_id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(discovered_count, 1);
+    assert!(
+        unfinished_count <= 3,
+        "frontier exceeded its configured cap"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL database in SCOUT_TEST_DATABASE_URL"]
 fn postgres_sitemap_lease_expiry_during_enqueue_rolls_back_discoveries() {
     let (run, mut store) = SitemapRun::new("commit-expiry");
     let task = run.task(&mut store, "https://example.invalid/seed", "slow-committer");
@@ -593,5 +684,46 @@ fn postgres_sitemap_retry_exhaustion_permanent_failures_and_frontier_limits_are_
     assert_eq!(
         run.count_url(&mut store, "https://example.invalid/capped-b"),
         0
+    );
+
+    let existing_task = run.task(
+        &mut store,
+        "https://already-present.invalid/seed",
+        "already-present-scanner",
+    );
+    let existing_epoch = store
+        .claim_sitemap_discovery(&existing_task, 2)
+        .unwrap()
+        .unwrap();
+    let full_frontier: i64 = store
+        .client
+        .query_one(
+            "SELECT count(*) FROM scout_crawl_tasks
+             WHERE crawl_run_id=$1 AND status IN ('pending','leased')",
+            &[&run.run_id],
+        )
+        .unwrap()
+        .get(0);
+    let duplicate_at_capacity = store
+        .commit_sitemap_discovery(
+            &existing_task,
+            &existing_task.origin,
+            existing_epoch,
+            &sha256_hex(b"duplicate-at-capacity"),
+            &[discovery("https://example.invalid/capped-a")],
+            0,
+            4,
+            full_frontier as usize,
+            "",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(duplicate_at_capacity.accepted_discovered_count, 0);
+    assert_eq!(duplicate_at_capacity.rejected_discovered_count, 1);
+    assert_eq!(
+        run.count_url(&mut store, "https://example.invalid/capped-a"),
+        1,
+        "a stored URL submitted at full capacity is rejected without duplication"
     );
 }

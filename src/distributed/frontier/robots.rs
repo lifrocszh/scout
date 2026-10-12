@@ -7,8 +7,38 @@ use std::time::Duration;
 
 impl FrontierStore {
     /// Return a fresh shared decision or claim the one allowed robots refresh for this origin.
+    #[cfg(test)]
     pub(crate) fn robots_decision(
         &mut self,
+        run_id: &str,
+        worker_id: &str,
+        refresh_epoch: Option<i64>,
+        origin: &str,
+        path: &str,
+    ) -> Result<RobotsDecision, Error> {
+        self.robots_decision_inner(None, run_id, worker_id, refresh_epoch, origin, path)
+    }
+
+    pub(crate) fn robots_decision_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        refresh_epoch: Option<i64>,
+        origin: &str,
+        path: &str,
+    ) -> Result<RobotsDecision, Error> {
+        self.robots_decision_inner(
+            Some(task),
+            &task.crawl_run_id,
+            &task.lease_owner,
+            refresh_epoch,
+            origin,
+            path,
+        )
+    }
+
+    fn robots_decision_inner(
+        &mut self,
+        task: Option<&super::ClaimedTask>,
         run_id: &str,
         worker_id: &str,
         refresh_epoch: Option<i64>,
@@ -49,23 +79,43 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("create robots refresh state: {error}")))?
             == 1;
         if inserted {
+            if let Some(task) = task {
+                if !super::lock_live_task(&mut tx, task)? {
+                    return Err(Error::stale_lease("task lease is stale or unknown"));
+                }
+            }
             tx.commit()
                 .map_err(|error| Error::storage(format!("commit robots refresh claim: {error}")))?;
             return Ok(RobotsDecision::Refresh { epoch: 1 });
         }
         let row = tx
             .query_one(
-                "SELECT state, policy, body_sha256, refresh_owner, refresh_epoch,
-                        (refresh_deadline > clock_timestamp()) AS refresh_live,
-                        (expires_at > clock_timestamp()) AS cache_fresh
+                "SELECT state, policy, body_sha256, refresh_owner, refresh_epoch
                  FROM scout_crawl_robots_policy
                  WHERE crawl_run_id = $1 AND origin = $2 FOR UPDATE",
                 &[&run_id, &origin],
             )
             .map_err(|error| Error::storage(format!("lock robots policy state: {error}")))?;
+        if let Some(task) = task {
+            if !super::lock_live_task(&mut tx, task)? {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+        }
+        // These deadlines can expire while either row lock is being acquired. Read clock time
+        // only after the robots row and, for task RPCs, its lease row are both locked.
+        let freshness = tx
+            .query_one(
+                "SELECT COALESCE(refresh_deadline > clock_timestamp(), FALSE),
+                        COALESCE(expires_at > clock_timestamp(), FALSE)
+                 FROM scout_crawl_robots_policy WHERE crawl_run_id=$1 AND origin=$2",
+                &[&run_id, &origin],
+            )
+            .map_err(|error| Error::storage(format!("recheck robots policy deadlines: {error}")))?;
+        let refresh_live: bool = freshness.get(0);
+        let cache_fresh: bool = freshness.get(1);
         let state: String = row.get(0);
         match state.as_str() {
-            "ready" | "denied" if row.get::<_, bool>(6) => {
+            "ready" | "denied" if cache_fresh => {
                 let allowed = if state == "denied" {
                     false
                 } else {
@@ -95,7 +145,7 @@ impl FrontierStore {
                     .map_err(|error| Error::storage(format!("commit robots decision: {error}")))?;
                 Ok(decision)
             }
-            "refreshing" if row.get::<_, bool>(5) => {
+            "refreshing" if refresh_live => {
                 let owner: String = row.get(3);
                 let epoch: i64 = row.get(4);
                 if owner == worker_id && refresh_epoch == Some(epoch) {
@@ -142,8 +192,49 @@ impl FrontierStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_robots_refresh(
         &mut self,
+        run_id: &str,
+        worker_id: &str,
+        origin: &str,
+        epoch: i64,
+        policy: &RobotsPolicy,
+        body_sha256: &str,
+    ) -> Result<bool, Error> {
+        self.commit_robots_refresh_inner(
+            None,
+            run_id,
+            worker_id,
+            origin,
+            epoch,
+            policy,
+            body_sha256,
+        )
+    }
+
+    pub(crate) fn commit_robots_refresh_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        origin: &str,
+        epoch: i64,
+        policy: &RobotsPolicy,
+        body_sha256: &str,
+    ) -> Result<bool, Error> {
+        self.commit_robots_refresh_inner(
+            Some(task),
+            &task.crawl_run_id,
+            &task.lease_owner,
+            origin,
+            epoch,
+            policy,
+            body_sha256,
+        )
+    }
+
+    fn commit_robots_refresh_inner(
+        &mut self,
+        task: Option<&super::ClaimedTask>,
         run_id: &str,
         worker_id: &str,
         origin: &str,
@@ -170,8 +261,25 @@ impl FrontierStore {
         policy.sitemaps.dedup();
         let serialized = serde_json::to_string(&policy)
             .map_err(|error| Error::storage(format!("encode shared robots policy: {error}")))?;
-        let changed = self
+        let mut tx = self
             .client
+            .transaction()
+            .map_err(|error| Error::storage(format!("begin robots refresh commit: {error}")))?;
+        if let Some(task) = task {
+            if task.crawl_run_id != run_id || task.lease_owner != worker_id {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+            tx.query_opt(
+                "SELECT crawl_run_id FROM scout_crawl_robots_policy
+                 WHERE crawl_run_id=$1 AND origin=$2 FOR UPDATE",
+                &[&run_id, &origin],
+            )
+            .map_err(|error| Error::storage(format!("lock robots refresh state: {error}")))?;
+            if !super::lock_live_task(&mut tx, task)? {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+        }
+        let changed = tx
             .execute(
                 "UPDATE scout_crawl_robots_policy AS robots
                  SET state = 'ready', policy = $5, body_sha256 = $6,
@@ -186,11 +294,41 @@ impl FrontierStore {
                 &[&run_id, &origin, &worker_id, &epoch, &serialized, &body_sha256],
             )
             .map_err(|error| Error::storage(format!("commit shared robots policy: {error}")))?;
+        tx.commit().map_err(|error| {
+            Error::storage(format!("commit robots refresh transaction: {error}"))
+        })?;
         Ok(changed == 1)
     }
 
+    #[cfg(test)]
     pub(crate) fn fail_robots_refresh(
         &mut self,
+        run_id: &str,
+        worker_id: &str,
+        origin: &str,
+        epoch: i64,
+    ) -> Result<bool, Error> {
+        self.fail_robots_refresh_inner(None, run_id, worker_id, origin, epoch)
+    }
+
+    pub(crate) fn fail_robots_refresh_for_task(
+        &mut self,
+        task: &super::ClaimedTask,
+        origin: &str,
+        epoch: i64,
+    ) -> Result<bool, Error> {
+        self.fail_robots_refresh_inner(
+            Some(task),
+            &task.crawl_run_id,
+            &task.lease_owner,
+            origin,
+            epoch,
+        )
+    }
+
+    fn fail_robots_refresh_inner(
+        &mut self,
+        task: Option<&super::ClaimedTask>,
         run_id: &str,
         worker_id: &str,
         origin: &str,
@@ -200,8 +338,25 @@ impl FrontierStore {
         if normalized_origin != origin || epoch <= 0 {
             return Err(Error::invalid("robots refresh identity is invalid"));
         }
-        let changed = self
+        let mut tx = self
             .client
+            .transaction()
+            .map_err(|error| Error::storage(format!("begin robots refresh failure: {error}")))?;
+        if let Some(task) = task {
+            if task.crawl_run_id != run_id || task.lease_owner != worker_id {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+            tx.query_opt(
+                "SELECT crawl_run_id FROM scout_crawl_robots_policy
+                 WHERE crawl_run_id=$1 AND origin=$2 FOR UPDATE",
+                &[&run_id, &origin],
+            )
+            .map_err(|error| Error::storage(format!("lock robots refresh state: {error}")))?;
+            if !super::lock_live_task(&mut tx, task)? {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
+            }
+        }
+        let changed = tx
             .execute(
                 "UPDATE scout_crawl_robots_policy AS robots
                  SET state = 'denied', policy = '{\"groups\":[],\"sitemaps\":[]}',
@@ -216,6 +371,9 @@ impl FrontierStore {
                 &[&run_id, &origin, &worker_id, &epoch],
             )
             .map_err(|error| Error::storage(format!("fail shared robots refresh: {error}")))?;
+        tx.commit().map_err(|error| {
+            Error::storage(format!("commit robots failure transaction: {error}"))
+        })?;
         Ok(changed == 1)
     }
 }
