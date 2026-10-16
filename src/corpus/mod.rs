@@ -14,14 +14,17 @@ pub(crate) use model::{
 use crate::crawl::page_id;
 use crate::crawl::spool::CaptureSpool;
 use crate::crawl::{Capture, Config, ContentBlock, CrawlResult};
+use crate::distributed::frontier::{FrontierStore, events::SealedSnapshot};
+use crate::distributed::recrawl_policy::RecrawlPolicyStore;
 use crate::error::Error;
 use crate::observability::{Events, emit_shared};
 use crate::storage::{now, sha256_hex, write_json};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 #[cfg(test)]
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -774,14 +777,27 @@ pub(crate) fn materialize_existing_spool(
     if !valid_run_id {
         return Err(Error::invalid("invalid source Crawl run ID"));
     }
+    let scoped_config = config_for_materialization(data_dir, source_run_id, config)?;
+    let config = &scoped_config;
     let crawl_dir = data_dir.join("crawls").join(source_run_id);
     let spool_path = crawl_dir.join("capture-spool.sqlite3");
-    if !spool_path.is_file() || crawl_dir.join("crawl-manifest.json").exists() {
+    if crawl_dir.join("crawl-manifest.json").is_file() {
+        read_source_run_summary(data_dir, source_run_id, config_path, config)?;
+        let snapshot = publish_sealed_snapshot(data_dir, source_run_id, config, None)?;
+        emit_shared(
+            events,
+            "crawl.materialization.snapshot_sealed",
+            "success",
+            json!({"source_run_id": source_run_id, "snapshot_id": snapshot.id, "reconciled": true}),
+        );
+        return Ok(snapshot);
+    }
+    if !spool_path.is_file() {
         return Err(Error::invalid(
             "source Crawl needs an unsealed capture spool and no complete manifest",
         ));
     }
-    let (started_at, completed_at, rejected_count, failed_count) =
+    let (started_at, completed_at, rejected_count, failed_count, completion_stop_reason) =
         read_source_run_summary(data_dir, source_run_id, config_path, config)?;
     let spool = CaptureSpool::open(&crawl_dir, config.max_frontier)?;
     spool.validate_source_scope(&config.sources)?;
@@ -792,7 +808,12 @@ pub(crate) fn materialize_existing_spool(
             || groups.get(&source.source_id).copied().unwrap_or_default()
                 >= source.minimum_page_quota
     });
-    if total_groups < config.page_target || !quotas_met {
+    if !materialization_target_met(
+        total_groups,
+        config.page_target,
+        quotas_met,
+        completion_stop_reason.as_deref(),
+    ) {
         return Err(Error::invalid(format!(
             "capture spool has {total_groups} unique groups; target {} and source quotas are not met",
             config.page_target
@@ -828,6 +849,8 @@ pub(crate) fn materialize_existing_spool(
             failed_count,
             &preserved,
         )?;
+        let snapshot =
+            publish_sealed_snapshot(data_dir, source_run_id, config, Some(&snapshot.id))?;
         emit_shared(
             events,
             "crawl.materialization.snapshot_sealed",
@@ -845,7 +868,7 @@ pub(crate) fn materialize_existing_spool(
         captures: Vec::new(),
         rejected_count,
         failed_count,
-        stop_reason: "page_target_reached".into(),
+        stop_reason: completion_stop_reason.unwrap_or_else(|| "page_target_reached".into()),
     };
     let snapshot = materialize_spooled(
         SpoolMaterialization {
@@ -859,6 +882,7 @@ pub(crate) fn materialize_existing_spool(
         },
         result,
     )?;
+    let snapshot = publish_sealed_snapshot(data_dir, source_run_id, config, Some(&snapshot.id))?;
     emit_shared(
         events,
         "crawl.materialization.snapshot_sealed",
@@ -868,12 +892,378 @@ pub(crate) fn materialize_existing_spool(
     Ok(snapshot)
 }
 
+fn config_for_materialization(
+    data_dir: &std::path::Path,
+    source_run_id: &str,
+    config: &Config,
+) -> Result<Config, Error> {
+    let path = data_dir.join("logs").join(format!("{source_run_id}.jsonl"));
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(config.clone()),
+        Err(error) => {
+            return Err(Error::storage(format!(
+                "open coordinator scope event log: {error}"
+            )));
+        }
+    };
+    let configured_ids: HashSet<_> = config
+        .sources
+        .iter()
+        .map(|source| source.source_id.as_str())
+        .collect();
+    let mut scheduled_ids: Option<Vec<String>> = None;
+    let mut completed_ids: Option<Vec<String>> = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| {
+            Error::storage(format!("read coordinator scope event log: {error}"))
+        })?;
+        let event: Value = serde_json::from_str(&line)
+            .map_err(|error| Error::invalid(format!("invalid coordinator scope event: {error}")))?;
+        let event_name = event.get("event").and_then(Value::as_str);
+        if event.pointer("/data/scheduled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        match event_name {
+            Some("coordinator.started") => {
+                let selected =
+                    read_source_id_array(&event, "selected_source_ids", &configured_ids)?;
+                if scheduled_ids
+                    .as_ref()
+                    .is_some_and(|previous| previous != &selected)
+                {
+                    return Err(Error::invalid(
+                        "scheduled coordinator Source selection changed during the run",
+                    ));
+                }
+                scheduled_ids = Some(selected);
+            }
+            Some("crawl.completed") => {
+                let completed =
+                    read_source_id_array(&event, "completed_source_ids", &configured_ids)?;
+                if completed_ids
+                    .as_ref()
+                    .is_some_and(|previous| previous != &completed)
+                {
+                    return Err(Error::invalid(
+                        "scheduled completed Source set changed during the run",
+                    ));
+                }
+                completed_ids = Some(completed);
+            }
+            _ => {}
+        }
+    }
+    let Some(selected_ids) = scheduled_ids else {
+        return Ok(config.clone());
+    };
+    let completed_ids = match completed_ids {
+        Some(ids) => ids,
+        None => {
+            let database_url = std::env::var("SCOUT_DATABASE_URL").map_err(|_| {
+                Error::not_ready(
+                    "scheduled completion outcome is missing from the local event log; SCOUT_DATABASE_URL is needed to recover it",
+                )
+            })?;
+            RecrawlPolicyStore::connect(&database_url)?.completed_source_ids(source_run_id)?
+        }
+    };
+    if completed_ids
+        .iter()
+        .any(|source_id| !selected_ids.contains(source_id))
+    {
+        return Err(Error::invalid(
+            "completed scheduled Source is outside the persisted run selection",
+        ));
+    }
+    if completed_ids.is_empty() {
+        return Err(Error::not_ready(
+            "scheduled Crawl has no completed Sources to materialize",
+        ));
+    }
+    let completed_ids: HashSet<_> = completed_ids.into_iter().collect();
+    let mut scoped = config.clone();
+    scoped
+        .sources
+        .retain(|source| completed_ids.contains(&source.source_id));
+    scoped.page_target = 1;
+    for source in &mut scoped.sources {
+        source.minimum_page_quota = source.minimum_page_quota.max(1);
+    }
+    Ok(scoped)
+}
+
+fn read_source_id_array(
+    event: &Value,
+    key: &str,
+    configured_ids: &HashSet<&str>,
+) -> Result<Vec<String>, Error> {
+    let values = event
+        .pointer(&format!("/data/{key}"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::invalid(format!("scheduled coordinator event has no {key}")))?;
+    let mut ids = Vec::with_capacity(values.len());
+    for value in values {
+        let source_id = value.as_str().ok_or_else(|| {
+            Error::invalid(format!("scheduled Source ID in {key} is not a string"))
+        })?;
+        if !configured_ids.contains(source_id) {
+            return Err(Error::invalid(format!(
+                "scheduled Source {source_id:?} is outside the supplied config"
+            )));
+        }
+        ids.push(source_id.to_owned());
+    }
+    ids.sort();
+    if ids.windows(2).any(|pair| pair[0] == pair[1])
+        || (key == "selected_source_ids" && ids.is_empty())
+    {
+        return Err(Error::invalid(format!(
+            "scheduled Source IDs in {key} must be unique{}",
+            if key == "selected_source_ids" {
+                " and nonempty"
+            } else {
+                ""
+            }
+        )));
+    }
+    Ok(ids)
+}
+
+#[derive(Deserialize)]
+struct SealedCrawlManifest {
+    schema_version: String,
+    run_id: String,
+    status: String,
+    completed_at_utc: String,
+    source_config_sha256: String,
+    manifest_sha256: String,
+    snapshot_id: Option<String>,
+    summary: SealedCrawlSummary,
+}
+
+#[derive(Deserialize)]
+struct SealedCrawlSummary {
+    page_count: usize,
+    alias_count: usize,
+    passage_count: usize,
+}
+
+fn publish_sealed_snapshot(
+    data_dir: &Path,
+    source_run_id: &str,
+    config: &Config,
+    expected_snapshot_id: Option<&str>,
+) -> Result<model::SnapshotResult, Error> {
+    let crawl_manifest_path = data_dir
+        .join("crawls")
+        .join(source_run_id)
+        .join("crawl-manifest.json");
+    let crawl_manifest_file = File::open(&crawl_manifest_path)
+        .map_err(|error| Error::storage(format!("open sealed Crawl manifest: {error}")))?;
+    let crawl_manifest: SealedCrawlManifest =
+        serde_json::from_reader(BufReader::new(crawl_manifest_file))
+            .map_err(|error| Error::invalid(format!("parse sealed Crawl manifest: {error}")))?;
+    if crawl_manifest.schema_version != CRAWL_SCHEMA
+        || crawl_manifest.status != "complete"
+        || crawl_manifest.run_id != source_run_id
+        || crawl_manifest.source_config_sha256 != config.digest
+        || crawl_manifest.completed_at_utc.trim().is_empty()
+    {
+        return Err(Error::invalid(
+            "sealed Crawl manifest does not match the source run and config",
+        ));
+    }
+    let snapshot_id = crawl_manifest
+        .snapshot_id
+        .as_deref()
+        .ok_or_else(|| Error::invalid("sealed Crawl manifest has no snapshot ID"))?;
+    if !snapshot_id.strip_prefix("snapshot-").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) || expected_snapshot_id.is_some_and(|expected| expected != snapshot_id)
+    {
+        return Err(Error::invalid(
+            "sealed Crawl manifest has an invalid or unexpected snapshot ID",
+        ));
+    }
+
+    let (crawl_manifest_sha256, crawl_manifest_bytes) =
+        verify_crawl_manifest_digest(&crawl_manifest_path, &crawl_manifest.manifest_sha256)?;
+    let snapshot_dir = data_dir.join("corpora").join(snapshot_id);
+    let snapshot_manifest_bytes = fs::read(snapshot_dir.join("snapshot-manifest.json"))
+        .map_err(|error| Error::storage(format!("read sealed Corpus manifest: {error}")))?;
+    let snapshot_manifest: StoredSnapshotManifest =
+        serde_json::from_slice(&snapshot_manifest_bytes)
+            .map_err(|error| Error::invalid(format!("parse sealed Corpus manifest: {error}")))?;
+    if snapshot_manifest.schema_version != SNAPSHOT_SCHEMA
+        || snapshot_manifest.snapshot_id != snapshot_id
+        || snapshot_manifest.status != "complete"
+        || snapshot_manifest.run_id != source_run_id
+        || snapshot_manifest.source_config_sha256 != config.digest
+        || snapshot_manifest.crawl_manifest_sha256 != crawl_manifest.manifest_sha256
+        || snapshot_manifest.created_at_utc.trim().is_empty()
+        || snapshot_manifest.page_count != crawl_manifest.summary.page_count
+        || snapshot_manifest.alias_count != crawl_manifest.summary.alias_count
+        || snapshot_manifest.passage_count != crawl_manifest.summary.passage_count
+    {
+        return Err(Error::invalid(
+            "sealed Corpus manifest does not match its Crawl manifest",
+        ));
+    }
+    verify_snapshot_jsonl(
+        &snapshot_dir.join("pages.jsonl"),
+        &snapshot_manifest.pages_jsonl_sha256,
+        snapshot_manifest.page_count,
+        "pages.jsonl",
+    )?;
+    verify_snapshot_jsonl(
+        &snapshot_dir.join("aliases.jsonl"),
+        &snapshot_manifest.aliases_jsonl_sha256,
+        snapshot_manifest.alias_count,
+        "aliases.jsonl",
+    )?;
+    verify_snapshot_jsonl(
+        &snapshot_dir.join("passages.jsonl"),
+        &snapshot_manifest.passages_jsonl_sha256,
+        snapshot_manifest.passage_count,
+        "passages.jsonl",
+    )?;
+
+    match std::env::var("SCOUT_DATABASE_URL") {
+        Ok(database_url) if !database_url.trim().is_empty() => {
+            let mut frontier = FrontierStore::connect(&database_url)?;
+            frontier.apply_migrations()?;
+            let _published = frontier.publish_snapshot_if_registered(SealedSnapshot {
+                crawl_run_id: source_run_id.to_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                published_at_utc: snapshot_manifest.created_at_utc,
+                snapshot_manifest_sha256: sha256_hex(&snapshot_manifest_bytes),
+                snapshot_manifest_bytes: snapshot_manifest_bytes.len() as u64,
+                crawl_manifest_sha256,
+                crawl_manifest_bytes,
+                page_count: u64::try_from(snapshot_manifest.page_count)
+                    .map_err(|_| Error::invalid("snapshot page count is too large"))?,
+                alias_count: u64::try_from(snapshot_manifest.alias_count)
+                    .map_err(|_| Error::invalid("snapshot alias count is too large"))?,
+                passage_count: u64::try_from(snapshot_manifest.passage_count)
+                    .map_err(|_| Error::invalid("snapshot passage count is too large"))?,
+            })?;
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Error::invalid("SCOUT_DATABASE_URL is not valid Unicode"));
+        }
+    }
+
+    Ok(model::SnapshotResult {
+        id: snapshot_id.to_owned(),
+        pages: snapshot_manifest.page_count,
+        aliases: snapshot_manifest.alias_count,
+    })
+}
+
+fn verify_crawl_manifest_digest(path: &Path, expected: &str) -> Result<(String, u64), Error> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(Error::invalid("sealed Crawl manifest digest is invalid"));
+    }
+    let file = File::open(path)
+        .map_err(|error| Error::storage(format!("open sealed Crawl manifest: {error}")))?;
+    let byte_size = file
+        .metadata()
+        .map_err(|error| Error::storage(format!("stat sealed Crawl manifest: {error}")))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let target = format!("\"manifest_sha256\": \"{expected}\"").into_bytes();
+    let replacement = b"\"manifest_sha256\": \"\"";
+    let mut actual_digest = Sha256::new();
+    let mut normalized_digest = Sha256::new();
+    let mut found = false;
+    let mut line = Vec::new();
+    loop {
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| Error::storage(format!("read sealed Crawl manifest: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        actual_digest.update(&line);
+        if let Some(offset) = line
+            .windows(target.len())
+            .position(|window| window == target)
+        {
+            if found {
+                return Err(Error::invalid(
+                    "sealed Crawl manifest contains duplicate digest fields",
+                ));
+            }
+            normalized_digest.update(&line[..offset]);
+            normalized_digest.update(replacement);
+            normalized_digest.update(&line[offset + target.len()..]);
+            found = true;
+        } else {
+            normalized_digest.update(&line);
+        }
+        line.clear();
+    }
+    if !found {
+        return Err(Error::invalid(
+            "sealed Crawl manifest digest field is missing",
+        ));
+    }
+    let actual = format!("{:x}", actual_digest.finalize());
+    let normalized = format!("{:x}", normalized_digest.finalize());
+    if normalized != expected {
+        return Err(Error::invalid("sealed Crawl manifest checksum mismatch"));
+    }
+    Ok((actual, byte_size))
+}
+
+fn verify_snapshot_jsonl(
+    path: &Path,
+    expected_sha256: &str,
+    expected_count: usize,
+    name: &str,
+) -> Result<(), Error> {
+    let file =
+        File::open(path).map_err(|error| Error::storage(format!("open sealed {name}: {error}")))?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut count = 0;
+    let mut line = Vec::new();
+    loop {
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| Error::storage(format!("read sealed {name}: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&line);
+        serde_json::from_slice::<Value>(&line)
+            .map_err(|error| Error::invalid(format!("invalid sealed {name} record: {error}")))?;
+        count += 1;
+        line.clear();
+    }
+    if format!("{:x}", digest.finalize()) != expected_sha256 || count != expected_count {
+        return Err(Error::invalid(format!(
+            "sealed {name} checksum or count mismatch"
+        )));
+    }
+    Ok(())
+}
+
 fn read_source_run_summary(
     data_dir: &std::path::Path,
     source_run_id: &str,
     config_path: &std::path::Path,
     config: &Config,
-) -> Result<(String, String, usize, usize), Error> {
+) -> Result<(String, String, usize, usize, Option<String>), Error> {
     let path = data_dir.join("logs").join(format!("{source_run_id}.jsonl"));
     let file = File::open(&path)
         .map_err(|error| Error::storage(format!("open source Crawl event log: {error}")))?;
@@ -881,6 +1271,8 @@ fn read_source_run_summary(
     let mut first_event = None;
     let mut recorded_config_path = None;
     let mut last_timestamp = None;
+    let mut completed_at = None;
+    let mut completed_stop_reason = None;
     let mut last_event = None;
     let mut policy_matches = false;
     let mut recorded_config_digest = None;
@@ -902,13 +1294,20 @@ fn read_source_run_summary(
             return Err(Error::invalid("source Crawl event has the wrong run ID"));
         }
         first_timestamp.get_or_insert_with(|| timestamp.clone());
-        last_timestamp = Some(timestamp);
+        last_timestamp = Some(timestamp.clone());
         let event_name = event
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default();
         first_event.get_or_insert_with(|| event_name.to_owned());
         last_event = Some(event_name.to_owned());
+        if event_name == "crawl.completed" {
+            completed_at = Some(timestamp);
+            completed_stop_reason = event
+                .pointer("/data/stop_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
         if event_name == "crawl.started" {
             recorded_config_path = event
                 .get("data")
@@ -959,12 +1358,26 @@ fn read_source_run_summary(
             "supplied Crawl config digest differs from the source Crawl config digest",
         ));
     }
+    let completed_at = completed_at
+        .or(last_timestamp)
+        .ok_or_else(|| Error::invalid("source Crawl event log is empty"))?;
     Ok((
         first_timestamp.ok_or_else(|| Error::invalid("source Crawl event log is empty"))?,
-        last_timestamp.ok_or_else(|| Error::invalid("source Crawl event log is empty"))?,
+        completed_at,
         rejected_count,
         failed_count,
+        completed_stop_reason,
     ))
+}
+
+fn materialization_target_met(
+    unique_groups: usize,
+    page_target: usize,
+    source_quotas_met: bool,
+    completion_stop_reason: Option<&str>,
+) -> bool {
+    source_quotas_met
+        && (unique_groups >= page_target || completion_stop_reason == Some("frontier_exhausted"))
 }
 
 #[cfg(test)]
@@ -1079,6 +1492,28 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("scout-corpus-{label}-{stamp}"))
+    }
+
+    #[test]
+    fn frontier_exhaustion_allows_materialization_below_target_but_not_unmet_quotas() {
+        assert!(materialization_target_met(
+            24,
+            25,
+            true,
+            Some("frontier_exhausted")
+        ));
+        assert!(!materialization_target_met(
+            24,
+            25,
+            true,
+            Some("page_target_reached")
+        ));
+        assert!(!materialization_target_met(
+            24,
+            25,
+            false,
+            Some("frontier_exhausted")
+        ));
     }
 
     #[test]

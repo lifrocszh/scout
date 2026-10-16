@@ -445,6 +445,25 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
     } else {
         None
     };
+    let modes = generation
+        .as_ref()
+        .map(|generation| generation.supported_modes())
+        .unwrap_or_else(|| {
+            vec![
+                SearchMode::Keyword,
+                SearchMode::Semantic,
+                SearchMode::Hybrid,
+            ]
+        })
+        .into_iter()
+        .map(|mode| (mode, mode.as_str()))
+        .collect::<Vec<_>>();
+    if modes.is_empty() {
+        return Err(Error::not_ready(
+            "active Generation has no searchable modes",
+        ));
+    }
+    let mode_names = modes.iter().map(|(_, name)| *name).collect::<Vec<_>>();
     let mut per_mode = BTreeMap::<String, Vec<QueryMetrics>>::new();
     let mut query_details = Vec::with_capacity(queries.len());
     for query in &queries {
@@ -459,60 +478,52 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
         }
         let (ranking, page_results) = if let Some(ranking) = supplied.get(&query.query_id) {
             (
-                vec![
-                    ranking.keyword.clone(),
-                    ranking.semantic.clone(),
-                    ranking.hybrid.clone(),
-                ],
+                modes
+                    .iter()
+                    .map(|(_, mode)| match *mode {
+                        "keyword" => ranking.keyword.clone(),
+                        "semantic" => ranking.semantic.clone(),
+                        "hybrid" => ranking.hybrid.clone(),
+                        _ => unreachable!("supported evaluation mode"),
+                    })
+                    .collect(),
                 None,
             )
         } else {
             let generation = generation
                 .as_ref()
                 .expect("generated when no supplied rankings");
-            let page_results = vec![
-                generation.search(super::generation::PageQuery {
+            let mut page_results = Vec::with_capacity(modes.len());
+            let mut ranking = Vec::with_capacity(modes.len());
+            for (mode, _) in &modes {
+                let results = generation.search(super::generation::PageQuery {
                     query: &query.query,
-                    mode: SearchMode::Keyword,
+                    mode: *mode,
                     source: corpus_source_id(Some(&query.source)),
                     limit: None,
-                })?,
-                generation.search(super::generation::PageQuery {
-                    query: &query.query,
-                    mode: SearchMode::Semantic,
-                    source: corpus_source_id(Some(&query.source)),
-                    limit: None,
-                })?,
-                generation.search(super::generation::PageQuery {
-                    query: &query.query,
-                    mode: SearchMode::Hybrid,
-                    source: corpus_source_id(Some(&query.source)),
-                    limit: None,
-                })?,
-            ];
-            let ranking = page_results
-                .iter()
-                .map(|results| {
+                })?;
+                ranking.push(
                     results
                         .pages
                         .iter()
                         .map(|page| page.page_id.clone())
-                        .collect()
-                })
-                .collect();
+                        .collect(),
+                );
+                page_results.push(results);
+            }
             (ranking, Some(page_results))
         };
-        for (mode, ids) in ["keyword", "semantic", "hybrid"].into_iter().zip(&ranking) {
+        for ((_, mode), ids) in modes.iter().zip(&ranking) {
             let refs = ids.iter().map(String::as_str).collect::<Vec<_>>();
             per_mode
-                .entry(mode.into())
+                .entry((*mode).into())
                 .or_default()
                 .push(compute_query_metrics(&refs, query_judgments)?);
         }
-        let rank_by_mode = ["keyword", "semantic", "hybrid"]
-            .into_iter()
+        let rank_by_mode = modes
+            .iter()
             .enumerate()
-            .map(|(mode_index, mode)| {
+            .map(|(mode_index, (_, mode))| {
                 let ranks = query_judgments
                     .keys()
                     .map(|page_id| {
@@ -525,27 +536,27 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
                         )
                     })
                     .collect::<BTreeMap<_, _>>();
-                (mode.to_owned(), ranks)
+                ((*mode).to_owned(), ranks)
             })
             .collect::<BTreeMap<_, _>>();
         let judged_pages = query_judgments
             .iter()
             .map(|(page_id, grade)| {
+                let target_ranks = modes
+                    .iter()
+                    .map(|(_, mode)| ((*mode).to_owned(), rank_by_mode[*mode][page_id]))
+                    .collect::<BTreeMap<_, _>>();
                 json!({
                     "page_id": page_id,
                     "grade": grade,
-                    "target_ranks": {
-                        "keyword": rank_by_mode["keyword"][page_id],
-                        "semantic": rank_by_mode["semantic"][page_id],
-                        "hybrid": rank_by_mode["hybrid"][page_id],
-                    }
+                    "target_ranks": target_ranks
                 })
             })
             .collect::<Vec<_>>();
-        let mode_results = ["keyword", "semantic", "hybrid"]
-            .into_iter()
+        let mode_results = modes
+            .iter()
             .enumerate()
-            .map(|(mode_index, mode)| {
+            .map(|(mode_index, (_, mode))| {
                 let top_10_page_ids = ranking[mode_index].iter().take(10).collect::<Vec<_>>();
                 let top_10_page_results = page_results.as_ref().map(|results| {
                     results[mode_index]
@@ -558,7 +569,7 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
                     .as_ref()
                     .map(|results| &results[mode_index].generation.generation_id);
                 (
-                    mode.to_owned(),
+                    (*mode).to_owned(),
                     json!({
                         "generation_id": generation_id,
                         "top_10_page_ids": top_10_page_ids,
@@ -587,60 +598,81 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
         .filter(|(_, query)| query.split == "held-out")
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let keyword_metrics = per_mode
-        .get("keyword")
-        .ok_or_else(|| Error::invalid("keyword metrics missing"))?;
-    let semantic_metrics = per_mode
-        .get("semantic")
-        .ok_or_else(|| Error::invalid("semantic metrics missing"))?;
-    let hybrid_metrics = per_mode
-        .get("hybrid")
-        .ok_or_else(|| Error::invalid("hybrid metrics missing"))?;
-    let keyword_held_out = held_out
-        .iter()
-        .map(|index| keyword_metrics[*index])
-        .collect::<Vec<_>>();
-    let semantic_held_out = held_out
-        .iter()
-        .map(|index| semantic_metrics[*index])
-        .collect::<Vec<_>>();
-    let hybrid_held_out = held_out
-        .iter()
-        .map(|index| hybrid_metrics[*index])
-        .collect::<Vec<_>>();
-    let keyword_aggregate = aggregate_metrics(&keyword_held_out);
-    let semantic_aggregate = aggregate_metrics(&semantic_held_out);
-    let hybrid_aggregate = aggregate_metrics(&hybrid_held_out);
-    let keyword_deltas = held_out
-        .iter()
-        .map(|index| hybrid_metrics[*index].ndcg_at_10 - keyword_metrics[*index].ndcg_at_10)
-        .collect::<Vec<_>>();
-    let semantic_deltas = held_out
-        .iter()
-        .map(|index| hybrid_metrics[*index].ndcg_at_10 - semantic_metrics[*index].ndcg_at_10)
-        .collect::<Vec<_>>();
-    let keyword_bootstrap = paired_bootstrap_ci(
-        &keyword_deltas,
-        EVALUATION_BOOTSTRAP_SEED,
-        EVALUATION_BOOTSTRAP_ITERATIONS,
-    );
-    let semantic_bootstrap = paired_bootstrap_ci(
-        &semantic_deltas,
-        EVALUATION_BOOTSTRAP_SEED.wrapping_add(1),
-        EVALUATION_BOOTSTRAP_ITERATIONS,
-    );
-    let held_out_gate = hybrid_aggregate.ndcg_at_10 >= keyword_aggregate.ndcg_at_10 + 0.03
-        && hybrid_aggregate.ndcg_at_10 >= semantic_aggregate.ndcg_at_10 + 0.03
-        && keyword_bootstrap.lower > 0.0
-        && semantic_bootstrap.lower > 0.0
-        && hybrid_aggregate.mrr_at_10 + 0.02
-            >= keyword_aggregate
-                .mrr_at_10
-                .max(semantic_aggregate.mrr_at_10)
-        && hybrid_aggregate.recall_at_100 + 0.02
-            >= keyword_aggregate
-                .recall_at_100
-                .max(semantic_aggregate.recall_at_100);
+    let held_out_gate = match (
+        per_mode.get("keyword"),
+        per_mode.get("semantic"),
+        per_mode.get("hybrid"),
+    ) {
+        (Some(keyword_metrics), Some(semantic_metrics), Some(hybrid_metrics)) => {
+            let keyword_aggregate = aggregate_metrics(
+                &held_out
+                    .iter()
+                    .map(|index| keyword_metrics[*index])
+                    .collect::<Vec<_>>(),
+            );
+            let semantic_aggregate = aggregate_metrics(
+                &held_out
+                    .iter()
+                    .map(|index| semantic_metrics[*index])
+                    .collect::<Vec<_>>(),
+            );
+            let hybrid_aggregate = aggregate_metrics(
+                &held_out
+                    .iter()
+                    .map(|index| hybrid_metrics[*index])
+                    .collect::<Vec<_>>(),
+            );
+            let keyword_deltas = held_out
+                .iter()
+                .map(|index| hybrid_metrics[*index].ndcg_at_10 - keyword_metrics[*index].ndcg_at_10)
+                .collect::<Vec<_>>();
+            let semantic_deltas = held_out
+                .iter()
+                .map(|index| {
+                    hybrid_metrics[*index].ndcg_at_10 - semantic_metrics[*index].ndcg_at_10
+                })
+                .collect::<Vec<_>>();
+            let keyword_bootstrap = paired_bootstrap_ci(
+                &keyword_deltas,
+                EVALUATION_BOOTSTRAP_SEED,
+                EVALUATION_BOOTSTRAP_ITERATIONS,
+            );
+            let semantic_bootstrap = paired_bootstrap_ci(
+                &semantic_deltas,
+                EVALUATION_BOOTSTRAP_SEED.wrapping_add(1),
+                EVALUATION_BOOTSTRAP_ITERATIONS,
+            );
+            let passed = hybrid_aggregate.ndcg_at_10 >= keyword_aggregate.ndcg_at_10 + 0.03
+                && hybrid_aggregate.ndcg_at_10 >= semantic_aggregate.ndcg_at_10 + 0.03
+                && keyword_bootstrap.lower > 0.0
+                && semantic_bootstrap.lower > 0.0
+                && hybrid_aggregate.mrr_at_10 + 0.02
+                    >= keyword_aggregate
+                        .mrr_at_10
+                        .max(semantic_aggregate.mrr_at_10)
+                && hybrid_aggregate.recall_at_100 + 0.02
+                    >= keyword_aggregate
+                        .recall_at_100
+                        .max(semantic_aggregate.recall_at_100);
+            json!({
+                "status": "evaluated",
+                "passed": passed,
+                "thresholds": {"ndcg_uplift": 0.03, "max_mrr_regression": 0.02, "max_recall_regression": 0.02, "bootstrap_ci_lower": 0.0},
+                "keyword": keyword_aggregate,
+                "semantic": semantic_aggregate,
+                "hybrid": hybrid_aggregate,
+                "hybrid_minus_keyword": keyword_bootstrap,
+                "hybrid_minus_semantic": semantic_bootstrap,
+            })
+        }
+        _ => json!({
+            "status": "not_applicable",
+            "passed": null,
+            "reason": "the hybrid relevance gate requires keyword, semantic, and hybrid scorecards",
+            "available_modes": mode_names,
+        }),
+    };
+    let held_out_gate_passed = held_out_gate.get("passed").and_then(Value::as_bool);
     let diagnostics = evaluation_diagnostics(&queries, &per_mode);
     let metrics_by_split = evaluation_split_metrics(&queries, &per_mode);
     let evaluation_id = metadata_string(&metadata, &["evaluation_id"]);
@@ -697,6 +729,7 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
         "development_query_count": queries.iter().filter(|query| query.split == "development").count(),
         "held_out_query_count": held_out.len(),
         "query_strata": query_strata,
+        "retrieval_modes": mode_names,
         "query_details": query_details,
         "metrics": aggregates,
         "metrics_by_split": metrics_by_split,
@@ -721,21 +754,13 @@ fn evaluate_package(package: &Path, data_dir: &Path, run_id: &str) -> Result<Val
             "judgment_relevance_threshold": 2,
             "bootstrap_iterations": EVALUATION_BOOTSTRAP_ITERATIONS,
         },
-        "held_out_gate": {
-            "passed": held_out_gate,
-            "thresholds": {"ndcg_uplift": 0.03, "max_mrr_regression": 0.02, "max_recall_regression": 0.02, "bootstrap_ci_lower": 0.0},
-            "keyword": keyword_aggregate,
-            "semantic": semantic_aggregate,
-            "hybrid": hybrid_aggregate,
-            "hybrid_minus_keyword": keyword_bootstrap,
-            "hybrid_minus_semantic": semantic_bootstrap,
-        },
+        "held_out_gate": held_out_gate,
         "diagnostics": diagnostics,
     });
     let report_path = output_dir.join("report.json");
     write_json(&report_path, &report)?;
     Ok(
-        json!({"report_path": report_path, "query_count": queries.len(), "held_out_gate_passed": held_out_gate}),
+        json!({"report_path": report_path, "query_count": queries.len(), "held_out_gate_passed": held_out_gate_passed}),
     )
 }
 

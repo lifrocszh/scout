@@ -5,6 +5,7 @@ use super::frontier::{
 };
 use super::proto;
 use super::protocol::{check_protocol, safe_event_url, validate_identity};
+use super::recrawl_policy::RecrawlPolicyStore;
 use super::{MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, MAX_URL_BYTES, PROTOCOL_VERSION};
 use crate::app::report_error;
 use crate::cli::{Cli, Operation};
@@ -18,6 +19,7 @@ use crate::observability::{Events, emit_shared};
 use crate::storage::new_run_id;
 use crate::url::{normalize_origin, normalize_url, origin_key};
 use ::url::Url;
+use chrono::Utc;
 use proto::coordinator_server::{Coordinator, CoordinatorServer};
 use std::collections::HashSet;
 use std::fs;
@@ -33,6 +35,7 @@ mod results;
 mod rpc;
 mod scheduling;
 mod sitemaps;
+mod storage_pressure;
 use capture::{
     StoredCapture, completion_result_sha256, eligible_discoveries, replay_accepted_captures,
     validate_capture, write_body_file,
@@ -55,6 +58,9 @@ struct CoordinatorContext {
     run_id: String,
     lease_timing: LeaseTiming,
     events: Arc<Mutex<Events>>,
+    scheduled: bool,
+    database_url: String,
+    storage_pressure: storage_pressure::StoragePressure,
 }
 
 #[derive(Default)]
@@ -70,7 +76,10 @@ struct CoordinatorSnapshot {
 }
 
 impl CoordinatorContext {
-    fn target_reached(&self, frontier: &mut FrontierStore) -> Result<bool, Status> {
+    fn completion_stop_reason(
+        &self,
+        frontier: &mut FrontierStore,
+    ) -> Result<Option<&'static str>, Status> {
         let counts = frontier
             .content_group_counts_by_source(&self.run_id)
             .map_err(to_status)?;
@@ -81,14 +90,18 @@ impl CoordinatorContext {
                     >= source.minimum_page_quota
         });
         if total >= self.config.page_target && quotas_met {
-            return Ok(true);
+            return Ok(Some("page_target_reached"));
         }
-        frontier
+        if frontier
             .run_duration_exceeded(
                 &self.run_id,
                 Duration::from_secs(self.config.max_duration_seconds),
             )
-            .map_err(to_status)
+            .map_err(to_status)?
+        {
+            return Ok(Some("duration_reached"));
+        }
+        Ok(None)
     }
 
     fn quota_satisfied_source_ids(
@@ -211,11 +224,12 @@ pub(crate) fn run_coordinator(cli: &Cli) -> i32 {
         config: config_path,
         bind,
         run_id,
+        scheduled,
     } = &cli.operation
     else {
         unreachable!("coordinator operation required")
     };
-    match coordinator_main(cli, config_path, bind, run_id.as_deref()) {
+    match coordinator_main(cli, config_path, bind, run_id.as_deref(), *scheduled) {
         Ok(()) => 0,
         Err(error) => {
             report_error(cli, &error);
@@ -229,6 +243,7 @@ fn coordinator_main(
     config_path: &std::path::Path,
     bind: &str,
     requested_run_id: Option<&str>,
+    scheduled: bool,
 ) -> Result<(), Error> {
     let address = bind
         .parse::<SocketAddr>()
@@ -296,10 +311,40 @@ fn coordinator_main(
             }
         }
     }
+    let selected_source_ids: HashSet<String> = if scheduled {
+        let mut policy = RecrawlPolicyStore::connect(&database_url)?;
+        let selected = policy.reserve_due_sources(&config, &run_id, &config.digest, Utc::now())?;
+        if selected.is_empty() {
+            println!("scout coordinator: no_sources_due");
+            return Ok(());
+        }
+        policy.record_scheduled_sources(&config, &run_id, &selected)?;
+        selected
+    } else {
+        config
+            .sources
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect()
+    };
+    let mut selected_source_ids_sorted: Vec<_> = selected_source_ids.iter().cloned().collect();
+    selected_source_ids_sorted.sort();
+    let mut run_config = config.clone();
+    run_config
+        .sources
+        .retain(|source| selected_source_ids.contains(&source.source_id));
+    if run_config.sources.is_empty() {
+        return Err(Error::not_ready("scheduled Source selection is empty"));
+    }
+    if !scheduled {
+        RecrawlPolicyStore::connect(&database_url)?.reject_scheduled_run_resume(&run_id)?;
+    }
     frontier.configure_run(&run_id, &config.digest, policy_limits, &origin_policies)?;
     // Pending RPC connections do not survive restart; active HTTP permits still do.
     frontier.clear_pending_request_waits(&run_id)?;
     let crawl_dir = cli.data_dir.join("crawls").join(&run_id);
+    let storage_pressure =
+        storage_pressure::StoragePressure::new(&cli.data_dir, config.max_body_bytes)?;
     let recovered = (|| {
         fs::create_dir_all(crawl_dir.join("bodies")).map_err(|error| {
             Error::storage(format!("create distributed crawl directory: {error}"))
@@ -351,7 +396,25 @@ fn coordinator_main(
             serde_json::json!({"crawl_run_id": run_id}),
         );
     }
-    for source in &config.sources {
+    let general_database_lanes = database::FrontierPool::lane_count()?;
+    emit_shared(
+        &events,
+        "coordinator.started",
+        "success",
+        serde_json::json!({
+            "bind": address,
+            "protocol_version": PROTOCOL_VERSION,
+            "crawl_run_id": run_id,
+            "page_target": run_config.page_target,
+            "selected_source_ids": selected_source_ids_sorted,
+            "scheduled": scheduled,
+            "database_credentials": "coordinator_only",
+            "auth": "tailnet_acl",
+            "general_database_lanes": general_database_lanes,
+            "completion_lanes": completion_lanes,
+        }),
+    );
+    for source in &run_config.sources {
         for seed in &source.seeds {
             let url = Url::parse(seed).expect("validated seed URL");
             frontier.enqueue_scheduled_url(
@@ -363,22 +426,6 @@ fn coordinator_main(
             )?;
         }
     }
-    let general_database_lanes = database::FrontierPool::lane_count()?;
-    emit_shared(
-        &events,
-        "coordinator.started",
-        "success",
-        serde_json::json!({
-            "bind": address,
-            "protocol_version": PROTOCOL_VERSION,
-            "crawl_run_id": run_id,
-            "page_target": config.page_target,
-            "database_credentials": "coordinator_only",
-            "auth": "tailnet_acl",
-            "general_database_lanes": general_database_lanes,
-            "completion_lanes": completion_lanes,
-        }),
-    );
     println!("scout coordinator listening on {address}");
     drop(frontier);
     let frontier_pool = database::FrontierPool::connect(&database_url, general_database_lanes)?;
@@ -387,10 +434,13 @@ fn coordinator_main(
         context: CoordinatorContext {
             spool,
             crawl_dir,
-            config,
+            config: run_config,
             run_id,
             lease_timing,
             events,
+            scheduled,
+            database_url,
+            storage_pressure,
         },
         memory: Mutex::new(CoordinatorMemory::default()),
         frontier: frontier_pool,

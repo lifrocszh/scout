@@ -38,6 +38,17 @@ impl FrontierStore {
         Ok(())
     }
 
+    pub(crate) fn discard_unstarted_run(&mut self, run_id: &str) -> Result<(), Error> {
+        self.client.execute(
+            "DELETE FROM scout_crawl_runs AS run
+             WHERE run.crawl_run_id=$1 AND run.status='active'
+               AND NOT EXISTS (SELECT 1 FROM scout_crawl_tasks WHERE crawl_run_id=run.crawl_run_id)
+               AND NOT EXISTS (SELECT 1 FROM scout_crawl_events WHERE crawl_run_id=run.crawl_run_id)",
+            &[&run_id],
+        ).map_err(|error| Error::storage(format!("discard empty scheduled crawl run: {error}")))?;
+        Ok(())
+    }
+
     /// Insert a run once; an existing ID is resumable only with the original digest.
     pub(crate) fn ensure_run(&mut self, run_id: &str, config_digest: &str) -> Result<bool, Error> {
         validate_digest(config_digest, "crawl config digest")?;
@@ -381,6 +392,25 @@ impl FrontierStore {
             .get(0);
         usize::try_from(count)
             .map_err(|_| Error::storage("unfinished crawl task count does not fit memory"))
+    }
+
+    pub(crate) fn unfinished_task_count_for_source(
+        &mut self,
+        run_id: &str,
+        source_id: &str,
+    ) -> Result<usize, Error> {
+        let count: i64 = self
+            .client
+            .query_one(
+                "SELECT count(*) FROM scout_crawl_tasks
+                 WHERE crawl_run_id=$1 AND source_id=$2
+                   AND status IN ('pending','leased')",
+                &[&run_id, &source_id],
+            )
+            .map_err(|error| Error::storage(format!("count unfinished Source tasks: {error}")))?
+            .get(0);
+        usize::try_from(count)
+            .map_err(|_| Error::storage("unfinished Source task count does not fit memory"))
     }
 }
 

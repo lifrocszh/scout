@@ -9,14 +9,22 @@ const MIGRATION_V3: &str = include_str!("../../migrations/0003_fair_frontier_sch
 const MIGRATION_V4: &str = include_str!("../../migrations/0004_durable_crawl_results.sql");
 const MIGRATION_V5: &str = include_str!("../../migrations/0005_shared_sitemap_discovery.sql");
 const MIGRATION_V6: &str = include_str!("../../migrations/0006_origin_request_policy.sql");
+const MIGRATION_V7: &str = include_str!("../../migrations/0007_durable_crawl_events.sql");
+const MIGRATION_V8: &str = include_str!("../../migrations/0008_approved_recrawl_policy.sql");
+const MIGRATION_V9: &str = include_str!("../../migrations/0009_analytics_retention.sql");
+const MIGRATION_V10: &str = include_str!("../../migrations/0010_analytics_history_integrity.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
-const REQUEST_MIGRATION: [(i32, &str, &str); 6] = [
+const REQUEST_MIGRATION: [(i32, &str, &str); 10] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
     (2, "shared-request-policy", MIGRATION_V2),
     (3, "fair-frontier-schedule", MIGRATION_V3),
     (4, "durable-crawl-results", MIGRATION_V4),
     (5, "shared-sitemap-discovery", MIGRATION_V5),
     (6, "origin-request-policy", MIGRATION_V6),
+    (7, "durable-crawl-events", MIGRATION_V7),
+    (8, "approved-recrawl-policy", MIGRATION_V8),
+    (9, "analytics-retention", MIGRATION_V9),
+    (10, "analytics-history-integrity", MIGRATION_V10),
 ];
 
 const CLAIM_ONE_TASK: &str = r#"
@@ -24,6 +32,12 @@ WITH scheduler AS MATERIALIZED (
     SELECT crawl_run_id, last_schedule_key
     FROM scout_crawl_task_scheduler
     WHERE crawl_run_id = $1
+    FOR UPDATE
+), active_run AS MATERIALIZED (
+    SELECT run.crawl_run_id
+    FROM scout_crawl_runs AS run
+    WHERE run.crawl_run_id = $1 AND run.status = 'active'
+      AND EXISTS (SELECT 1 FROM scheduler)
     FOR UPDATE
 ), exhausted AS (
     UPDATE scout_crawl_tasks
@@ -36,11 +50,13 @@ WITH scheduler AS MATERIALIZED (
       AND status = 'leased'
       AND lease_deadline <= clock_timestamp()
       AND task_attempt_count >= max_task_attempts
+      AND EXISTS (SELECT 1 FROM active_run)
     RETURNING task_id
 ), candidate AS (
     SELECT task.task_id, task.schedule_key
     FROM scout_crawl_tasks AS task
     CROSS JOIN scheduler
+    JOIN active_run ON active_run.crawl_run_id = scheduler.crawl_run_id
     WHERE task.crawl_run_id = $1
       AND NOT (task.source_id = ANY($4::TEXT[]))
       AND task.task_attempt_count < task.max_task_attempts
@@ -305,6 +321,9 @@ pub(crate) fn task_lease_is_live_locked(
     .map_err(|error| Error::storage(format!("recheck request task lease deadline: {error}")))
 }
 
+pub(crate) mod analytics;
+pub(crate) mod analytics_prune;
+pub(crate) mod events;
 mod request_policy;
 mod results;
 mod robots;

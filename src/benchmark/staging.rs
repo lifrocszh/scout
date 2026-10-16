@@ -303,7 +303,6 @@ fn write_replay_response(
 
 pub(super) struct FreshCrawl {
     pub(super) data_dir: PathBuf,
-    pub(super) snapshot_id: String,
 }
 
 pub(super) fn benchmark_fresh_crawl(
@@ -394,10 +393,10 @@ path_prefixes = ["/"]
         .and_then(Value::as_str)
         .ok_or_else(|| Error::storage("fresh Crawl did not publish a Corpus snapshot"))?
         .to_owned();
-    Ok(FreshCrawl {
-        data_dir: stage,
-        snapshot_id,
-    })
+    if snapshot_id.is_empty() {
+        return Err(Error::storage("fresh Crawl published an empty snapshot ID"));
+    }
+    Ok(FreshCrawl { data_dir: stage })
 }
 
 pub(super) fn benchmark_fresh_index(
@@ -406,7 +405,8 @@ pub(super) fn benchmark_fresh_index(
     snapshot_id: &str,
     run: usize,
     worker_count: usize,
-) -> Result<(PathBuf, GenerationManifest), Error> {
+    mode: BuildMode,
+) -> Result<(PathBuf, GenerationManifest, f64), Error> {
     let workspace = output_dir
         .join("staging")
         .join(format!("index-run-{run:02}-workers-{worker_count}"));
@@ -428,11 +428,13 @@ pub(super) fn benchmark_fresh_index(
         .map_err(|e| Error::storage(format!("serialize benchmark build profile: {e}")))?;
     let profile_path = workspace.join("config").join("index.toml");
     write_if_absent(&profile_path, profile_text.as_bytes())?;
-    let summary = IndexGeneration::at(&workspace).build(
-        snapshot_id,
-        &format!("benchmark-index-run-{run}-workers-{worker_count}"),
-        BuildMode::Hybrid,
-    )?;
+    let build_run_id = format!(
+        "run-{}",
+        sha256_hex(format!("{}:{run}:{worker_count}", output_dir.display()).as_bytes())
+    );
+    let build_started = std::time::Instant::now();
+    let summary = IndexGeneration::at(&workspace).build(snapshot_id, &build_run_id, mode)?;
+    let build_duration_ms = build_started.elapsed().as_secs_f64() * 1_000.0;
     let staging = PathBuf::from(
         summary["staging_path"]
             .as_str()
@@ -442,5 +444,5 @@ pub(super) fn benchmark_fresh_index(
     if manifest.corpus_snapshot_id != snapshot_id {
         return Err(Error::invalid("fresh staging snapshot mismatch"));
     }
-    Ok((staging, manifest))
+    Ok((staging, manifest, build_duration_ms))
 }

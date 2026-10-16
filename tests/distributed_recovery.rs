@@ -1,5 +1,6 @@
 //! Run with a disposable SCOUT_TEST_DATABASE_URL and --ignored --test-threads=1.
 use postgres::{Client, NoTls};
+use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -710,6 +711,147 @@ fn target_and_source_minima_stop_claims_with_bounded_overshoot() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL database"]
+fn bounded_target_with_remaining_frontier_is_page_target_reached() {
+    let fixture = Fixture::new();
+    let mut run = Run::new(
+        &fixture,
+        &[("docs", &["/one", "/two", "/three"])],
+        1,
+        0,
+        50,
+        20,
+    );
+    let _coordinator = run.coordinator("bounded-target");
+    let mut workers = vec![run.worker("bounded-target-worker", None)];
+    run.finish_workers(&mut workers);
+
+    assert!(run.count("scout_crawl_tasks", "status='pending'") >= 2);
+    let stop_reason: String = run
+        .database
+        .query_one(
+            "SELECT stop_reason FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stop_reason, "page_target_reached");
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='crawl_completed'"),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL database"]
+fn completion_waits_for_accepted_capture_spool_projection() {
+    let fixture = Fixture::new();
+    let mut run = Run::new(&fixture, &[("docs", &["/good"])], 1, 0, 50, 1);
+    let _coordinator = run.coordinator("projection");
+    let spool_path = run
+        .dir
+        .join("crawls")
+        .join(&run.id)
+        .join("capture-spool.sqlite3");
+    let projection_lock = Connection::open(spool_path).unwrap();
+    projection_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let mut workers = vec![run.worker("projection-worker", None)];
+    wait(
+        || run.count("scout_crawl_events", "event_type='capture_committed'") == 1,
+        "durable capture acceptance",
+    );
+    let projected_while_locked: i64 = projection_lock
+        .query_row("SELECT count(*) FROM captures", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(projected_while_locked, 0);
+    let mut trigger = run.worker("projection-trigger", Some(1));
+    wait(
+        || {
+            run.events().iter().any(|event| {
+                event["event"] == "worker.registered"
+                    && event["data"]["worker_id"] == "projection-trigger"
+            })
+        },
+        "projection trigger registration",
+    );
+    wait(
+        || trigger.0.try_wait().unwrap().is_some(),
+        "projection trigger response",
+    );
+    assert!(trigger.0.wait().unwrap().success());
+    let status_while_projection_blocked: String = run
+        .database
+        .query_one(
+            "SELECT status FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(status_while_projection_blocked, "active");
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='crawl_completed'"),
+        0
+    );
+
+    projection_lock.execute_batch("ROLLBACK").unwrap();
+    drop(projection_lock);
+    run.finish_workers(&mut workers);
+    let stop_reason: String = run
+        .database
+        .query_one(
+            "SELECT stop_reason FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stop_reason, "frontier_exhausted");
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='crawl_completed'"),
+        1
+    );
+    let spool = Connection::open(
+        run.dir
+            .join("crawls")
+            .join(&run.id)
+            .join("capture-spool.sqlite3"),
+    )
+    .unwrap();
+    let projected_after_release: i64 = spool
+        .query_row("SELECT count(*) FROM captures", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(projected_after_release, 1);
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL database"]
+fn exact_target_with_drained_frontier_is_frontier_exhausted() {
+    let fixture = Fixture::new();
+    let mut run = Run::new(&fixture, &[("docs", &["/good"])], 1, 0, 50, 1);
+    let _coordinator = run.coordinator("exact-target");
+    let mut workers = vec![run.worker("exact-target-worker", None)];
+    run.finish_workers(&mut workers);
+
+    assert_eq!(
+        run.count("scout_crawl_tasks", "status IN ('pending','leased')"),
+        0
+    );
+    let stop_reason: String = run
+        .database
+        .query_one(
+            "SELECT stop_reason FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stop_reason, "frontier_exhausted");
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='crawl_completed'"),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL database"]
 fn storage_integrity_failure_fails_coordinator_and_run() {
     let fixture = Fixture::new();
     let mut run = Run::new(&fixture, &[("docs", &["/good"])], 1, 0, 50, 20);
@@ -773,18 +915,57 @@ fn exhausted_source_minimum_does_not_poll_unclaimable_frontier() {
         50,
         20,
     );
+    let config_path = run.dir.join("sources.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace("max_duration_seconds = 40", "max_duration_seconds = 4"),
+    )
+    .unwrap();
     let _coordinator = run.coordinator("quota-exhausted");
     let mut workers = vec![run.worker("quota-worker", None)];
     let started = Instant::now();
-    run.finish_workers(&mut workers);
-    assert!(started.elapsed() < Duration::from_secs(10));
+    wait(
+        || run.count("scout_crawl_content_groups", "source_id='alpha'") >= 1,
+        "alpha quota capture",
+    );
     assert!(run.count("scout_crawl_tasks", "status='pending'") >= 1);
-    assert_eq!(run.count("scout_crawl_tasks", "status='leased'"), 0);
+    wait(
+        || run.count("scout_crawl_tasks", "status='leased'") == 0,
+        "in-flight quota task completion",
+    );
+    assert!(run.count("scout_crawl_tasks", "status='pending'") >= 1);
+    let drained_status: String = run
+        .database
+        .query_one(
+            "SELECT status FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(drained_status, "active");
+    assert!(workers[0].0.try_wait().unwrap().is_none());
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='crawl_completed'"),
+        0
+    );
     assert_eq!(
         run.count("scout_crawl_content_groups", "source_id='beta'"),
         0
     );
-    run.evidence("exhausted-quota", serde_json::json!({"run_id":run.id,"unmet_source":"beta","no_poll_until_duration_limit":true,"duration_ms":started.elapsed().as_millis()}));
+    run.finish_workers(&mut workers);
+    let stop_reason: String = run
+        .database
+        .query_one(
+            "SELECT stop_reason FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(stop_reason, "duration_reached");
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(run.count("scout_crawl_tasks", "status='pending'") >= 1);
+    run.evidence("exhausted-quota", serde_json::json!({"run_id":run.id,"unmet_source":"beta","active_with_quota_blocked_pending":true,"stop_reason":stop_reason,"duration_ms":started.elapsed().as_millis()}));
 }
 
 #[test]

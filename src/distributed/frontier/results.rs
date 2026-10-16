@@ -191,32 +191,51 @@ impl FrontierStore {
                 )
             })
             .unwrap_or((None, None, None, None, None));
-        tx.execute(
-            "INSERT INTO scout_crawl_task_results(
+        let accepted_at_utc: String = tx
+            .query_one(
+                "INSERT INTO scout_crawl_task_results(
                  task_id, crawl_run_id, source_id, content_hash, body_hash, body_size,
                  capture_metadata, idempotency_key, lease_owner, lease_epoch, result_sha256,
                  discovered_urls, accepted_discovered_count, rejected_discovered_count,
                  rejection_reason
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
-            &[
-                &task.task_id,
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             RETURNING to_char(accepted_at AT TIME ZONE 'UTC',
+                               'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+                &[
+                    &task.task_id,
+                    &task.crawl_run_id,
+                    &source_id,
+                    &content_hash,
+                    &body_hash,
+                    &body_size,
+                    &metadata_json,
+                    &task.idempotency_key,
+                    &task.lease_owner,
+                    &task.lease_epoch,
+                    &result_sha256,
+                    &persisted_discoveries,
+                    &accepted_discovered_count,
+                    &rejected_discovered_count,
+                    &rejection_reason,
+                ],
+            )
+            .map_err(|error| Error::storage(format!("persist accepted task result: {error}")))?
+            .get(0);
+        if let Some(capture) = capture {
+            let body_size = u64::try_from(capture.body_size)
+                .map_err(|_| Error::storage("accepted capture body size is invalid"))?;
+            super::events::persist_capture_committed(
+                &mut tx,
                 &task.crawl_run_id,
-                &source_id,
-                &content_hash,
-                &body_hash,
-                &body_size,
-                &metadata_json,
-                &task.idempotency_key,
-                &task.lease_owner,
-                &task.lease_epoch,
-                &result_sha256,
-                &persisted_discoveries,
-                &accepted_discovered_count,
-                &rejected_discovered_count,
-                &rejection_reason,
-            ],
-        )
-        .map_err(|error| Error::storage(format!("persist accepted task result: {error}")))?;
+                &capture.source_id,
+                task.task_id,
+                &accepted_at_utc,
+                result_sha256,
+                &capture.content_hash,
+                &capture.body_hash,
+                body_size,
+            )?;
+        }
         let completed = tx
             .execute(
                 "UPDATE scout_crawl_tasks

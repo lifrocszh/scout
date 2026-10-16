@@ -51,6 +51,8 @@ pub(crate) struct BenchmarkReferenceProfile {
 pub(crate) struct RawBenchmarkConfig {
     pub(crate) schema_version: Option<String>,
     pub(crate) benchmark_id: Option<String>,
+    pub(crate) index_mode: Option<BuildMode>,
+    pub(crate) search_mode: Option<String>,
     pub(crate) reference_profile: Option<String>,
     #[serde(default)]
     pub(crate) reference: Option<BenchmarkReferenceProfile>,
@@ -77,10 +79,11 @@ pub(crate) struct RawBenchmarkConfig {
     pub(crate) resource_sampling_interval_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone)]
 pub(crate) struct BenchmarkConfig {
-    pub(crate) schema_version: String,
     pub(crate) benchmark_id: String,
+    pub(crate) index_mode: BuildMode,
+    pub(crate) search_mode: SearchMode,
     pub(crate) reference_profile: String,
     pub(crate) reference: BenchmarkReferenceProfile,
     pub(crate) corpus_snapshot_id: String,
@@ -109,6 +112,8 @@ pub(crate) struct BenchmarkPlan {
     pub(crate) status: &'static str,
     pub(crate) run_id: String,
     pub(crate) benchmark_id: String,
+    pub(crate) index_mode: BuildMode,
+    pub(crate) search_mode: String,
     pub(crate) config_sha256: String,
     pub(crate) reference_profile: String,
     pub(crate) reference: BenchmarkReferenceProfile,
@@ -166,6 +171,14 @@ pub(crate) struct BenchmarkSample {
     pub(crate) duration_ms: f64,
     pub(crate) query_count: usize,
     pub(crate) qps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) indexed_passages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) semantic_vectors: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index_passages_per_second: Option<f64>,
     pub(crate) latency_ms: Option<BenchmarkDistribution>,
     pub(crate) integrity_verified: bool,
     pub(crate) artifact_path: Option<String>,
@@ -204,7 +217,7 @@ use super::evaluation::{
     validate_benchmark_queries,
 };
 use super::generation::{
-    ActiveGeneration, GenerationManifest, IndexGeneration, SearchMode, directory_bytes,
+    ActiveGeneration, BuildMode, GenerationManifest, IndexGeneration, SearchMode, directory_bytes,
     directory_digest, validate_generation,
 };
 use super::observability::Events;
@@ -305,6 +318,16 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             "benchmark corpus_snapshot_id does not match active Generation",
         ));
     }
+    if !generation
+        .supported_modes()
+        .iter()
+        .any(|mode| mode.as_str() == config.search_mode.as_str())
+    {
+        return Err(Error::invalid(format!(
+            "benchmark search mode {} is unavailable in the active Generation",
+            config.search_mode.as_str()
+        )));
+    }
     let (snapshot_dir, snapshot) =
         validate_benchmark_snapshot(data_dir, &config.corpus_snapshot_id)?;
     let generation_path = data_dir
@@ -382,6 +405,8 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
         status: "locked",
         run_id: run_id.into(),
         benchmark_id: config.benchmark_id.clone(),
+        index_mode: config.index_mode,
+        search_mode: config.search_mode.as_str().into(),
         config_sha256: sha256_hex(&config_bytes),
         reference_profile: config.reference_profile.clone(),
         reference: config.reference.clone(),
@@ -447,6 +472,10 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
             query_count: 0,
             qps: None,
+            indexed_passages: None,
+            semantic_vectors: None,
+            index_bytes: None,
+            index_passages_per_second: None,
             latency_ms: None,
             integrity_verified,
             artifact_path: Some(replay.display().to_string()),
@@ -480,6 +509,10 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             duration_ms,
             query_count: 0,
             qps: None,
+            indexed_passages: None,
+            semantic_vectors: None,
+            index_bytes: None,
+            index_passages_per_second: None,
             latency_ms: None,
             integrity_verified,
             artifact_path: Some(generation_path.display().to_string()),
@@ -495,42 +528,43 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
         } else {
             "failed"
         })?;
-        resource_sampler.set_phase("crawl-fresh-staging")?;
-        let crawl_started = Instant::now();
-        let fresh_crawl = config
-            .replay_crawl_dir
-            .as_ref()
-            .filter(|_| replay_valid)
-            .and_then(|replay| {
-                benchmark_fresh_crawl(data_dir, &output_dir, replay, run_number).ok()
+        if let Some(replay) = config.replay_crawl_dir.as_ref() {
+            resource_sampler.set_phase("crawl-fresh-staging")?;
+            let crawl_started = Instant::now();
+            let fresh_crawl = replay_valid
+                .then(|| benchmark_fresh_crawl(data_dir, &output_dir, replay, run_number).ok())
+                .flatten();
+            let crawl_stage = fresh_crawl
+                .as_ref()
+                .map(|fresh| fresh.data_dir.clone())
+                .unwrap_or_else(|| {
+                    output_dir
+                        .join("staging")
+                        .join(format!("crawl-run-{run_number:02}"))
+                });
+            let crawl_ok = fresh_crawl.is_some();
+            samples.push(BenchmarkSample {
+                phase: "crawl-fresh-staging".into(),
+                run: run_number,
+                pass: None,
+                mode: None,
+                concurrency: None,
+                worker_count: None,
+                cache_state: "recorded".into(),
+                duration_ms: crawl_started.elapsed().as_secs_f64() * 1_000.0,
+                query_count: 0,
+                qps: None,
+                indexed_passages: None,
+                semantic_vectors: None,
+                index_bytes: None,
+                index_passages_per_second: None,
+                latency_ms: None,
+                integrity_verified: crawl_ok,
+                artifact_path: Some(crawl_stage.display().to_string()),
+                status: if crawl_ok { "complete" } else { "failed" }.into(),
             });
-        let crawl_stage = fresh_crawl
-            .as_ref()
-            .map(|fresh| fresh.data_dir.clone())
-            .unwrap_or_else(|| {
-                output_dir
-                    .join("staging")
-                    .join(format!("crawl-run-{run_number:02}"))
-            });
-        let crawl_ok = fresh_crawl.is_some();
-        samples.push(BenchmarkSample {
-            phase: "crawl-fresh-staging".into(),
-            run: run_number,
-            pass: None,
-            mode: None,
-            concurrency: None,
-            worker_count: None,
-            cache_state: "recorded".into(),
-            duration_ms: crawl_started.elapsed().as_secs_f64() * 1_000.0,
-            query_count: 0,
-            qps: None,
-            latency_ms: None,
-            integrity_verified: crawl_ok,
-            artifact_path: Some(crawl_stage.display().to_string()),
-            status: if crawl_ok { "complete" } else { "failed" }.into(),
-        });
-        resource_sampler.end_phase(if crawl_ok { "complete" } else { "failed" })?;
-
+            resource_sampler.end_phase(if crawl_ok { "complete" } else { "failed" })?;
+        }
         let chosen_worker = config.index_workers[run % config.index_workers.len()];
         for &worker_count in &config.index_workers {
             let index_phase = if worker_count == chosen_worker {
@@ -539,37 +573,53 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
                 "index-worker"
             };
             resource_sampler.set_phase(index_phase)?;
-            let started = Instant::now();
             let artifact_path = output_dir
                 .join("staging")
                 .join(format!("index-run-{run_number:02}-workers-{worker_count}"));
-            let result = fresh_crawl.as_ref().map_or_else(
-                || Err(Error::storage("fresh Crawl unavailable for index staging")),
-                |fresh| {
-                    benchmark_fresh_index(
-                        &fresh.data_dir,
-                        &output_dir,
-                        &fresh.snapshot_id,
-                        run_number,
-                        worker_count,
-                    )
-                },
+            let result = benchmark_fresh_index(
+                data_dir,
+                &output_dir,
+                &config.corpus_snapshot_id,
+                run_number,
+                worker_count,
+                config.index_mode,
             );
-            let (artifact_path, integrity_verified) = match result {
-                Ok((staging, _manifest)) => (staging, true),
-                Err(_) => (artifact_path, false),
+            let (
+                artifact_path,
+                integrity_verified,
+                indexed_passages,
+                semantic_vectors,
+                index_bytes,
+                duration_ms,
+            ) = match result {
+                Ok((staging, manifest, duration_ms)) => (
+                    staging.clone(),
+                    true,
+                    Some(manifest.passage_count),
+                    Some(manifest.semantic_count),
+                    Some(directory_bytes(&staging)?),
+                    duration_ms,
+                ),
+                Err(_) => (artifact_path, false, None, None, None, 0.0),
             };
+            let index_passages_per_second = indexed_passages.and_then(|passages| {
+                (duration_ms > 0.0).then(|| passages as f64 / (duration_ms / 1_000.0))
+            });
             samples.push(BenchmarkSample {
                 phase: index_phase.into(),
                 run: run_number,
                 pass: None,
-                mode: None,
+                mode: Some(config.index_mode.as_str().into()),
                 concurrency: None,
                 worker_count: Some(worker_count),
                 cache_state: "recorded".into(),
-                duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
+                duration_ms,
                 query_count: 0,
                 qps: None,
+                indexed_passages,
+                semantic_vectors,
+                index_bytes,
+                index_passages_per_second,
                 latency_ms: None,
                 integrity_verified,
                 artifact_path: Some(artifact_path.display().to_string()),
@@ -611,6 +661,10 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             duration_ms,
             query_count: 0,
             qps: None,
+            indexed_passages: None,
+            semantic_vectors: None,
+            index_bytes: None,
+            index_passages_per_second: None,
             latency_ms: None,
             integrity_verified,
             artifact_path: Some(generation_path.display().to_string()),
@@ -632,19 +686,27 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
         for &concurrency in &config.concurrency {
             for pass in 0..config.warmup_passes {
                 resource_sampler.set_phase("serving-warmup")?;
-                let (duration_ms, latencies) =
-                    benchmark_search_pass(generation.clone(), &queries, concurrency)?;
+                let (duration_ms, latencies) = benchmark_search_pass(
+                    generation.clone(),
+                    &queries,
+                    concurrency,
+                    config.search_mode,
+                )?;
                 samples.push(BenchmarkSample {
                     phase: "serving-warmup".into(),
                     run: repetition + 1,
                     pass: Some(pass + 1),
-                    mode: Some("hybrid".into()),
+                    mode: Some(config.search_mode.as_str().into()),
                     concurrency: Some(concurrency),
                     worker_count: None,
                     cache_state: "warmup".into(),
                     duration_ms,
                     query_count: queries.len(),
                     qps: None,
+                    indexed_passages: None,
+                    semantic_vectors: None,
+                    index_bytes: None,
+                    index_passages_per_second: None,
                     latency_ms: Some(benchmark_distribution(&latencies)),
                     integrity_verified: true,
                     artifact_path: Some(generation_path.display().to_string()),
@@ -654,8 +716,12 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             }
             for pass in 0..config.measured_passes {
                 resource_sampler.set_phase("serving-warm")?;
-                let (duration_ms, latencies) =
-                    benchmark_search_pass(generation.clone(), &queries, concurrency)?;
+                let (duration_ms, latencies) = benchmark_search_pass(
+                    generation.clone(),
+                    &queries,
+                    concurrency,
+                    config.search_mode,
+                )?;
                 measured_latencies_by_concurrency
                     .entry(concurrency)
                     .or_default()
@@ -664,7 +730,7 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
                     phase: "serving-warm".into(),
                     run: repetition + 1,
                     pass: Some(pass + 1),
-                    mode: Some("hybrid".into()),
+                    mode: Some(config.search_mode.as_str().into()),
                     concurrency: Some(concurrency),
                     worker_count: None,
                     cache_state: config.cache_state.clone(),
@@ -672,6 +738,10 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
                     query_count: queries.len(),
                     qps: (duration_ms > 0.0)
                         .then(|| queries.len() as f64 / (duration_ms / 1_000.0)),
+                    indexed_passages: None,
+                    semantic_vectors: None,
+                    index_bytes: None,
+                    index_passages_per_second: None,
                     latency_ms: Some(benchmark_distribution(&latencies)),
                     integrity_verified: true,
                     artifact_path: Some(generation_path.display().to_string()),
@@ -783,6 +853,8 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
         .unwrap_or(Value::Null);
     resource_sampler.set_phase("reporting")?;
     let resource_summary = resource_sampler.finish("complete")?;
+    let resource_summary_value = serde_json::to_value(&resource_summary)
+        .map_err(|e| Error::storage(format!("serialize benchmark resource summary: {e}")))?;
     let page_cache_state = if config.cache_state == "cold" {
         "uncontrolled"
     } else {
@@ -815,8 +887,7 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             .join("resource-summary.json")
             .display()
             .to_string(),
-        resource_sampler: serde_json::to_value(&resource_summary)
-            .map_err(|e| Error::storage(format!("serialize resource summary: {e}")))?,
+        resource_sampler: resource_summary_value.clone(),
     };
     let system_value = serde_json::to_value(&system)
         .map_err(|e| Error::storage(format!("serialize benchmark system evidence: {e}")))?;
@@ -847,6 +918,25 @@ fn execute_benchmark(config_path: &Path, data_dir: &Path, run_id: &str) -> Resul
             "semantic_count": generation_info.semantic_count,
             "artifact_bytes": directory_bytes(&generation_path).unwrap_or(0),
         },
+        "indexing": {
+            "mode": config.index_mode.as_str(),
+            "passage_count": snapshot.passage_count,
+            "by_worker_count": config.index_workers.iter().map(|worker_count| {
+                let worker_samples = samples.iter().filter(|sample| {
+                    matches!(sample.phase.as_str(), "index-fresh-staging" | "index-worker")
+                        && sample.worker_count == Some(*worker_count)
+                        && sample.integrity_verified
+                }).collect::<Vec<_>>();
+                let throughput = worker_samples.iter().filter_map(|sample| sample.index_passages_per_second).collect::<Vec<_>>();
+                let artifact_bytes = worker_samples.iter().filter_map(|sample| sample.index_bytes.map(|bytes| bytes as f64)).collect::<Vec<_>>();
+                (worker_count.to_string(), json!({
+                    "sample_count": worker_samples.len(),
+                    "passages_per_second": metric_distribution(&throughput),
+                    "artifact_bytes": metric_distribution(&artifact_bytes),
+                }))
+            }).collect::<BTreeMap<_, _>>(),
+        },
+        "memory_by_phase": resource_summary_value.get("by_phase").cloned().unwrap_or(Value::Null),
         "replay_crawl": replay_crawl,
         "index_worker_levels": config.index_workers,
         "search_concurrency_levels": config.concurrency,
@@ -971,6 +1061,8 @@ fn load_benchmark_config(
             }
         })
         .unwrap_or_else(|| data_dir.join("evaluations"));
+    let index_mode = raw.index_mode.unwrap_or(BuildMode::Hybrid);
+    let search_mode = SearchMode::parse(&raw.search_mode.unwrap_or_else(|| "hybrid".into()))?;
     let resolve_path = |path: Option<PathBuf>| {
         path.map(|path| {
             if path.is_absolute() {
@@ -981,8 +1073,9 @@ fn load_benchmark_config(
         })
     };
     Ok(BenchmarkConfig {
-        schema_version,
         benchmark_id: raw.benchmark_id.unwrap_or_else(|| "scout-benchmark".into()),
+        index_mode,
+        search_mode,
         reference_profile: raw.reference_profile.unwrap_or_else(|| "local".into()),
         reference: raw.reference.unwrap_or_default(),
         corpus_snapshot_id: raw.corpus_snapshot_id.unwrap_or_default(),
@@ -1010,6 +1103,7 @@ fn benchmark_search_pass(
     generation: Arc<ActiveGeneration>,
     queries: &[EvaluationQuery],
     concurrency: usize,
+    mode: SearchMode,
 ) -> Result<(f64, Vec<f64>), Error> {
     if queries.is_empty() {
         return Ok((0.0, Vec::new()));
@@ -1036,7 +1130,7 @@ fn benchmark_search_pass(
                 let query = &queries[index];
                 let query_started = Instant::now();
                 if let Err(error) = generation.ranked_page_ids(
-                    SearchMode::Hybrid,
+                    mode,
                     &query.query,
                     corpus_source_id(Some(&query.source)),
                 ) {
@@ -1078,6 +1172,26 @@ fn benchmark_pass_evidence(sample: &BenchmarkSample) -> Value {
         "duration_ms": sample.duration_ms,
         "qps": sample.qps,
         "latency_ms": sample.latency_ms.as_ref(),
+    })
+}
+
+fn metric_distribution(values: &[f64]) -> Value {
+    if values.is_empty() {
+        return json!({"sample_count": 0});
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    let percentile = |fraction: f64| {
+        sorted[((sorted.len() as f64 * fraction).ceil() as usize)
+            .saturating_sub(1)
+            .min(sorted.len() - 1)]
+    };
+    json!({
+        "sample_count": sorted.len(),
+        "min": sorted[0],
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
+        "max": sorted[sorted.len() - 1],
     })
 }
 

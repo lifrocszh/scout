@@ -1,7 +1,10 @@
 mod coordinator;
+pub(crate) mod event_batch;
+pub(crate) mod events;
 pub(crate) mod frontier;
 mod metrics;
 mod protocol;
+pub(crate) mod recrawl_policy;
 mod worker;
 
 pub(crate) mod proto {

@@ -142,6 +142,21 @@ impl ActiveGeneration {
         }
     }
 
+    pub(crate) fn supported_modes(&self) -> Vec<SearchMode> {
+        let components = self.inner.manifest.components();
+        let mut modes = Vec::new();
+        if components.keyword {
+            modes.push(SearchMode::Keyword);
+        }
+        if components.semantic {
+            modes.push(SearchMode::Semantic);
+            if components.keyword {
+                modes.push(SearchMode::Hybrid);
+            }
+        }
+        modes
+    }
+
     pub(crate) fn search(&self, request: PageQuery<'_>) -> Result<PageResults, Error> {
         let query = request.query.trim();
         if query.is_empty() || query.chars().count() > 10_000 {

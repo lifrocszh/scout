@@ -1,5 +1,6 @@
 //! One owner serializes scheduling policy while all PostgreSQL work uses bounded connections.
 use super::rpc::{self, require_worker, task_to_proto};
+use super::storage_pressure::StoragePressureState;
 use super::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,6 +35,7 @@ struct Waits {
     permits: HashMap<String, PendingPermit>,
     initializing_permits: HashMap<String, InitialPermit>,
     next_permit_generation: u64,
+    storage_pressure: StoragePressureState,
     closed: bool,
 }
 
@@ -1021,70 +1023,124 @@ fn dispatch(
     if waits.closed {
         return Ok((true, None));
     }
-    let mut excluded = Vec::new();
-    if !waits.claims.is_empty() {
-        excluded = context.quota_satisfied_source_ids(frontier)?;
-        let stopped = context.target_reached(frontier)?
-            || frontier
-                .unfinished_task_count_excluding(&run_id, &excluded)
-                .map_err(to_status)?
-                == 0;
-        if stopped {
+    let excluded = context.quota_satisfied_source_ids(frontier)?;
+    let reached_target = context.completion_stop_reason(frontier)?;
+    let unfinished = frontier
+        .unfinished_task_count_excluding(&run_id, &[])
+        .map_err(to_status)?;
+    let live_leases = frontier
+        .live_leased_task_count_excluding(&run_id, &excluded)
+        .map_err(to_status)?;
+    let capacity = context.storage_pressure.claim_capacity(
+        &mut waits.storage_pressure,
+        live_leases,
+        result_jobs,
+        std::time::Instant::now(),
+    );
+    if let Some(report) = capacity.report.clone() {
+        events.push(Event {
+            name: "coordinator.storage_capacity",
+            level: if capacity.paused {
+                "failure"
+            } else {
+                "success"
+            },
+            data: report,
+        });
+    }
+    let stop_reason = completion_reason(reached_target, unfinished);
+    if let Some(stop_reason) = stop_reason {
+        if !waits.claims.is_empty() {
             stop_claims(context, frontier, waits, events, claim_completions)?;
-        } else {
-            let live_leases = frontier
-                .live_leased_task_count_excluding(&run_id, &excluded)
+        }
+        let completed_source_ids = if context.scheduled {
+            let counts = frontier
+                .content_group_counts_by_source(&run_id)
                 .map_err(to_status)?;
-            let mut assignment_budget =
-                max_outstanding.saturating_sub(live_leases.saturating_add(result_jobs));
-            if can_assign {
-                while assignment_budget > 0 {
-                    let Some(claim) = waits.claims.pop_front() else {
-                        break;
-                    };
-                    if claim.reply.is_closed() {
-                        continue;
-                    }
-                    let task = frontier
-                        .claim_one_excluding(
-                            &run_id,
-                            &claim.worker_id,
-                            context.lease_timing,
-                            &excluded,
-                        )
-                        .map_err(to_status)?;
-                    let Some(task) = task else {
-                        waits.claims.push_front(claim);
-                        break;
-                    };
-                    events.push(Event {
-                        name: "task.claimed",
-                        level: "success",
-                        data: serde_json::json!({"worker_id":claim.worker_id,"task_id":task.task_id,"source_id":task.source_id,"url":safe_event_url(&task.normalized_url),"lease_epoch":task.lease_epoch,"task_attempt":task.task_attempt_count}),
-                    });
-                    // A disconnected claimant cannot release its durable lease; expiry fences it.
-                    claim_completions.push(ClaimCompletion {
-                        reply: claim.reply,
-                        result: Ok(proto::ClaimOneResponse {
-                            protocol_version: PROTOCOL_VERSION,
-                            lease: Some(task_to_proto(&task)),
-                            target_reached: false,
-                            retry_after_ms: 0,
-                        }),
-                        _credit: claim._credit,
-                    });
-                    assignment_budget -= 1;
+            let mut completed = Vec::new();
+            for source in &context.config.sources {
+                let unfinished = frontier
+                    .unfinished_task_count_for_source(&run_id, &source.source_id)
+                    .map_err(to_status)?;
+                let content_groups = counts.get(&source.source_id).copied().unwrap_or_default();
+                if unfinished == 0 && content_groups >= source.minimum_page_quota.max(1) {
+                    completed.push(source.source_id.clone());
                 }
             }
-        }
-    }
-    if !waits.claims.is_empty()
-        && frontier
-            .unfinished_task_count_excluding(&run_id, &excluded)
+            completed.sort();
+            completed
+        } else {
+            Vec::new()
+        };
+        if frontier
+            .complete_run_if_quiescent(&run_id, stop_reason, &completed_source_ids, result_jobs)
             .map_err(to_status)?
-            == 0
-    {
-        stop_claims(context, frontier, waits, events, claim_completions)?;
+        {
+            if context.scheduled {
+                let mut policy =
+                    RecrawlPolicyStore::connect(&context.database_url).map_err(to_status)?;
+                policy
+                    .complete_scheduled_run(&run_id, stop_reason)
+                    .map_err(to_status)?;
+            }
+            events.push(Event {
+                name: "crawl.completed",
+                level: "success",
+                data: serde_json::json!({
+                    "crawl_run_id": run_id,
+                    "stop_reason": stop_reason,
+                    "scheduled": context.scheduled,
+                    "selected_source_ids": context.config.sources.iter()
+                        .map(|source| source.source_id.clone()).collect::<Vec<_>>(),
+                    "completed_source_ids": completed_source_ids,
+                    "durable_event": true,
+                }),
+            });
+        }
+    } else if !waits.claims.is_empty() {
+        let assignment_budget = claim_assignment_budget(
+            can_assign,
+            capacity.paused,
+            max_outstanding,
+            live_leases,
+            result_jobs,
+            capacity.max_new_claims,
+        );
+        let mut assignment_budget = assignment_budget;
+        if can_assign {
+            while assignment_budget > 0 {
+                let Some(claim) = waits.claims.pop_front() else {
+                    break;
+                };
+                if claim.reply.is_closed() {
+                    continue;
+                }
+                let task = frontier
+                    .claim_one_excluding(&run_id, &claim.worker_id, context.lease_timing, &excluded)
+                    .map_err(to_status)?;
+                let Some(task) = task else {
+                    waits.claims.push_front(claim);
+                    break;
+                };
+                events.push(Event {
+                    name: "task.claimed",
+                    level: "success",
+                    data: serde_json::json!({"worker_id":claim.worker_id,"task_id":task.task_id,"source_id":task.source_id,"url":safe_event_url(&task.normalized_url),"lease_epoch":task.lease_epoch,"task_attempt":task.task_attempt_count}),
+                });
+                // A disconnected claimant cannot release its durable lease; expiry fences it.
+                claim_completions.push(ClaimCompletion {
+                    reply: claim.reply,
+                    result: Ok(proto::ClaimOneResponse {
+                        protocol_version: PROTOCOL_VERSION,
+                        lease: Some(task_to_proto(&task)),
+                        target_reached: false,
+                        retry_after_ms: 0,
+                    }),
+                    _credit: claim._credit,
+                });
+                assignment_budget -= 1;
+            }
+        }
     }
     let mut attempted_grant = false;
     let mut retry_delay = None;
@@ -1191,7 +1247,48 @@ fn dispatch(
         (Some(retry), None) => Some(retry),
         (None, scheduled) => scheduled,
     };
+    let delay = if capacity.paused && waits.permits.is_empty() {
+        Some(super::storage_pressure::RECHECK_INTERVAL)
+    } else if capacity.paused {
+        Some(
+            delay.map_or(super::storage_pressure::RECHECK_INTERVAL, |delay| {
+                delay.min(super::storage_pressure::RECHECK_INTERVAL)
+            }),
+        )
+    } else {
+        delay
+    };
     Ok((false, delay))
+}
+
+fn completion_reason(
+    reached_target: Option<&'static str>,
+    unfinished: usize,
+) -> Option<&'static str> {
+    if reached_target == Some("duration_reached") {
+        return reached_target;
+    }
+    if unfinished == 0 {
+        Some("frontier_exhausted")
+    } else {
+        reached_target
+    }
+}
+
+fn claim_assignment_budget(
+    can_assign: bool,
+    storage_paused: bool,
+    max_outstanding: usize,
+    live_leases: usize,
+    result_jobs: usize,
+    storage_capacity: usize,
+) -> usize {
+    if !can_assign || storage_paused {
+        return 0;
+    }
+    max_outstanding
+        .saturating_sub(live_leases.saturating_add(result_jobs))
+        .min(storage_capacity)
 }
 
 #[cfg(test)]
@@ -1216,5 +1313,33 @@ mod tests {
             ReadyPermit::Initializing
         ));
         assert!(waits.initializing_permits.contains_key(&request_id));
+    }
+
+    #[test]
+    fn storage_pressure_blocks_only_new_claims_and_terminal_completion() {
+        let accepted_result_jobs = 2;
+        assert_eq!(
+            claim_assignment_budget(true, true, 32, 3, accepted_result_jobs, 4),
+            0
+        );
+        assert_eq!(
+            claim_assignment_budget(true, false, 32, 3, accepted_result_jobs, 4),
+            4
+        );
+        assert_eq!(accepted_result_jobs, 2);
+        assert_eq!(
+            completion_reason(Some("page_target_reached"), 3),
+            Some("page_target_reached")
+        );
+        assert_eq!(
+            completion_reason(Some("page_target_reached"), 0),
+            Some("frontier_exhausted")
+        );
+        assert_eq!(
+            completion_reason(Some("duration_reached"), 0),
+            Some("duration_reached")
+        );
+        assert_eq!(completion_reason(None, 1), None);
+        assert_eq!(completion_reason(None, 0), Some("frontier_exhausted"));
     }
 }

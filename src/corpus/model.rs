@@ -143,6 +143,7 @@ pub(crate) struct StoredSnapshotManifest {
     pub(crate) source_config_sha256: String,
     #[serde(default)]
     pub(crate) embedding_model: Option<String>,
+    pub(crate) created_at_utc: String,
     pub(crate) page_count: usize,
     pub(crate) alias_count: usize,
     pub(crate) pages_jsonl_sha256: String,

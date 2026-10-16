@@ -269,7 +269,7 @@ fn process(
         max_task_attempts,
         max_frontier,
         reply: _,
-        _accounting: _,
+        _accounting,
     } = job;
     let started = Instant::now();
     let acceptance = frontier
