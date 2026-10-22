@@ -26,6 +26,9 @@
 __pycache__/
 *.py[cod]
 
-# Run evidence and local planning stay outside version control.
-/docs/runs/
+# Keep raw run evidence local. Commit concise reports under docs/runs/reports/.
+/docs/runs/*
+!/docs/runs/reports/
+/docs/runs/reports/*
+!/docs/runs/reports/*.md
 /docs/portfolio-roadmap.md
