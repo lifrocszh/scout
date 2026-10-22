@@ -76,6 +76,20 @@ Modes are `keyword`, `semantic`, and `hybrid`. Results group matching passages b
 the page URL, title, heading, and snippet. Other endpoints: `GET /v1/healthz`, `GET /v1/readyz`,
 and `GET /v1/generation`.
 
+## Local demo
+
+[`demo/`](demo/) runs the full flow — crawl, snapshot, keyword index build, activate and verify,
+serve, search — behind a localhost UI. See [`demo/README.md`](demo/README.md) for detail.
+
+```bash
+python3 demo/server.py --data-dir data/real-model-10k-fast-v1 --bind 127.0.0.1:8765
+```
+
+Then open `http://127.0.0.1:8765`. The demo uses the Python 3 standard library only, adds no
+dependencies, and binds to loopback. Keyword search mode must be sent explicitly.
+
+Smoke test: `python3 demo/smoke_test.py`
+
 ## Distributed crawling
 
 For a local menu-driven workflow, run `scripts/distributed-local-ui.sh`. For direct local setup and

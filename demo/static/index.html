@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout demo</title>
+<link rel="stylesheet" href="/styles.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Scout demo</h1>
+    <div class="paths">
+      <div><span class="k">prebuilt_data_dir</span> <span class="mono trunc" id="path-prebuilt">unavailable</span></div>
+      <div><span class="k">work_dir</span> <span class="mono trunc" id="path-work">unavailable</span></div>
+    </div>
+  </div>
+  <div class="top-right">
+    <span id="live" class="live idle" aria-live="polite">&#9679; idle</span>
+    <button id="refresh" type="button">refresh now</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+<main>
+  <section class="card" aria-labelledby="h-configs">
+    <div class="card-head">
+      <h2 id="h-configs">Configs</h2>
+      <div class="row">
+        <span id="configs-note" class="note error" aria-live="polite"></span>
+        <button id="stop-crawl" type="button" disabled>stop crawl</button>
+      </div>
+    </div>
+    <div id="configs-body" class="stack"><p class="state">loading&hellip;</p></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-crawl">
+    <div class="card-head">
+      <h2 id="h-crawl">Crawl job</h2>
+      <span id="crawl-badge" class="badge idle" aria-live="polite">idle</span>
+    </div>
+    <div id="crawl-meta" class="grid"></div>
+    <pre id="crawl-log" class="log" tabindex="0" aria-label="crawl log tail">unavailable</pre>
+  </section>
+
+  <section class="card" aria-labelledby="h-snapshots">
+    <div class="card-head">
+      <h2 id="h-snapshots">Snapshots</h2>
+      <span id="snapshots-note" class="note" aria-live="polite"></span>
+    </div>
+    <div id="snapshots-body" class="table-wrap"><p class="state">loading&hellip;</p></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-build">
+    <div class="card-head">
+      <h2 id="h-build">Index build</h2>
+      <div class="row">
+        <span id="build-note" class="note" aria-live="polite"></span>
+        <span id="build-error" class="note error" aria-live="polite"></span>
+        <button id="build-btn" type="button" disabled>build keyword index</button>
+        <button id="activate-btn" type="button" hidden>activate + verify</button>
+      </div>
+    </div>
+    <div class="row">
+      <span id="build-badge" class="badge idle" aria-live="polite">idle</span>
+    </div>
+    <div id="build-phases" class="phases"></div>
+    <div id="build-meta" class="grid"></div>
+    <div id="activate-result" class="result-box" aria-live="polite"></div>
+    <pre id="build-log" class="log" tabindex="0" aria-label="build log tail">unavailable</pre>
+  </section>
+
+  <section class="card" aria-labelledby="h-serve">
+    <div class="card-head">
+      <h2 id="h-serve">Serve</h2>
+      <span id="serve-badge" class="badge idle" aria-live="polite">stopped</span>
+    </div>
+    <div id="serve-meta" class="grid"></div>
+    <form id="serve-form" class="row" novalidate>
+      <label class="field">root
+        <select id="serve-root">
+          <option value="prebuilt">prebuilt</option>
+          <option value="work">work</option>
+        </select>
+      </label>
+      <label class="field">port
+        <input id="serve-port" type="number" inputmode="numeric" min="1" max="65535" value="8788">
+      </label>
+      <button id="serve-start" type="submit">start serve</button>
+      <button id="serve-stop" type="button" disabled>stop serve</button>
+      <span id="serve-note" class="note error" aria-live="polite"></span>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="h-generation">
+    <div class="card-head">
+      <h2 id="h-generation">Generation</h2>
+    </div>
+    <div id="generation-body" class="stack" aria-live="polite"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-search">
+    <div class="card-head">
+      <h2 id="h-search">Search</h2>
+    </div>
+    <form id="search-form" class="row search-form" novalidate>
+      <label class="field grow">query
+        <input id="search-query" type="search" placeholder="ownership and borrowing" autocomplete="off">
+      </label>
+      <label class="field">source
+        <input id="search-source" type="text" placeholder="optional" autocomplete="off" size="12">
+      </label>
+      <label class="field">limit
+        <select id="search-limit">
+          <option value="3">3</option>
+          <option value="10" selected>10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+      </label>
+      <label class="field">mode
+        <select id="search-mode">
+          <option value="keyword" selected>keyword</option>
+          <option value="semantic">semantic</option>
+          <option value="hybrid">hybrid</option>
+        </select>
+      </label>
+      <button id="search-submit" type="submit">search</button>
+    </form>
+    <div id="search-status" class="note" aria-live="polite"></div>
+    <div id="search-meta" class="grid"></div>
+    <div id="search-results" class="stack"></div>
+  </section>
+</main>
+</body>
+</html>
