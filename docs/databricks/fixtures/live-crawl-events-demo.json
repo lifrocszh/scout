@@ -1,0 +1,71 @@
+{
+  "schema_version": "scout.live-crawl-event-demo.v1",
+  "description": "Expected semantics for provisional live-event reports; values are illustrative and not an ingestable event batch.",
+  "as_of_utc": "2026-10-13T12:02:00Z",
+  "active_run": {
+    "crawl_run_id": "run-demo-active",
+    "crawl_completed_at_utc": null,
+    "published_snapshot_id": null,
+    "accepted_events": [
+      {"event_id": "event-capture-1", "event_type": "capture_committed", "source_id": "docs", "committed_at_utc": "2026-10-13T12:00:00Z", "ingested_at_utc": "2026-10-13T12:00:03Z"},
+      {"event_id": "event-capture-2", "event_type": "capture_committed", "source_id": "docs", "committed_at_utc": "2026-10-13T12:01:00Z", "ingested_at_utc": "2026-10-13T12:01:02Z"}
+    ],
+    "quarantined_events": [
+      {"record_id": "event-capture-invalid", "reason": "unsupported event schema version", "excluded_from_accepted_capture_count": true}
+    ],
+    "expected_gold_provisional_crawl_run_status": {
+      "provisional_capture_count": 2,
+      "observed_source_count": 1,
+      "latest_event_age_seconds": 60,
+      "max_event_to_ingestion_latency_seconds": 3,
+      "quarantined_record_count": 1,
+      "failed_count": null,
+      "rejected_count": null,
+      "evidence_status": "provisional"
+    },
+    "expected_gold_provisional_source_capture_summary": {
+      "source_id": "docs",
+      "provisional_capture_count": 2,
+      "first_capture_committed_at_utc": "2026-10-13T12:00:00Z",
+      "latest_capture_committed_at_utc": "2026-10-13T12:01:00Z",
+      "latest_capture_age_seconds": 60
+    }
+  },
+  "batch_audit_examples": [
+    {
+      "batch_id": "batch-demo-complete",
+      "status": "complete",
+      "input_record_count": 3,
+      "ingested_record_count": 2,
+      "capture_count": 2,
+      "quarantine_count": 1,
+      "attempt_count": 1,
+      "retry_count": 0,
+      "execution_millis": 1800,
+      "processed_bytes": 8192,
+      "events_per_second": 1.11,
+      "bytes_per_second": 4551.11,
+      "pending_remote_batch": 0,
+      "serverless_runtime_seconds": null,
+      "capacity_wait_seconds": null,
+      "driver_memory_bytes": null,
+      "executor_memory_bytes": null,
+      "cpu_seconds": null
+    },
+    {
+      "batch_id": "batch-demo-retry",
+      "status": "failed",
+      "attempt_count": 2,
+      "retry_count": 1,
+      "pending_remote_batch": 1,
+      "last_error": "illustrative transient submission failure"
+    }
+  ],
+  "invariants": [
+    "A capture is provisional observation only; no Page or Passage is created.",
+    "Exact duplicate event identity is idempotent; changed payload for the same run/event identity is quarantined.",
+    "Quarantined rows are visible in audit but excluded from accepted identity and capture counts.",
+    "No event v1 failure total means NULL, not zero.",
+    "A failed remote batch remains pending while its local immutable export remains available for retry."
+  ]
+}

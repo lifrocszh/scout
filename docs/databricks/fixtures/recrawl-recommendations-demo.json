@@ -1,0 +1,162 @@
+{
+  "schema_version": "scout.recrawl-recommendation-demo.v1",
+  "description": "Deterministic logical fixture for bounded history, provisional output, and validation rejection semantics. IDs and hashes are illustrative values, not ingestable Scout artifacts.",
+  "as_of_utc": "2026-10-13T12:02:00Z",
+  "policy_settings": {
+    "expected_policy_version": "recrawl-policy.v3",
+    "minimum_interval_hours": 6.0,
+    "maximum_interval_hours": 168.0,
+    "max_adjustment_fraction": 0.25,
+    "minimum_completed_snapshots": 3,
+    "minimum_comparable_page_observations": 20,
+    "maximum_evidence_age_days": 30,
+    "maximum_provisional_event_age_seconds": 600
+  },
+  "completed_history_recommendation": {
+    "schema_version": "scout.recrawl-recommendation.v1",
+    "recommendation_id": "sha256:18bc3a3de550fbdb90cb8f81883c231ccfd26272ecb20e38e91473f7fa37cfef",
+    "idempotency_key": "sha256:18bc3a3de550fbdb90cb8f81883c231ccfd26272ecb20e38e91473f7fa37cfef",
+    "adjustment_type": "decrease",
+    "idempotency_basis": "{\"schema_version\":\"scout.recrawl-recommendation.v1\",\"generation_id\":\"demo-completed-2026-10-13\",\"source_id\":\"docs\",\"generated_at_utc\":\"2026-10-13T12:00:00Z\",\"expires_at_utc\":\"2026-10-14T12:00:00Z\",\"expected_policy_version\":\"recrawl-policy.v3\",\"interval_hours\":{\"minimum\":\"6.000\",\"current\":\"24.000\",\"maximum\":\"168.000\",\"proposed\":\"18.000\",\"adjustment\":\"-6.000\",\"adjustment_fraction\":\"-0.250000\"},\"recommendation_settings\":{\"max_adjustment_fraction\":\"0.250000\",\"minimum_completed_snapshots\":\"3\",\"minimum_comparable_page_observations\":\"20\",\"maximum_evidence_age_days\":\"30\",\"maximum_provisional_event_age_seconds\":\"600\",\"change_fraction_decrease_threshold\":\"0.250000\",\"change_fraction_increase_threshold\":\"0.020000\",\"decrease_target_multiplier\":\"0.500000\",\"increase_target_multiplier\":\"1.500000\",\"high_confidence_minimum_snapshots\":\"4\",\"high_confidence_minimum_comparable_page_observations\":\"100\"},\"evidence\":{\"status\":\"completed_history\",\"snapshot_ids\":\"snapshot-1111111111111111111111111111111111111111111111111111111111111111,snapshot-2222222222222222222222222222222222222222222222222222222222222222,snapshot-3333333333333333333333333333333333333333333333333333333333333333\",\"snapshot_refs\":[{\"snapshot_id\":\"snapshot-1111111111111111111111111111111111111111111111111111111111111111\",\"source_snapshot_manifest_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"crawl_manifest_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"observed_at_utc\":\"2026-10-10T12:00:00.000Z\"},{\"snapshot_id\":\"snapshot-2222222222222222222222222222222222222222222222222222222222222222\",\"source_snapshot_manifest_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"crawl_manifest_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"observed_at_utc\":\"2026-10-11T12:00:00.000Z\"},{\"snapshot_id\":\"snapshot-3333333333333333333333333333333333333333333333333333333333333333\",\"source_snapshot_manifest_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"crawl_manifest_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"observed_at_utc\":\"2026-10-12T12:00:00.000Z\"}],\"provisional_run_id\":\"\",\"provisional_event_ids\":\"\",\"scope_sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"extraction_contract_sha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"latest_observed_at_utc\":\"2026-10-12T12:00:00.000Z\",\"latest_capture_event_at_utc\":\"\",\"latest_run_event_at_utc\":\"\",\"comparable_page_observations\":\"100\",\"changed_page_observations\":\"30\",\"change_fraction\":\"0.300000\"}}",
+    "generation_id": "demo-completed-2026-10-13",
+    "source_id": "docs",
+    "generated_at_utc": "2026-10-13T12:00:00Z",
+    "expires_at_utc": "2026-10-14T12:00:00Z",
+    "expected_policy_version": "recrawl-policy.v3",
+    "interval_hours": {
+      "minimum": 6.0,
+      "current": 24.0,
+      "maximum": 168.0,
+      "proposed": 18.0,
+      "adjustment": -6.0,
+      "adjustment_fraction": -0.25
+    },
+    "evidence": {
+      "status": "completed_history",
+      "snapshot_refs": [
+        {
+          "snapshot_id": "snapshot-1111111111111111111111111111111111111111111111111111111111111111",
+          "source_snapshot_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "crawl_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "observed_at_utc": "2026-10-10T12:00:00.000Z"
+        },
+        {
+          "snapshot_id": "snapshot-2222222222222222222222222222222222222222222222222222222222222222",
+          "source_snapshot_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "crawl_manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "observed_at_utc": "2026-10-11T12:00:00.000Z"
+        },
+        {
+          "snapshot_id": "snapshot-3333333333333333333333333333333333333333333333333333333333333333",
+          "source_snapshot_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "crawl_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "observed_at_utc": "2026-10-12T12:00:00.000Z"
+        }
+      ],
+      "provisional_run_id": null,
+      "provisional_event_ids": [],
+      "scope_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "extraction_contract_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "latest_observed_at_utc": "2026-10-12T12:00:00.000Z",
+      "comparable_page_observations": 100,
+      "changed_page_observations": 30,
+      "change_fraction": 0.3,
+      "latest_capture_event_at_utc": null,
+      "latest_run_event_at_utc": null
+    },
+    "confidence": "medium",
+    "reasons": [
+      "deterministic change-fraction heuristic over complete, scope-compatible snapshots",
+      "at least 25% of comparable Page observations changed; shorten target by 50% before policy caps",
+      "policy bounds, adjustment fraction, or safe 0.001-hour rounding capped the raw target"
+    ]
+  },
+  "provisional_recommendation": {
+    "schema_version": "scout.recrawl-recommendation.v1",
+    "recommendation_id": "sha256:03eaf2ac5034ca3c3a6185ad7d20be0485b9c146bbc76390ba6f9424ffe43f84",
+    "idempotency_key": "sha256:03eaf2ac5034ca3c3a6185ad7d20be0485b9c146bbc76390ba6f9424ffe43f84",
+    "adjustment_type": "hold",
+    "idempotency_basis": "{\"schema_version\":\"scout.recrawl-recommendation.v1\",\"generation_id\":\"demo-active-2026-10-13\",\"source_id\":\"docs\",\"generated_at_utc\":\"2026-10-13T12:02:00Z\",\"expires_at_utc\":\"2026-10-14T12:02:00Z\",\"expected_policy_version\":\"recrawl-policy.v3\",\"interval_hours\":{\"minimum\":\"6.000\",\"current\":\"24.000\",\"maximum\":\"168.000\",\"proposed\":\"24.000\",\"adjustment\":\"0.000\",\"adjustment_fraction\":\"0.000000\"},\"recommendation_settings\":{\"max_adjustment_fraction\":\"0.250000\",\"minimum_completed_snapshots\":\"3\",\"minimum_comparable_page_observations\":\"20\",\"maximum_evidence_age_days\":\"30\",\"maximum_provisional_event_age_seconds\":\"600\",\"change_fraction_decrease_threshold\":\"0.250000\",\"change_fraction_increase_threshold\":\"0.020000\",\"decrease_target_multiplier\":\"0.500000\",\"increase_target_multiplier\":\"1.500000\",\"high_confidence_minimum_snapshots\":\"4\",\"high_confidence_minimum_comparable_page_observations\":\"100\"},\"evidence\":{\"status\":\"provisional\",\"snapshot_ids\":\"\",\"snapshot_refs\":[],\"provisional_run_id\":\"run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"provisional_event_ids\":\"capture-committed.v1:run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:17\",\"scope_sha256\":\"\",\"extraction_contract_sha256\":\"\",\"latest_observed_at_utc\":\"\",\"latest_capture_event_at_utc\":\"2026-10-13T12:01:00.000Z\",\"latest_run_event_at_utc\":\"2026-10-13T12:01:00.000Z\",\"comparable_page_observations\":\"0\",\"changed_page_observations\":\"0\",\"change_fraction\":\"\"}}",
+    "generation_id": "demo-active-2026-10-13",
+    "source_id": "docs",
+    "generated_at_utc": "2026-10-13T12:02:00Z",
+    "expires_at_utc": "2026-10-14T12:02:00Z",
+    "expected_policy_version": "recrawl-policy.v3",
+    "interval_hours": {
+      "minimum": 6.0,
+      "current": 24.0,
+      "maximum": 168.0,
+      "proposed": 24.0,
+      "adjustment": 0.0,
+      "adjustment_fraction": 0.0
+    },
+    "evidence": {
+      "status": "provisional",
+      "snapshot_refs": [],
+      "provisional_run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provisional_event_ids": [
+        "capture-committed.v1:run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:17"
+      ],
+      "scope_sha256": null,
+      "extraction_contract_sha256": null,
+      "latest_observed_at_utc": null,
+      "comparable_page_observations": 0,
+      "changed_page_observations": 0,
+      "change_fraction": null,
+      "latest_capture_event_at_utc": "2026-10-13T12:01:00.000Z",
+      "latest_run_event_at_utc": "2026-10-13T12:01:00.000Z"
+    },
+    "confidence": "provisional",
+    "reasons": [
+      "active committed captures are provisional; hold current interval until validated Page comparisons exist"
+    ]
+  },
+  "validation_rejections": [
+    {
+      "case": "invalid_bounds",
+      "example": "minimum_interval_hours=48, current_interval_hours=24, maximum_interval_hours=12",
+      "expected_status": "invalid",
+      "reason": "current interval is outside the supplied minimum and maximum"
+    },
+    {
+      "case": "stale_expiry",
+      "example": "expires_at_utc=2026-10-12T00:00:00Z; validator runs at 2026-10-13T12:02:00Z",
+      "expected_status": "stale",
+      "reason": "recommendation expiry has passed"
+    },
+    {
+      "case": "snapshot_from_other_source",
+      "example": "one selected snapshot_id exists, but its source_id is python while recommendation source_id is docs",
+      "expected_status": "out_of_scope",
+      "reason": "snapshot reference belongs to another Source"
+    },
+    {
+      "case": "capture_from_other_run",
+      "example": "selected capture event exists for a different crawl_run_id or source_id",
+      "expected_status": "out_of_scope",
+      "reason": "event reference belongs to another Source or run"
+    },
+    {
+      "case": "sparse_history",
+      "example": "three compatible, complete snapshots but only 8 comparable Page observations when policy minimum is 20",
+      "expected_status": "unsupported",
+      "reason": "too few comparable Page observations"
+    },
+    {
+      "case": "incomparable_history",
+      "example": "selected snapshots span two scope_sha256 or extraction_contract_sha256 values",
+      "expected_status": "unsupported",
+      "reason": "snapshot evidence crosses a Source scope or extraction-contract boundary"
+    },
+    {
+      "case": "terminal_provisional_run",
+      "example": "crawl_completed or corpus_snapshot_published exists at or before generated_at_utc",
+      "expected_status": "unsupported",
+      "reason": "provisional output requires an active run; use validated completed history after publication"
+    }
+  ],
+  "expected_validation_statuses": {
+    "completed_history_recommendation": "valid",
+    "provisional_recommendation": "provisional_review_required"
+  }
+}

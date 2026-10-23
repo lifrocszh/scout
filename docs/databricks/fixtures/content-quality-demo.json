@@ -1,0 +1,70 @@
+{
+  "schema_version": "scout.content-quality-demo.v1",
+  "description": "Logical report fixture; IDs are stable scenario labels and this is not an ingestable Scout package.",
+  "snapshot": "S1",
+  "snapshot_id": "snapshot-quality-demo-s1",
+  "source_id": "source-demo",
+  "pages": [
+    {
+      "page_id": "page-a",
+      "title": "Crawl report fixture",
+      "extraction_method": "semantic_main",
+      "content": "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa",
+      "passage_ids": ["passage-a"],
+      "content_sha256": "content-hash-a"
+    },
+    {
+      "page_id": "page-b",
+      "title": "Crawl report fixture extended",
+      "extraction_method": "semantic_main",
+      "content": "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec",
+      "passage_ids": ["passage-b"],
+      "content_sha256": "content-hash-b"
+    },
+    {
+      "page_id": "page-c",
+      "title": "",
+      "extraction_method": "cleaned_body",
+      "content": "short text",
+      "passage_ids": [],
+      "content_sha256": "content-hash-c"
+    }
+  ],
+  "exact_aliases": [
+    {
+      "alias_page_id": "alias-a",
+      "alias_url": "https://example.test/alias-a",
+      "source_id": "source-demo",
+      "representative_page_id": "page-a"
+    }
+  ],
+  "expected": {
+    "quality": [
+      {"page_id": "page-a", "content_char_count": 293, "passage_count": 1, "short_content_flag": false, "missing_title_flag": false, "no_passages_flag": false, "needs_review_flag": false},
+      {"page_id": "page-b", "content_char_count": 300, "passage_count": 1, "short_content_flag": false, "missing_title_flag": false, "no_passages_flag": false, "needs_review_flag": false},
+      {"page_id": "page-c", "content_char_count": 10, "passage_count": 0, "short_content_flag": true, "missing_title_flag": true, "no_passages_flag": true, "needs_review_flag": true}
+    ],
+    "exact_alias_groups": [
+      {"source_id": "source-demo", "representative_page_id": "page-a", "alias_page_ids": ["alias-a"], "alias_count": 1}
+    ],
+    "near_duplicate_candidates": [
+      {"left_page_id": "page-a", "right_page_id": "page-b", "shared_five_word_shingle_count": 16, "left_shingle_count": 16, "right_shingle_count": 17, "five_word_shingle_jaccard": 0.9411764706, "basis": "16 / 17 unique five-word shingles; distinct content hashes"}
+    ],
+    "analysis_bounds": {
+      "sample_page_limit": 200,
+      "content_char_limit_per_page": 1000,
+      "content_utf8_byte_limit_per_page": 4000,
+      "unique_five_word_shingle_row_limit": 99200,
+      "pair_hit_row_limit": 396800,
+      "unique_page_pair_limit": 19900,
+      "reported_candidate_limit": 500
+    },
+    "runtime_measurements": {
+      "query_executed": false,
+      "processing_millis": null,
+      "bytes_scanned": null,
+      "peak_memory_bytes": null,
+      "reason": "No target Databricks SQL workspace was available for measurement."
+    }
+  }
+}

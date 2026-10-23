@@ -154,6 +154,12 @@ impl Fixture {
                                         .collect::<String>()
                                 ),
                             ),
+                            "/robots.txt" if mode == "none" => (
+                                "200 OK",
+                                "text/plain",
+                                "",
+                                "User-agent: *\nDisallow: /blocked\n".into(),
+                            ),
                             "/robots.txt" => (
                                 "200 OK",
                                 "text/plain",
@@ -188,7 +194,9 @@ impl Fixture {
                                 "",
                                 format!(
                                     "<html><title>Fixture {path}</title><body><main><h1>Fixture {path}</h1><p>Unique documentation {path}. This deterministic page supplies substantial useful prose for independent process recovery and request policy validation.</p>{}</main></body></html>",
-                                    if path == "/seed" {
+                                    if mode == "none" {
+                                        ""
+                                    } else if path == "/seed" {
                                         "<a href='/slow'>Slow</a><a href='/child'>Child</a>"
                                     } else {
                                         "<a href='/blocked'>Blocked</a><a href='/deny/x'>Denied</a><a href='http://example.invalid/outside'>Outside</a>"
@@ -1225,4 +1233,712 @@ fn sitemap_last_attempt_worker_death_records_terminal_discovery_failure() {
         0
     );
     run.evidence("sitemap-exhausted-death",serde_json::json!({"run_id":run.id,"scan_attempts":1,"scan_state":"failed","owner_task_state":"failed","accepted_captures":0,"terminal_reason":"frontier/run stopped before discovery committed"}));
+}
+
+fn spawn_event_consumer(run: &Run, consumer_id: &str, label: &str) -> Process {
+    let database_url = format!("{} application_name={label}", run.database_url);
+    Process(
+        Command::new(env!("CARGO_BIN_EXE_scout"))
+            .args([
+                "events",
+                "consume",
+                "--run-id",
+                &run.id,
+                "--consumer-id",
+                consumer_id,
+                "--batch-size",
+                "1",
+                "--poll-interval-ms",
+                "20",
+                "--follow",
+                "--data-dir",
+                run.dir.to_str().unwrap(),
+            ])
+            .env("SCOUT_DATABASE_URL", database_url)
+            .stdout(Stdio::from(
+                fs::File::create(run.dir.join(format!("{label}.stdout"))).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                fs::File::create(run.dir.join(format!("{label}.stderr"))).unwrap(),
+            ))
+            .spawn()
+            .unwrap(),
+    )
+}
+
+fn consumer_events(run: &Run, label: &str) -> Vec<Value> {
+    fs::read_to_string(run.dir.join(format!("{label}.stdout")))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn wait_for_consumer_event(run: &Run, process: &mut Process, label: &str, event_id: &str) {
+    wait(
+        || {
+            let observed = consumer_events(run, label)
+                .iter()
+                .any(|event| event["data"]["event_id"] == event_id);
+            if observed {
+                return true;
+            }
+            if let Some(status) = process.0.try_wait().unwrap() {
+                panic!(
+                    "consumer {label} exited before event ({status}): {}",
+                    fs::read_to_string(run.dir.join(format!("{label}.stderr"))).unwrap_or_default()
+                );
+            }
+            false
+        },
+        "consumer event output",
+    );
+}
+
+fn wait_for_consumer_event_type(run: &Run, process: &mut Process, label: &str, event_type: &str) {
+    wait(
+        || {
+            let observed = consumer_events(run, label)
+                .iter()
+                .any(|event| event["event_type"] == event_type);
+            if observed {
+                return true;
+            }
+            if let Some(status) = process.0.try_wait().unwrap() {
+                panic!(
+                    "consumer {label} exited before terminal event ({status}): {}",
+                    fs::read_to_string(run.dir.join(format!("{label}.stderr"))).unwrap_or_default()
+                );
+            }
+            false
+        },
+        "consumer terminal event output",
+    );
+}
+
+fn wait_for_database_lock(client: &mut Client, application_name: &str, query_fragment: &str) {
+    wait(
+        || {
+            client
+                .query_one(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM pg_stat_activity
+                         WHERE application_name=$1 AND state='active'
+                           AND wait_event_type='Lock' AND query ILIKE $2
+                     )",
+                    &[&application_name, &format!("%{query_fragment}%")],
+                )
+                .unwrap()
+                .get(0)
+        },
+        "scoped PostgreSQL row-lock barrier",
+    );
+}
+
+fn wait_for_database_disconnect(client: &mut Client, application_name: &str) {
+    wait(
+        || {
+            client
+                .query_one(
+                    "SELECT NOT EXISTS(
+                         SELECT 1 FROM pg_stat_activity WHERE application_name=$1
+                     )",
+                    &[&application_name],
+                )
+                .unwrap()
+                .get(0)
+        },
+        "killed consumer database connection",
+    );
+}
+
+fn terminate_blocked_ack_backend(client: &mut Client, application_name: &str) -> i32 {
+    let pid: i32 = client
+        .query_one(
+            "SELECT pid FROM pg_stat_activity
+             WHERE application_name=$1 AND state='active'
+               AND wait_event_type='Lock'
+               AND query ILIKE '%INSERT INTO scout_crawl_event_checkpoints%'",
+            &[&application_name],
+        )
+        .expect("blocked acknowledgement backend")
+        .get(0);
+    assert!(
+        client
+            .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap()
+            .get::<_, bool>(0),
+        "failed to terminate fixture acknowledgement backend {pid}"
+    );
+    wait_for_database_disconnect(client, application_name);
+    pid
+}
+
+fn hold_ack_gate_lock(client: &mut Client, consumer_id: &str) {
+    client.batch_execute("BEGIN").unwrap();
+    let rows = client
+        .query(
+            "SELECT consumer_id FROM ticket05_ack_gate
+             WHERE consumer_id=$1 FOR UPDATE",
+            &[&consumer_id],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "expected one ack gate row for {consumer_id}");
+}
+
+fn event_acknowledged(run: &mut Run, consumer_id: &str, event_id: &str) -> bool {
+    run.database
+        .query_one(
+            "SELECT EXISTS(
+                 SELECT 1 FROM scout_crawl_event_checkpoints
+                 WHERE consumer_id=$1 AND event_id=$2 AND acknowledged_at IS NOT NULL
+             )",
+            &[&consumer_id, &event_id],
+        )
+        .unwrap()
+        .get(0)
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL database"]
+fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
+    let fixture = Fixture::with_sitemaps("none");
+    let mut run = Run::new(
+        &fixture,
+        &[("fast", &["/plain-a"]), ("slow", &["/slow"])],
+        10,
+        0,
+        0,
+        20,
+    );
+    fs::write(
+        run.dir.join("sources.toml"),
+        fs::read_to_string(run.dir.join("sources.toml"))
+            .unwrap()
+            .replace(
+                "request_timeout_seconds = 1",
+                "request_timeout_seconds = 10",
+            ),
+    )
+    .unwrap();
+    let mut coordinator = run.coordinator("events-coordinator");
+    let fast_task_id: i64 = run
+        .database
+        .query_one(
+            "SELECT task_id FROM scout_crawl_tasks
+             WHERE crawl_run_id=$1 AND source_id='fast' AND normalized_url LIKE '%/plain-a'",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    let delayed_event_id = format!("capture-committed.v1:{}:{fast_task_id}", run.id);
+
+    run.database
+        .batch_execute(
+            "DROP TRIGGER IF EXISTS ticket05_event_insert_gate_trigger ON scout_crawl_events;
+             DROP TRIGGER IF EXISTS ticket05_ack_gate_trigger ON scout_crawl_event_checkpoints;
+             DROP FUNCTION IF EXISTS ticket05_gate_event_insert();
+             DROP FUNCTION IF EXISTS ticket05_gate_checkpoint_insert();
+             DROP TABLE IF EXISTS ticket05_event_insert_gate;
+             DROP TABLE IF EXISTS ticket05_ack_gate;
+             CREATE TABLE ticket05_event_insert_gate(
+                 event_id TEXT PRIMARY KEY, delay_seconds DOUBLE PRECISION NOT NULL
+             );
+             CREATE TABLE ticket05_ack_gate(
+                 consumer_id TEXT NOT NULL, event_id TEXT
+             );
+             CREATE OR REPLACE FUNCTION ticket05_gate_event_insert() RETURNS trigger
+             LANGUAGE plpgsql AS $$ DECLARE delay DOUBLE PRECISION; BEGIN
+                 SELECT delay_seconds INTO delay FROM ticket05_event_insert_gate
+                 WHERE event_id=NEW.event_id;
+                 IF FOUND THEN PERFORM pg_sleep(delay); END IF;
+                 RETURN NEW;
+             END $$;
+             CREATE OR REPLACE FUNCTION ticket05_gate_checkpoint_insert() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+                 PERFORM 1 FROM ticket05_ack_gate
+                 WHERE consumer_id=NEW.consumer_id
+                   AND (event_id IS NULL OR event_id=NEW.event_id)
+                 LIMIT 1 FOR UPDATE;
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER ticket05_event_insert_gate_trigger
+             BEFORE INSERT ON scout_crawl_events
+             FOR EACH ROW EXECUTE FUNCTION ticket05_gate_event_insert();
+             CREATE TRIGGER ticket05_ack_gate_trigger
+             BEFORE INSERT ON scout_crawl_event_checkpoints
+             FOR EACH ROW EXECUTE FUNCTION ticket05_gate_checkpoint_insert();
+             DELETE FROM ticket05_event_insert_gate;
+             DELETE FROM ticket05_ack_gate;",
+        )
+        .unwrap();
+    run.database
+        .execute(
+            "INSERT INTO ticket05_event_insert_gate(event_id,delay_seconds) VALUES ($1,5)",
+            &[&delayed_event_id],
+        )
+        .unwrap();
+    run.database
+        .execute(
+            "INSERT INTO ticket05_ack_gate(consumer_id,event_id)
+             VALUES ('ticket05-before-ack',NULL), ('ticket05-after-ack',$1)",
+            &[&delayed_event_id],
+        )
+        .unwrap();
+    let mut before_gate_lock = Client::connect(&run.database_url, NoTls).unwrap();
+    let mut after_gate_lock = Client::connect(&run.database_url, NoTls).unwrap();
+    hold_ack_gate_lock(&mut before_gate_lock, "ticket05-before-ack");
+    hold_ack_gate_lock(&mut after_gate_lock, "ticket05-after-ack");
+
+    let mut live = spawn_event_consumer(&run, "ticket05-live", "t05-live-initial");
+    let mut before = spawn_event_consumer(&run, "ticket05-before-ack", "t05-before-initial");
+    let mut after = spawn_event_consumer(&run, "ticket05-after-ack", "t05-after-initial");
+    let mut workers = vec![
+        run.worker("events-fast-worker", Some(1)),
+        run.worker("events-slow-worker", Some(1)),
+    ];
+
+    // Verify exact insertion gate, then prove later-committing event is delivered first.
+    wait(
+        || {
+            run.database
+                .query_one(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM pg_stat_activity
+                         WHERE state='active' AND wait_event='PgSleep'
+                           AND query ILIKE '%INSERT INTO scout_crawl_events%'
+                     )",
+                    &[],
+                )
+                .unwrap()
+                .get(0)
+        },
+        "delayed capture transaction",
+    );
+    wait(
+        || {
+            let events = consumer_events(&run, "t05-live-initial");
+            events.iter().any(|event| {
+                event["event_type"] == "capture_committed"
+                    && event["data"]["event_id"] != delayed_event_id
+            })
+        },
+        "later commit consumed during delayed insert",
+    );
+    let first_live = consumer_events(&run, "t05-live-initial");
+    let early_event_id = first_live[0]["data"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(early_event_id, delayed_event_id);
+    assert_eq!(
+        run.count("scout_crawl_events", "event_type='capture_committed'"),
+        1
+    );
+    assert!(event_acknowledged(
+        &mut run,
+        "ticket05-live",
+        &early_event_id
+    ));
+    let status: String = run
+        .database
+        .query_one(
+            "SELECT status FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "active");
+
+    wait_for_consumer_event(&run, &mut before, "t05-before-initial", &early_event_id);
+    wait_for_database_lock(
+        &mut run.database,
+        "t05-before-initial",
+        "scout_crawl_event_checkpoints",
+    );
+    assert!(!event_acknowledged(
+        &mut run,
+        "ticket05-before-ack",
+        &early_event_id
+    ));
+    before.0.kill().unwrap();
+    let _ = before.0.wait().unwrap();
+    let before_ack_backend_pid =
+        terminate_blocked_ack_backend(&mut run.database, "t05-before-initial");
+    before_gate_lock.batch_execute("ROLLBACK").unwrap();
+    assert!(!event_acknowledged(
+        &mut run,
+        "ticket05-before-ack",
+        &early_event_id
+    ));
+
+    wait_for_consumer_event(&run, &mut after, "t05-after-initial", &early_event_id);
+    assert!(event_acknowledged(
+        &mut run,
+        "ticket05-after-ack",
+        &early_event_id
+    ));
+    wait_for_consumer_event(&run, &mut live, "t05-live-initial", &delayed_event_id);
+    wait_for_consumer_event(&run, &mut after, "t05-after-initial", &delayed_event_id);
+    wait_for_database_lock(
+        &mut run.database,
+        "t05-after-initial",
+        "scout_crawl_event_checkpoints",
+    );
+    assert!(event_acknowledged(
+        &mut run,
+        "ticket05-after-ack",
+        &early_event_id
+    ));
+    assert!(!event_acknowledged(
+        &mut run,
+        "ticket05-after-ack",
+        &delayed_event_id
+    ));
+    after.0.kill().unwrap();
+    let _ = after.0.wait().unwrap();
+    let after_ack_backend_pid =
+        terminate_blocked_ack_backend(&mut run.database, "t05-after-initial");
+    after_gate_lock.batch_execute("ROLLBACK").unwrap();
+    assert!(!event_acknowledged(
+        &mut run,
+        "ticket05-after-ack",
+        &delayed_event_id
+    ));
+
+    run.database
+        .batch_execute("DELETE FROM ticket05_ack_gate; DELETE FROM ticket05_event_insert_gate;")
+        .unwrap();
+    let mut before_restart =
+        spawn_event_consumer(&run, "ticket05-before-ack", "t05-before-restart");
+    let mut after_restart = spawn_event_consumer(&run, "ticket05-after-ack", "t05-after-restart");
+    wait_for_consumer_event(
+        &run,
+        &mut before_restart,
+        "t05-before-restart",
+        &early_event_id,
+    );
+    wait_for_consumer_event(
+        &run,
+        &mut after_restart,
+        "t05-after-restart",
+        &delayed_event_id,
+    );
+    assert!(
+        !consumer_events(&run, "t05-after-restart")
+            .iter()
+            .any(|event| event["data"]["event_id"] == early_event_id)
+    );
+    let restart_output = consumer_events(&run, "t05-before-restart");
+    assert!(
+        restart_output
+            .iter()
+            .any(|event| event["data"]["event_id"] == delayed_event_id)
+    );
+    assert!(event_acknowledged(
+        &mut run,
+        "ticket05-before-ack",
+        &delayed_event_id
+    ));
+
+    let early_db_row = run
+        .database
+        .query_one(
+            "SELECT created_at FROM scout_crawl_events WHERE event_id=$1",
+            &[&early_event_id],
+        )
+        .unwrap();
+    let delayed_db_row = run
+        .database
+        .query_one(
+            "SELECT created_at FROM scout_crawl_events WHERE event_id=$1",
+            &[&delayed_event_id],
+        )
+        .unwrap();
+    assert!(
+        early_db_row.get::<_, std::time::SystemTime>(0)
+            > delayed_db_row.get::<_, std::time::SystemTime>(0),
+        "capture insertion timestamp order should oppose commit and delivery order"
+    );
+
+    run.finish_workers(&mut workers);
+    let mut drain_workers = vec![
+        run.worker("events-drain-a", None),
+        run.worker("events-drain-b", None),
+    ];
+    run.finish_workers(&mut drain_workers);
+    wait(
+        || run.count("scout_crawl_events", "event_type='crawl_completed'") == 1,
+        "durable crawl completion",
+    );
+    let run_status: String = run
+        .database
+        .query_one(
+            "SELECT status FROM scout_crawl_runs WHERE crawl_run_id=$1",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(run_status, "completed");
+    let coordinator_pid = coordinator.0.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &coordinator_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait(
+        || coordinator.0.try_wait().unwrap().is_some(),
+        "coordinator graceful exit",
+    );
+    assert!(coordinator.0.wait().unwrap().success());
+    for (process, label) in [
+        (&mut live, "t05-live-initial"),
+        (&mut before_restart, "t05-before-restart"),
+        (&mut after_restart, "t05-after-restart"),
+    ] {
+        assert!(process.0.try_wait().unwrap().is_none());
+        assert!(
+            consumer_events(&run, label)
+                .iter()
+                .any(|event| event["event_type"] == "crawl_completed")
+        );
+    }
+    assert_eq!(
+        run.count(
+            "scout_crawl_events",
+            "event_type='corpus_snapshot_published'"
+        ),
+        0
+    );
+
+    let materialize = Command::new(env!("CARGO_BIN_EXE_scout"))
+        .args([
+            "crawl",
+            "--config",
+            run.dir.join("sources.toml").to_str().unwrap(),
+            "--data-dir",
+            run.dir.to_str().unwrap(),
+            "--materialize-spool",
+            &run.id,
+            "--json",
+        ])
+        .env("SCOUT_DATABASE_URL", &run.database_url)
+        .stdout(Stdio::from(
+            fs::File::create(run.dir.join("events-materialize.stdout")).unwrap(),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(run.dir.join("events-materialize.stderr")).unwrap(),
+        ))
+        .status()
+        .unwrap();
+    assert!(
+        materialize.success(),
+        "materialize failed: {}",
+        fs::read_to_string(run.dir.join("events-materialize.stderr")).unwrap()
+    );
+    wait(
+        || {
+            run.count(
+                "scout_crawl_events",
+                "event_type='corpus_snapshot_published'",
+            ) == 1
+        },
+        "snapshot publication row",
+    );
+    for (process, label, consumer_id) in [
+        (&mut live, "t05-live-initial", "ticket05-live"),
+        (
+            &mut before_restart,
+            "t05-before-restart",
+            "ticket05-before-ack",
+        ),
+        (
+            &mut after_restart,
+            "t05-after-restart",
+            "ticket05-after-ack",
+        ),
+    ] {
+        wait_for_consumer_event_type(&run, process, label, "corpus_snapshot_published");
+        let snapshot_line = consumer_events(&run, label)
+            .into_iter()
+            .find(|event| event["event_type"] == "corpus_snapshot_published")
+            .expect("snapshot event output");
+        let snapshot_event_id = snapshot_line["data"]["event_id"].as_str().unwrap();
+        wait(
+            || event_acknowledged(&mut run, consumer_id, snapshot_event_id),
+            "snapshot event acknowledgement",
+        );
+        assert!(process.0.try_wait().unwrap().is_some());
+        assert!(process.0.wait().unwrap().success());
+    }
+
+    let all_capture_events = run
+        .database
+        .query(
+            "SELECT event_id,payload_json FROM scout_crawl_events
+             WHERE crawl_run_id=$1 AND event_type='capture_committed'",
+            &[&run.id],
+        )
+        .unwrap();
+    for row in &all_capture_events {
+        let event_id: String = row.get(0);
+        let payload: Value = serde_json::from_str(&row.get::<_, String>(1)).unwrap();
+        let digest = payload["data"]["body_artifact"]["sha256"].as_str().unwrap();
+        let path = run
+            .dir
+            .join("crawls")
+            .join(&run.id)
+            .join("bodies")
+            .join(digest);
+        let body = fs::read(&path).unwrap();
+        assert_eq!(
+            body.len() as u64,
+            payload["data"]["body_artifact"]["byte_size"]
+                .as_u64()
+                .unwrap()
+        );
+        assert_eq!(format!("{:x}", Sha256::digest(&body)), digest);
+        assert_eq!(path.exists(), true, "capture body missing for {event_id}");
+    }
+    let snapshot_event_json: String = run
+        .database
+        .query_one(
+            "SELECT payload_json FROM scout_crawl_events
+             WHERE crawl_run_id=$1 AND event_type='corpus_snapshot_published'",
+            &[&run.id],
+        )
+        .unwrap()
+        .get(0);
+    let snapshot_event: Value = serde_json::from_str(&snapshot_event_json).unwrap();
+    let snapshot_id = snapshot_event["data"]["snapshot_id"].as_str().unwrap();
+    let snapshot_path = run.dir.join("corpora").join(snapshot_id);
+    let snapshot_manifest = fs::read(snapshot_path.join("snapshot-manifest.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&snapshot_manifest)),
+        snapshot_event["data"]["snapshot_manifest"]["sha256"]
+    );
+    let crawl_manifest = fs::read(
+        run.dir
+            .join("crawls")
+            .join(&run.id)
+            .join("crawl-manifest.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&crawl_manifest)),
+        snapshot_event["data"]["crawl_manifest"]["sha256"]
+    );
+    let checkpoint_rows = run
+        .database
+        .query(
+            "SELECT checkpoint.consumer_id, checkpoint.event_id,
+                    checkpoint.attempt_count, checkpoint.acknowledged_at IS NOT NULL
+             FROM scout_crawl_event_checkpoints checkpoint
+             JOIN scout_crawl_events event USING (event_id)
+             WHERE event.crawl_run_id=$1 AND checkpoint.consumer_id LIKE 'ticket05-%'
+             ORDER BY checkpoint.consumer_id, checkpoint.event_id",
+            &[&run.id],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "consumer_id": row.get::<_, String>(0),
+                "event_id": row.get::<_, String>(1),
+                "attempt_count": row.get::<_, i32>(2),
+                "acknowledged": row.get::<_, bool>(3)
+            })
+        })
+        .collect::<Vec<_>>();
+    run.database
+        .batch_execute(
+            "DROP TRIGGER ticket05_event_insert_gate_trigger ON scout_crawl_events;
+             DROP TRIGGER ticket05_ack_gate_trigger ON scout_crawl_event_checkpoints;
+             DROP FUNCTION ticket05_gate_event_insert();
+             DROP FUNCTION ticket05_gate_checkpoint_insert();
+             DROP TABLE ticket05_event_insert_gate;
+             DROP TABLE ticket05_ack_gate;",
+        )
+        .unwrap();
+
+    run.evidence(
+        "durable-events",
+        serde_json::json!({
+            "run_id": run.id,
+            "commit_race": {
+                "delayed_event_id": delayed_event_id,
+                "created_at_before_early_commit": delayed_db_row.get::<_, std::time::SystemTime>(0),
+                "delivered_first_event_id": early_event_id,
+                "created_at_after_early_commit": early_db_row.get::<_, std::time::SystemTime>(0),
+                "delivery_order_opposed_to_created_at": true,
+                "both_events_later_delivered": true
+            },
+            "crash_before_ack": {
+                "consumer_id": "ticket05-before-ack",
+                "event_id": early_event_id,
+                "flushed_before_sigkill": true,
+                "sigkill_during_blocked_ack_insert": true,
+                "ack_backend_terminated_before_gate_release": true,
+                "terminated_backend_pid": before_ack_backend_pid,
+                "ack_absent_after_kill": true,
+                "same_event_replayed_and_acked": true
+            },
+            "crash_after_ack": {
+                "consumer_id": "ticket05-after-ack",
+                "prior_ack_event_id": early_event_id,
+                "blocked_unacked_event_id": delayed_event_id,
+                "sigkill_during_ack_row_lock_wait": true,
+                "blocked_ack_backend_terminated_before_gate_release": true,
+                "terminated_backend_pid": after_ack_backend_pid,
+                "restart_did_not_replay_prior_ack": true,
+                "restart_replayed_blocked_event": true
+            },
+            "completion_and_snapshot": {
+                "run_status": run_status,
+                "coordinator_graceful_exit_before_materialize": true,
+                "followers_saw_crawl_completed_but_remained_alive": true,
+                "snapshot_event_id": snapshot_event["data"]["event_id"],
+                "snapshot_id": snapshot_id,
+                "snapshot_manifest_sha256": snapshot_event["data"]["snapshot_manifest"]["sha256"],
+                "crawl_manifest_sha256": snapshot_event["data"]["crawl_manifest"]["sha256"],
+                "capture_event_count": all_capture_events.len(),
+                "final_checkpoints": checkpoint_rows,
+                "all_body_hash_and_size_checks_passed": true,
+                "all_follow_consumers_acked_snapshot_and_exited": true
+            }
+        }),
+    );
+    if let Ok(evidence_root) = std::env::var("SCOUT_TEST_EVIDENCE_DIR") {
+        let evidence = PathBuf::from(evidence_root).join("durable-events");
+        fs::copy(
+            run.dir
+                .join("crawls")
+                .join(&run.id)
+                .join("crawl-manifest.json"),
+            evidence.join("crawl-manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            snapshot_path.join("snapshot-manifest.json"),
+            evidence.join("snapshot-manifest.json"),
+        )
+        .unwrap();
+        let body_dir = evidence.join("bodies");
+        fs::create_dir_all(&body_dir).unwrap();
+        for row in &all_capture_events {
+            let payload: Value = serde_json::from_str(&row.get::<_, String>(1)).unwrap();
+            let digest = payload["data"]["body_artifact"]["sha256"].as_str().unwrap();
+            fs::copy(
+                run.dir
+                    .join("crawls")
+                    .join(&run.id)
+                    .join("bodies")
+                    .join(digest),
+                body_dir.join(digest),
+            )
+            .unwrap();
+        }
+    }
 }

@@ -1,0 +1,57 @@
+{
+  "schema_version": "scout.analytics-recovery-scenario.v1",
+  "fixture_only": true,
+  "queue_limit_bytes": 4294967296,
+  "selected_range": {
+    "run_ids": ["run-0000000000000000000000000000000000000000000000000000000000000001"],
+    "snapshot_ids": ["snapshot-0000000000000000000000000000000000000000000000000000000000000001"],
+    "consumer_id": "databricks-backfill-2026-10",
+    "max_batches_per_run": 256
+  },
+  "recovery_steps": [
+    {
+      "interruption": "after_local_export_before_database_ack",
+      "recovery": "repeat_export_with_same_consumer_id",
+      "expected": "same_batch_id_verified_then_checkpoint_acknowledged"
+    },
+    {
+      "interruption": "partial_volume_upload",
+      "recovery": "upload_same_immutable_batch_again",
+      "expected": "new_attempt_path_marker_published_last_incomplete_attempt_ignored"
+    },
+    {
+      "interruption": "partial_delta_ingestion",
+      "recovery": "submit_same_batch_again",
+      "expected": "complete_batch_and_idempotent_logical_rows"
+    },
+    {
+      "interruption": "after_ingestion_before_snapshot_reconciliation",
+      "recovery": "rerun_reconciliation_views",
+      "expected": "same_canonical_page_ids_and_no_generation_change"
+    }
+  ],
+  "capacity_case": {
+    "queue_bytes": 4294959000,
+    "next_batch_bytes": 12000,
+    "result": "pause_before_publication_and_ack",
+    "crawl_result_acceptance_depends_on_databricks": false
+  },
+  "gap_case": {
+    "crawl_manifest_captured_page_count": 3,
+    "distinct_accepted_capture_event_count": 2,
+    "durable_task_result_count": 3,
+    "durable_capture_event_count": 2,
+    "exporter_gap_check": "fails_before_no_pending_records",
+    "missing_count": 1,
+    "expected_reconciliation": "provisional_gap_not_authoritative",
+    "safe_replay_possible": false,
+    "action": "retain_gap_evidence_and_do_not_infer_missing_capture"
+  },
+  "retention_case": {
+    "required_consumers": ["databricks-live-v1", "databricks-backfill-2026-10"],
+    "required_state": "each_consumer_complete_and_replay_window_closed",
+    "automatic_prune": false,
+    "body_artifacts_retained": true
+  },
+  "workspace_executed": false
+}

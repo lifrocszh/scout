@@ -1,0 +1,101 @@
+{
+  "schema_version": "scout.page-history-demo.v1",
+  "description": "Logical fixture for historical comparison behavior; IDs are stable scenario labels, not an ingestable Scout package.",
+  "source_id": "source-demo",
+  "arrival_order": ["S2", "S1", "S4", "S3", "S2"],
+  "snapshots": [
+    {
+      "key": "S1",
+      "snapshot_id": "snapshot-demo-s1",
+      "observed_at_utc": "2026-10-01T12:00:00Z",
+      "scope": "scope-alpha",
+      "extraction_contract": "extract-v1",
+      "stop_reason": "frontier_exhausted",
+      "failed_count": 0,
+      "rejected_count": 0,
+      "pages": [
+        {"page_id": "page-1", "content_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+        {"page_id": "page-2", "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+        {"page_id": "page-3", "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+      ],
+      "aliases": [{"alias_page_id": "alias-x", "representative_page_id": "page-3"}],
+      "evidence": []
+    },
+    {
+      "key": "S2",
+      "snapshot_id": "snapshot-demo-s2",
+      "observed_at_utc": "2026-10-02T12:00:00Z",
+      "scope": "scope-alpha",
+      "extraction_contract": "extract-v1",
+      "stop_reason": "page_target_reached",
+      "failed_count": 0,
+      "rejected_count": 0,
+      "pages": [
+        {"page_id": "page-1", "content_sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+        {"page_id": "page-3", "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+      ],
+      "aliases": [{"alias_page_id": "alias-x", "representative_page_id": "page-1"}],
+      "evidence": []
+    },
+    {
+      "key": "S3",
+      "snapshot_id": "snapshot-demo-s3",
+      "observed_at_utc": "2026-10-03T12:00:00Z",
+      "scope": "scope-alpha",
+      "extraction_contract": "extract-v1",
+      "stop_reason": "frontier_exhausted",
+      "failed_count": 0,
+      "rejected_count": 0,
+      "pages": [
+        {"page_id": "page-1", "content_sha256": "4444444444444444444444444444444444444444444444444444444444444444"}
+      ],
+      "aliases": [{"alias_page_id": "alias-x", "representative_page_id": "page-1"}],
+      "evidence": [
+        {"schema_version": "scout.page-tombstone.v1", "page_id": "page-2", "scope": "scope-alpha", "timestamp": "2026-10-03T11:55:00Z"},
+        {"schema_version": "scout.source-coverage-assertion.v1", "complete": true, "expected_page_count": 1, "scope": "scope-alpha", "timestamp": "2026-10-03T11:56:00Z"}
+      ]
+    },
+    {
+      "key": "S4",
+      "snapshot_id": "snapshot-demo-s4",
+      "observed_at_utc": "2026-10-04T12:00:00Z",
+      "scope": "scope-beta",
+      "extraction_contract": "extract-v1",
+      "stop_reason": "frontier_exhausted",
+      "failed_count": 0,
+      "rejected_count": 0,
+      "pages": [
+        {"page_id": "page-1", "content_sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+        {"page_id": "page-3", "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+      ],
+      "aliases": [{"alias_page_id": "alias-x", "representative_page_id": "page-1"}],
+      "evidence": []
+    }
+  ],
+  "expected": {
+    "source_comparison_status": {
+      "S1": "first_observation",
+      "S2": "compatible",
+      "S3": "compatible",
+      "S4": "incompatible_scope_or_extraction_contract"
+    },
+    "page_changes": [
+      {"snapshot": "S1", "page_id": "page-1", "status": "new"},
+      {"snapshot": "S2", "page_id": "page-1", "status": "changed", "interval": ["2026-10-01T12:00:00Z", "2026-10-02T12:00:00Z"]},
+      {"snapshot": "S3", "page_id": "page-1", "status": "unchanged"},
+      {"snapshot": "S4", "page_id": "page-1", "status": "new"}
+    ],
+    "page_presence": [
+      {"snapshot": "S2", "page_id": "page-2", "status": "unobserved", "reason": "bounded_page_target_reached"},
+      {"snapshot": "S3", "page_id": "page-2", "status": "removed", "basis": "explicit_tombstone"},
+      {"snapshot": "S3", "page_id": "page-3", "status": "removed", "basis": "complete_scope_assertion"}
+    ],
+    "alias_representatives": [
+      {"snapshot": "S1", "alias_page_id": "alias-x", "representative_page_id": "page-3"},
+      {"snapshot": "S2", "alias_page_id": "alias-x", "representative_page_id": "page-1"}
+    ],
+    "deduplicated_snapshot_page_counts": {"S1": 3, "S2": 2, "S3": 1, "S4": 2},
+    "replay": "S2 remains one logical observation after its second arrival.",
+    "out_of_order": "Final views sort S1, S2, S3, S4 by observation time despite arrival order."
+  }
+}

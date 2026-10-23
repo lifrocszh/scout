@@ -1,0 +1,131 @@
+{
+  "schema_version": "scout.crawl-report-demo.v1",
+  "description": "Logical expected values for crawl-report views; IDs are scenario labels and this is not an ingestable Scout batch.",
+  "as_of_utc": "2026-10-05T00:00:00Z",
+  "source_id": "source-demo",
+  "runs": [
+    {
+      "snapshot": "S1",
+      "snapshot_id": "snapshot-demo-s1",
+      "scope": "scope-alpha",
+      "source_config_sha256": "config-demo-alpha",
+      "started_at_utc": "2026-10-01T11:59:00Z",
+      "completed_at_utc": "2026-10-01T12:00:00Z",
+      "stop_reason": "frontier_exhausted",
+      "target_page_count": 3,
+      "captured_page_count": 3,
+      "page_count": 3,
+      "failed_count": 0,
+      "rejected_count": 0,
+      "allowed_urls": null,
+      "complete_assertion": null,
+      "operational_log_present": false,
+      "operational_events": null
+    },
+    {
+      "snapshot": "S2",
+      "snapshot_id": "snapshot-demo-s2",
+      "scope": "scope-alpha",
+      "source_config_sha256": "config-demo-alpha",
+      "started_at_utc": "2026-10-02T11:58:00Z",
+      "completed_at_utc": "2026-10-02T12:00:00Z",
+      "stop_reason": "page_target_reached",
+      "target_page_count": 3,
+      "captured_page_count": 2,
+      "page_count": 2,
+      "failed_count": 0,
+      "rejected_count": 0,
+      "allowed_urls": null,
+      "complete_assertion": null,
+      "operational_log_present": true,
+      "operational_events": {
+        "task.claimed": 4,
+        "capture.accepted": 2,
+        "worker.task_failed": 1,
+        "page.rejected": 0
+      }
+    },
+    {
+      "snapshot": "S3",
+      "snapshot_id": "snapshot-demo-s3",
+      "scope": "scope-alpha",
+      "source_config_sha256": "config-demo-alpha",
+      "started_at_utc": "2026-10-03T11:58:00Z",
+      "completed_at_utc": "2026-10-03T12:00:00Z",
+      "stop_reason": "frontier_exhausted",
+      "target_page_count": 3,
+      "captured_page_count": 1,
+      "page_count": 1,
+      "failed_count": 0,
+      "rejected_count": 0,
+      "allowed_urls": ["https://example.test/page-1"],
+      "complete_assertion": {
+        "complete": true
+      },
+      "operational_log_present": true,
+      "operational_events": {
+        "task.claimed": 2,
+        "capture.accepted": 1,
+        "worker.task_failed": 0,
+        "page.rejected": 0
+      },
+      "synthetic_history_events_excluded": 1
+    },
+    {
+      "snapshot": "S4",
+      "snapshot_id": "snapshot-demo-s4",
+      "scope": "scope-beta",
+      "source_config_sha256": "config-demo-beta",
+      "started_at_utc": "2026-10-04T11:59:00Z",
+      "completed_at_utc": "2026-10-04T12:00:00Z",
+      "stop_reason": "frontier_exhausted",
+      "target_page_count": 3,
+      "captured_page_count": 2,
+      "page_count": 2,
+      "failed_count": 0,
+      "rejected_count": 0,
+      "allowed_urls": null,
+      "complete_assertion": null,
+      "operational_log_present": false,
+      "operational_events": null
+    }
+  ],
+  "expected": {
+    "coverage": {
+      "S1": {"status": "unknown", "numerator": null, "denominator": null, "percent": null},
+      "S2": {"status": "unknown", "numerator": null, "denominator": null, "percent": null},
+      "S3": {"status": "attested_complete", "basis": "attested_complete_no_denominator", "numerator": null, "denominator": null, "percent": null},
+      "S4": {"status": "unknown", "numerator": null, "denominator": null, "percent": null}
+    },
+    "page_freshness_as_of_utc": [
+      {"page_id": "page-1", "last_observed_snapshot": "S4", "age_days": 1, "current_presence_status": "observed_in_latest_source_snapshot"},
+      {"page_id": "page-2", "last_observed_snapshot": "S1", "age_days": 4, "current_presence_status": "scope_or_extraction_contract_changed"},
+      {"page_id": "page-3", "last_observed_snapshot": "S4", "age_days": 1, "current_presence_status": "observed_in_latest_source_snapshot"}
+    ],
+    "october_change_frequency": {
+      "page_observations": 8,
+      "new_page_observations": 5,
+      "changed_page_observations": 1,
+      "unchanged_page_observations": 2,
+      "comparable_page_observations": 3,
+      "changed_percent_of_comparable_pages": 33.333333
+    },
+    "effectiveness": {
+      "S1": {"task_claim_attempts": null, "captured_pages_per_task_claim": null, "pages_per_minute": 3.0, "attempt_denominator_status": "operational log absent"},
+      "S2": {"task_claim_attempts": 4, "captured_pages_per_task_claim": 0.5, "fetch_failures_per_task_claim": 0.0, "worker_task_failure_event_count": 1, "pages_per_minute": 1.0},
+      "S3": {"task_claim_attempts": 2, "captured_pages_per_task_claim": 0.5, "fetch_failures_per_task_claim": 0.0, "pages_per_minute": 0.5},
+      "S4": {"task_claim_attempts": null, "captured_pages_per_task_claim": null, "pages_per_minute": 2.0, "attempt_denominator_status": "operational log absent"}
+    },
+    "operational_error_rates": {
+      "S1": {"status": "missing", "observed_operational_event_count": null, "failed_outcome_percent": null},
+      "S2": {"observed_operational_event_count": 7, "failed_outcome_event_count": 1, "failed_outcome_percent": 14.285714, "fetch_failed_event_count": 0, "worker_task_failed_event_count": 1, "page_rejected_event_count": 0},
+      "S3": {"observed_operational_event_count": 3, "failed_outcome_event_count": 0, "failed_outcome_percent": 0.0},
+      "S4": {"status": "missing", "observed_operational_event_count": null, "failed_outcome_percent": null}
+    },
+    "replay_metrics": {
+      "first_attempt": {"input_record_count": 10, "bronze_candidate_new_rows": 10, "silver_candidate_new_rows": 10},
+      "same_batch_replay": {"input_record_count": 10, "bronze_candidate_new_rows": 0, "silver_candidate_new_rows": 0, "bronze_existing_rows": 10, "silver_existing_rows": 10},
+      "logical_snapshot_page_count_after_replay": 2
+    }
+  }
+}
