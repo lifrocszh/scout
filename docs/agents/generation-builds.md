@@ -26,13 +26,19 @@ MiniLM remains a supported comparison model.
 
 Evidence is currently limited to a verified 2k BGE GPU Generation and three
 repeatable 2k builds ([Run 13](../runs/run-13-openvino-gpu-2k-repeatability-2026-09-27.md));
-the relevance labels remain provisional. Complete the 10k checkpoint before
-drawing conclusions at that scale; ADR-0001 still requires a real 100,000-Page
-Corpus for the MVP benchmark baseline.
+the relevance labels remain provisional. Complete the 10k build checkpoint before
+drawing conclusions at that scale; separately, ADR-0001 sets the MVP performance
+baseline at a real 10,000-Page Corpus with the fixed 64-query Evaluation package.
 CPU/GPU build-time ratios remain descriptive because the recorded CPU runs
 predate the WSL kernel update ([Run 12 comparison](../runs/run-12-minilm-openvino-gpu-2k-2026-09-26.md)).
 
 ## Safe default
+
+`scout index build --corpus <snapshot-id> --data-dir data` defaults to
+keyword-only. This builds the Tantivy index without initializing an embedding
+runtime, embedding Passages, or creating vector indexes. Keyword search remains
+available with `mode=keyword`; semantic and hybrid search need Generations that
+include those components.
 
 On native WSL, the portable CPU default uses one worker with the low-memory
 FastEmbed profile:
@@ -92,7 +98,7 @@ verifies the Generation.
 ## Resume and embedding reuse
 
 For an interrupted build, resume only with the original `run-<sha256>` ID and the same
-`--mode` used for that build. The example resumes a hybrid build:
+`--mode` used for that build. The example explicitly resumes a hybrid build:
 
 ```sh
 scout index build --corpus <snapshot-id> --resume <run-id> --data-dir data --mode hybrid
