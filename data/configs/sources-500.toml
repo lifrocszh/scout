@@ -1,7 +1,7 @@
 schema_version = "scout.sources.v1"
 contact_url = "https://github.com/lifrocszh/scout"
 user_agent = "Scout/0.1 (+https://github.com/lifrocszh/scout)"
-page_target = 500
+page_target = 1000
 
 # Four sources share the target evenly. Per-origin pacing limits each site to
 # at most four request starts per second; bounded retries and frontier cap work.
