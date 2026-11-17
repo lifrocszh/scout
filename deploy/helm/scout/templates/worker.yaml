@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout.fullname" . }}-worker
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # A new crawl run restarts the workers so they register with it.
+        scout/run-id: {{ .Values.crawl.runId | quote }}
+        {{- if .Values.metrics.podAnnotations }}
+        {{- include "scout.scrapeAnnotations" (dict "port" 9102) | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      # SIGTERM lets an in-flight task run for drainSeconds, then releases its lease; the rest of
+      # the grace period covers the final RPCs and exit.
+      terminationGracePeriodSeconds: {{ add .Values.worker.drainSeconds 15 }}
+      initContainers:
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.coordinatorHost" .) "port" 50051) | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - worker
+            - --coordinator
+            - http://{{ include "scout.coordinatorHost" . }}:50051
+            - --data-dir
+            - /tmp/scout-worker
+            - --worker-id
+            - $(POD_NAME)
+            - --metrics-bind
+            - 0.0.0.0:9102
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SCOUT_WORKER_DRAIN_SECS
+              value: {{ .Values.worker.drainSeconds | quote }}
+            # Once the crawl is finished, wait to be stopped rather than exit 0 and be restarted.
+            - name: SCOUT_WORKER_IDLE_WHEN_DONE
+              value: "true"
+          ports:
+            - name: metrics
+              containerPort: 9102
+          # Ready while the coordinator answers a heartbeat (the worker has no database access).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            # Workers keep no state beyond their event log.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.worker.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "scout.fullname" . }}-worker
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.worker.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "worker") | nindent 6 }}
+{{- end }}
+{{- if .Values.worker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "scout.fullname" . }}-worker
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "scout.fullname" . }}-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    # Scaling in stops workers mid-task (they drain, but a task is lost work): wait it out.
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

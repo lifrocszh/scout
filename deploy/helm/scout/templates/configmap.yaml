@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "scout.fullname" . }}-config
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+data:
+  sources.toml: |
+    {{- tpl .Values.crawl.sources . | nindent 4 }}
+  index-profile.toml: |
+    {{- .Files.Get "files/index-profile.toml" | nindent 4 }}
+  # The same wrapper Compose uses: `coordinator` runs the coordinator until the crawl completes
+  # and then stops it; `index` snapshots the finished crawl and builds and activates a Generation.
+  stack.sh: |
+    {{- .Files.Get "files/stack.sh" | nindent 4 }}
+  coordinator.sh: |
+    {{- .Files.Get "files/coordinator.sh" | nindent 4 }}

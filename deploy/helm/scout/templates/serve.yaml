@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scout.fullname" . }}-serve
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  # The search API has no TLS or authentication: put an authenticating ingress in front of it.
+  type: {{ .Values.serve.service.type }}
+  selector:
+    {{- include "scout.selector" (dict "root" . "component" "serve") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.serve.service.port }}
+      targetPort: http
+      {{- if and (eq .Values.serve.service.type "NodePort") .Values.serve.service.nodePort }}
+      nodePort: {{ .Values.serve.service.nodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout.fullname" . }}-serve
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.serve.replicas }}
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "serve") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: serve
+      annotations:
+        {{- if .Values.metrics.podAnnotations }}
+        {{- include "scout.scrapeAnnotations" (dict "port" 9103) | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      # ReadWriteOnce data volume: land on the node that already has it mounted.
+      {{- if eq .Values.persistence.accessMode "ReadWriteOnce" }}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "scout.selector" (dict "root" . "component" "coordinator") | nindent 18 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: serve
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --data-dir
+            - /data
+            - --bind
+            - 0.0.0.0:8080
+            - --metrics-bind
+            - 0.0.0.0:9103
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9103
+          # Not ready until the index step has activated a Generation; serve picks it up live.
+          readinessProbe:
+            httpGet:
+              path: /v1/readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /v1/healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.serve.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "scout.fullname" . }}-data
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

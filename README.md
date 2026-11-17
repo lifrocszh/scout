@@ -151,11 +151,22 @@ curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json'
 
 The `data` profile (Kafka, lakehouse) is planned and not part of this stack yet.
 
+## Run on Kubernetes
+
+The Helm chart in [`deploy/helm/scout`](deploy/helm/scout) runs Postgres, the coordinator, workers and
+the search API on Kubernetes. `make kind-up` builds the image, creates a local
+[kind](https://kind.sigs.k8s.io) cluster, installs the chart and returns when
+`http://127.0.0.1:8080/v1/readyz` is ready; `make kind-smoke` checks it and `make kind-down` removes
+it. Scale the crawl with `kubectl -n scout scale deploy/scout-worker --replicas=8` (or the HPA). See
+[docs/kubernetes.md](docs/kubernetes.md) for the design, probes, graceful shutdown and CI.
+
 ## Observability
 
 The coordinator, workers and `serve` expose Prometheus metrics at `/metrics`. The endpoint is off
 unless you give it an address, with `--metrics-bind <addr:port>` or `SCOUT_METRICS_BIND`; the flag
-wins. It is plain text with no authentication or TLS, so bind it to a private interface.
+wins. It is plain text with no authentication or TLS, so bind it to a private interface. The same
+listener answers `GET /healthz` (200 while the process is up) and `GET /readyz` (the coordinator: serving
+RPCs; a worker: its coordinator answers a heartbeat), which the Kubernetes probes use.
 
 ```bash
 scout serve --data-dir data/x --bind 127.0.0.1:8080 --metrics-bind 127.0.0.1:9103
@@ -218,6 +229,8 @@ series (more fold into `overflow`). URLs and task IDs are never labels.
 | `SCOUT_METRICS_BIND` | unset (off) | `/metrics` address; `--metrics-bind` overrides it |
 | `SCOUT_METRICS_LINGER_SECS` | `0` | Keep serving this long after the process finishes |
 | `SCOUT_METRICS_SAMPLE_SECS` | `5` (Compose: `2`) | Coordinator: how often to sample frontier depth |
+| `SCOUT_WORKER_DRAIN_SECS` | `20` | Worker: seconds an in-flight task may run after SIGTERM/SIGINT before its lease is released |
+| `SCOUT_WORKER_IDLE_WHEN_DONE` | unset | Worker: when `1`/`true`, wait to be stopped after the crawl ends instead of exiting |
 
 With `/metrics` on, the coordinator opens one extra Postgres connection, outside its pool, and
 runs one grouped count over the run's tasks every sample interval for the frontier gauges. Scrapes

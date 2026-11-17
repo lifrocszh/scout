@@ -1,0 +1,63 @@
+{{- /* `helm test scout`: the search API answers from the Generation the index Job built. */}}
+{{- $host := printf "%s-serve" (include "scout.fullname" .) }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "scout.fullname" . }}-test
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- include "scout.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: test
+      image: {{ include "scout.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        {{- include "scout.containerSecurityContext" . | nindent 8 }}
+      command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          # The image has bash but no curl: speak HTTP/1.0 over /dev/tcp.
+          request() { # <method> <path> [json body]  -> the raw response
+            local body=${3:-}
+            exec 3<>/dev/tcp/{{ $host }}/{{ .Values.serve.service.port }}
+            printf '%s %s HTTP/1.0\r\nHost: serve\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s' \
+              "$1" "$2" "${#body}" "$body" >&3
+            cat <&3
+            exec 3<&-
+          }
+          fail() { echo "helm test: FAIL: $*" >&2; exit 1; }
+
+          ready=$(request GET /v1/readyz)
+          [[ $ready == *' 200 '* && $ready == *'"status":"ready"'* ]] || fail "/v1/readyz is not ready: $ready"
+          echo "helm test: ok: /v1/readyz is ready"
+
+          generation=$(request GET /v1/generation)
+          [[ $generation == *'"page_count":'* && $generation != *'"page_count":0,'* ]] || fail "the Generation holds no pages: $generation"
+          echo "helm test: ok: the active Generation holds pages"
+
+          {{- if and .Values.fixture.enabled (eq .Values.fixture.mode "static") }}
+          [[ $generation == *'"page_count":11,'* ]] || fail "expected the fixture's 11 pages: $generation"
+          search=$(request POST /v1/search '{"query":"rebalance consumer group","mode":"keyword","limit":3}')
+          first=${search#*'"results":[{'}
+          [[ $search == *' 200 '* && $first == *'/tutorials/scaling-consumers.html'* ]] || fail "unexpected search result: $search"
+          echo "helm test: ok: keyword search finds the scaling tutorial"
+          {{- else }}
+          search=$(request POST /v1/search '{"query":"queue","mode":"keyword","limit":3}')
+          [[ $search == *' 200 '* ]] || fail "search failed: $search"
+          echo "helm test: ok: search answers"
+          {{- end }}
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 128Mi}

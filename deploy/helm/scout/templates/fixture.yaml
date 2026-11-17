@@ -1,0 +1,113 @@
+{{- if .Values.fixture.enabled }}
+{{- $host := include "scout.fixtureHost" . }}
+{{- $synthetic := eq .Values.fixture.mode "synthetic" }}
+{{- $syn := .Values.fixture.synthetic }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $host }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+data:
+  {{- if $synthetic }}
+  origins.py: |
+    {{- .Files.Get "files/origins.py" | nindent 4 }}
+  {{- else }}
+  {{- /* ConfigMap keys cannot contain "/": "guide/faq.html" is stored as "guide__faq.html" and mounted back by path. */}}
+  {{- range $path, $_ := .Files.Glob "files/fixture-site/**" }}
+  {{ $path | trimPrefix "files/fixture-site/" | replace "/" "__" | quote }}: {{ $.Files.Get $path | replace "http://fixture:8080" (printf "http://%s:8080" $host) | quote }}
+  {{- end }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $host }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "scout.selector" (dict "root" . "component" "fixture") | nindent 4 }}
+  ports:
+    {{- if $synthetic }}
+    {{- range $i := until (int $syn.origins) }}
+    - name: o{{ $i }}
+      port: {{ add $syn.basePort $i }}
+      targetPort: {{ add $syn.basePort $i }}
+    {{- end }}
+    {{- else }}
+    - name: http
+      port: 8080
+      targetPort: http
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $host }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "fixture") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: fixture
+      annotations:
+        checksum/fixture: {{ printf "%s%s" (toJson .Values.fixture) (.Files.Get "files/origins.py") | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fixture
+          {{- if $synthetic }}
+          image: {{ $syn.image }}
+          command: [python3, -u, /opt/fixture/origins.py]
+          env:
+            - {name: ORIGINS, value: {{ $syn.origins | quote }}}
+            - {name: BASE_PORT, value: {{ $syn.basePort | quote }}}
+            - {name: PAGES, value: {{ $syn.pagesPerOrigin | quote }}}
+            - {name: LATENCY_MS, value: {{ $syn.latencyMs | quote }}}
+          readinessProbe:
+            tcpSocket:
+              port: {{ $syn.basePort }}
+            periodSeconds: 3
+          volumeMounts:
+            - {name: content, mountPath: /opt/fixture, readOnly: true}
+          {{- else }}
+          image: busybox:1.37
+          command: [httpd, -f, -p, "8080", -h, /www]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet:
+              path: /robots.txt
+              port: http
+            periodSeconds: 3
+          volumeMounts:
+            - {name: content, mountPath: /www, readOnly: true}
+          {{- end }}
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.fixture.resources | nindent 12 }}
+      volumes:
+        - name: content
+          configMap:
+            name: {{ $host }}
+            {{- if not $synthetic }}
+            items:
+              {{- range $path, $_ := .Files.Glob "files/fixture-site/**" }}
+              - key: {{ $path | trimPrefix "files/fixture-site/" | replace "/" "__" | quote }}
+                path: {{ $path | trimPrefix "files/fixture-site/" | quote }}
+              {{- end }}
+            {{- end }}
+{{- end }}

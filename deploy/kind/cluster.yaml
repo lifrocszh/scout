@@ -1,0 +1,17 @@
+# A single-node kind cluster for the Scout chart: `make kind-up`.
+# One node keeps the ReadWriteOnce data volume (shared by the coordinator, the index Job and serve)
+# on a single host, and fits a laptop or a standard GitHub runner.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: scout
+nodes:
+  - role: control-plane
+    # kind v0.27's default node image; newer kind releases run it too.
+    image: kindest/node:v1.32.2
+    extraPortMappings:
+      # deploy/kind/values.yaml exposes the search API as NodePort 30080:
+      # http://127.0.0.1:8080/v1/readyz, like the Compose stack.
+      - containerPort: 30080
+        hostPort: 8080
+        listenAddress: 127.0.0.1
+        protocol: TCP

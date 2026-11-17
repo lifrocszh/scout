@@ -1,0 +1,85 @@
+{{- if .Values.index.enabled }}
+{{- /* The name carries a hash of everything the Job runs with: a Job's pod template is immutable, so
+       a changed spec is a new Job (Helm deletes the old one) and re-running the index step is a no-op
+       once a Generation is active. */}}
+{{- $hash := printf "%s|%s|%s|%s" .Values.crawl.runId (include "scout.image" .) .Values.index.mode (include (print $.Template.BasePath "/configmap.yaml") . | sha256sum) | sha256sum | trunc 8 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "scout.fullname" . }}-index-{{ $hash }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+    app.kubernetes.io/component: index
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.index.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: index
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      {{- if eq .Values.persistence.accessMode "ReadWriteOnce" }}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "scout.selector" (dict "root" . "component" "coordinator") | nindent 18 }}
+      {{- end }}
+      containers:
+        - name: index
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - bash
+            - -c
+            - |
+              # Materializing needs the crawl log to end with crawl.concurrency, which the
+              # coordinator writes as it stops after crawl.completed.
+              log="/data/logs/$SCOUT_CRAWL_RUN_ID.jsonl"
+              until tail -n 1 "$log" 2>/dev/null | grep -q '"event":"crawl.concurrency"'; do sleep 2; done
+              exec bash /etc/scout/stack.sh index
+          env:
+            - name: SCOUT_CRAWL_RUN_ID
+              value: {{ .Values.crawl.runId | quote }}
+            - name: SCOUT_INDEX_MODE
+              value: {{ .Values.index.mode | quote }}
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.index.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/scout
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "scout.fullname" . }}-data
+        - name: config
+          configMap:
+            name: {{ include "scout.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
