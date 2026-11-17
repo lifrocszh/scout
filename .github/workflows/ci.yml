@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Manual runs also include the macOS feature check (Actions → CI → Run workflow).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -81,15 +83,7 @@ jobs:
       - run: python3 -B scripts/databricks/test_transport_state.py
 
   features:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            feature: openvino-gpu
-          - os: macos-latest
-            feature: apple-coreml
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -97,4 +91,18 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked --features ${{ matrix.feature }}
+      - run: cargo check --locked --features openvino-gpu
+
+  # Manual only: macOS runners can queue for a long time, and this guards a small
+  # cfg(target_os = "macos") branch in src/generation/embeddings.rs.
+  features-macos:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --features apple-coreml

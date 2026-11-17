@@ -8,7 +8,12 @@ Adds `.github/workflows/ci.yml`: on every pull request and on pushes to `main`.
 | `test` | `cargo test` (61 non-ignored tests) |
 | `test-postgres` | `postgres:17` service + `scripts/ci/postgres-tests.sh` (the `#[ignore]`d DB tests) |
 | `python` | `tests/local_monitor_test.py`, `scripts/databricks/test_transport_state.py` (unittest) |
-| `features` | `cargo check --features openvino-gpu` (Ubuntu), `--features apple-coreml` (macOS) |
+| `features` | `cargo check --features openvino-gpu` (Ubuntu) |
+| `features-macos` | `cargo check --features apple-coreml`; manual runs only (Actions → CI → Run workflow) |
+
+`features-macos` is manual because macOS runners can queue for a long time. On 2026-11-17 one
+attempt waited 15 minutes without a runner and was cancelled. Run it before merging changes to
+`ort`/`fastembed` versions or to the `apple-coreml` code in `src/generation/`.
 
 The Rust toolchain is pinned to 1.97 in the workflow. Builds are cached with `Swatinem/rust-cache`.
 
