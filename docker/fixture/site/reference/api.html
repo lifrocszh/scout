@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTP API reference</title>
+</head>
+<body>
+<main>
+<h1>HTTP API reference</h1>
+<h2>Publishing</h2>
+<p>Send a POST request to the topics endpoint with a JSON body to publish a message. The broker answers with the partition and offset assigned to the message.</p>
+<h2>Reading</h2>
+<p>A GET request on the messages endpoint returns messages after a given offset. Clients should commit offsets so a restarted consumer resumes where it stopped.</p>
+<h2>Related pages</h2>
+<ul>
+<li><a href="errors.html">errors.html</a></li>
+<li><a href="cli.html">cli.html</a></li>
+</ul>
+</main>
+</body>
+</html>

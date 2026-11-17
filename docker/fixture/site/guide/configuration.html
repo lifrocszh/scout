@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Configuring a broker</title>
+</head>
+<body>
+<main>
+<h1>Configuring a broker</h1>
+<h2>Retention</h2>
+<p>The retention_hours setting controls how long acknowledged messages stay on disk before compaction removes them. Set it to zero to delete messages immediately after acknowledgement.</p>
+<h2>Partitions</h2>
+<p>The partition_count setting splits a topic into independent ordered logs. More partitions allow more consumers to read in parallel, but ordering is only guaranteed within one partition.</p>
+<h2>Related pages</h2>
+<ul>
+<li><a href="installation.html">installation.html</a></li>
+<li><a href="../reference/cli.html">../reference/cli.html</a></li>
+</ul>
+</main>
+</body>
+</html>

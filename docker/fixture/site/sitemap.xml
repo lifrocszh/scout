@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://fixture:8080/index.html</loc></url>
+  <url><loc>http://fixture:8080/guide/getting-started.html</loc></url>
+  <url><loc>http://fixture:8080/guide/installation.html</loc></url>
+  <url><loc>http://fixture:8080/guide/configuration.html</loc></url>
+  <url><loc>http://fixture:8080/reference/api.html</loc></url>
+  <url><loc>http://fixture:8080/reference/cli.html</loc></url>
+  <url><loc>http://fixture:8080/reference/errors.html</loc></url>
+  <url><loc>http://fixture:8080/tutorials/first-topic.html</loc></url>
+  <url><loc>http://fixture:8080/tutorials/scaling-consumers.html</loc></url>
+  <url><loc>http://fixture:8080/faq.html</loc></url>
+  <url><loc>http://fixture:8080/archive/changelog.html</loc></url>
+</urlset>

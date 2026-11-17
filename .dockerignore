@@ -1,0 +1,10 @@
+# Allowlist: the image build needs only the Rust sources. Everything else
+# (target/, data/, docs/, .git/, .scratch/, tests/, demo/) stays out of the
+# build context so it stays small and the dependency layers cache well.
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!proto
+!migrations
+!src

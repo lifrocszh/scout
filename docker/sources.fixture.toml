@@ -1,0 +1,27 @@
+# Crawl config for the Compose stack: crawls the static fixture site
+# (docker/fixture/site, served by the `fixture` service) and nothing else.
+# Mounted read-only at /etc/scout/sources.toml. Copy it and point
+# SCOUT_SOURCES_CONFIG_FILE at the copy to crawl something else.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "ScoutCompose/0.1 (+https://github.com/lifrocszh/scout)"
+embedding_model = "BAAI/bge-small-en-v1.5"
+
+# The fixture has 11 crawlable pages. The target is higher on purpose, so the
+# run ends because the frontier is exhausted, not because a quota was hit.
+page_target = 50
+max_frontier = 200
+max_duration_seconds = 120
+
+# Our own container, so the spacing is short. It is not zero on purpose: a crawl
+# that takes a few seconds lets every `--scale worker=N` worker join before the
+# frontier is empty, so the stack visibly spreads work across workers.
+global_concurrency = 6
+origin_concurrency = 3
+min_start_spacing_ms = 200
+
+[[sources]]
+source_id = "fixture"
+seeds = ["http://fixture:8080/"]
+allowed_origins = ["http://fixture:8080"]
+path_prefixes = ["/"]

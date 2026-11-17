@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tutorial: scaling consumers</title>
+</head>
+<body>
+<main>
+<h1>Tutorial: scaling consumers</h1>
+<h2>Consumer groups</h2>
+<p>Consumers that share a group name split the partitions of a topic between them. Start a second consumer in the same group and the broker triggers a rebalance.</p>
+<h2>Rebalance behaviour</h2>
+<p>During a rebalance each consumer briefly pauses while partitions are reassigned. Keep groups stable and add consumers one at a time to avoid repeated rebalances.</p>
+<h2>Related pages</h2>
+<ul>
+<li><a href="first-topic.html">first-topic.html</a></li>
+<li><a href="../reference/cli.html">../reference/cli.html</a></li>
+</ul>
+</main>
+</body>
+</html>
