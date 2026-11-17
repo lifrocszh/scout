@@ -10,6 +10,7 @@ use crate::crawl::Config;
 use crate::crawl::spool::CaptureSpool;
 use crate::error::Error;
 use crate::observability::Events;
+use crate::observability::metrics;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
@@ -284,6 +285,14 @@ fn process(
         )
         .map_err(to_status)?;
     crate::distributed::metrics::completion_phase("postgres_transaction", started);
+    metrics::TASK_COMPLETIONS.inc(&[match acceptance {
+        CompletionAcceptance::Accepted { .. } => "accepted",
+        CompletionAcceptance::Duplicate { .. } => "duplicate",
+        CompletionAcceptance::Stale => "stale",
+    }]);
+    if matches!(acceptance, CompletionAcceptance::Stale) {
+        metrics::STALE_RESULTS.inc(&["complete_task"]);
+    }
     let (completed, accepted_count, rejected_count) = match acceptance {
         CompletionAcceptance::Accepted {
             accepted_discovered_count,

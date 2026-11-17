@@ -205,6 +205,7 @@ fn evaluation_report_contract_records_frozen_shape_and_all_modes() {
     for mode in ["keyword", "semantic", "hybrid"] {
         assert!(report["metrics"][mode]["ndcg_at_10"].is_number());
         assert!(report["metrics"][mode]["mrr_at_10"].is_number());
+        assert!(report["metrics"][mode]["recall_at_10"].is_number());
         assert!(report["metrics"][mode]["recall_at_100"].is_number());
     }
     assert_eq!(
@@ -291,6 +292,68 @@ fn evaluation_contract_requires_frozen_metadata() {
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("metadata.json"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn single_judge_metadata(provenance: Option<Value>) -> Value {
+    let mut metadata = json!({
+        "evaluation_id": "eval-contract-fixture-v1",
+        "corpus_snapshot_id": "snapshot-contract",
+        "build_id": "build-contract",
+        "model_digest": "sha256:model-contract",
+        "judges": ["fixture-author"],
+        "adjudication": "by-construction",
+    });
+    if let Some(provenance) = provenance {
+        metadata["judgment_provenance"] = provenance;
+    }
+    metadata
+}
+
+fn evaluate_with_metadata(label: &str, metadata: &Value) -> Output {
+    let data_dir = TempDir::new(label);
+    let package = write_evaluation_package(data_dir.path(), EvaluationCase::Baseline);
+    fs::write(
+        package.join("metadata.json"),
+        serde_json::to_vec_pretty(metadata).expect("serialize evaluation metadata"),
+    )
+    .expect("write evaluation metadata");
+    run_scout(
+        data_dir.path(),
+        &[
+            "evaluate".into(),
+            "--package".into(),
+            package.display().to_string(),
+        ],
+    )
+}
+
+#[test]
+fn evaluation_contract_rejects_a_single_judge_without_declared_provenance() {
+    let output = evaluate_with_metadata(
+        "evaluation-contract-single-judge",
+        &single_judge_metadata(None),
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("fixture_by_construction"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn evaluation_contract_accepts_a_single_judge_for_fixture_by_construction_labels() {
+    let output = evaluate_with_metadata(
+        "evaluation-contract-fixture-labels",
+        &single_judge_metadata(Some(json!({"fixture_by_construction": true}))),
+    );
+
+    assert!(
+        output.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );

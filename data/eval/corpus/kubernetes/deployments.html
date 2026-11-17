@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Deployments</title>
+</head>
+<body>
+<main>
+<h1>Deployments</h1>
+<h2>Overview</h2>
+<p>A Deployment declares the desired state for a set of identical Pods managed through a ReplicaSet. You set the number of replicas and the container image, and the controller changes the cluster to match.</p>
+<h2>Rolling updates</h2>
+<p>Changing the Pod template triggers a rolling update that starts new Pods and stops old ones gradually, controlled by maxSurge and maxUnavailable, so the application keeps serving traffic.</p>
+<h2>Example</h2>
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate</code></pre>
+</main>
+</body>
+</html>

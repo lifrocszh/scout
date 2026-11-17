@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vec::retain</title>
+</head>
+<body>
+<main>
+<h1>Vec::retain</h1>
+<h2>Overview</h2>
+<p>The retain method on Vec keeps only the elements for which a predicate returns true and removes all others, in place and without allocating a new vector. The relative order of the kept elements is preserved.</p>
+<h2>Example</h2>
+<pre><code>let mut scores = vec![3, 8, 1, 9, 4];
+scores.retain(|score| *score &gt;= 4);
+assert_eq!(scores, [8, 9, 4]);</code></pre>
+<h2>Variants</h2>
+<p>The retain_mut method passes a mutable reference to the closure, so elements can be modified while the decision to keep them is made. Each element is visited exactly once, in order.</p>
+</main>
+</body>
+</html>

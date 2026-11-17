@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trait objects with Box&lt;dyn Trait&gt;</title>
+</head>
+<body>
+<main>
+<h1>Trait objects with Box&lt;dyn Trait&gt;</h1>
+<h2>Dynamic dispatch</h2>
+<p>A trait object such as Box&lt;dyn Shape&gt; lets one collection hold values of different concrete types that implement the same trait. Method calls are resolved at runtime through a vtable, which costs an indirect call but avoids generating a copy of the code for every type.</p>
+<h2>Object safety</h2>
+<p>Only object-safe traits can be made into trait objects. A trait with generic methods or methods that return Self cannot be used as dyn Trait.</p>
+</main>
+</body>
+</html>

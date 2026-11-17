@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>collections.defaultdict</title>
+</head>
+<body>
+<main>
+<h1>collections.defaultdict</h1>
+<h2>Overview</h2>
+<p>A defaultdict is a dict subclass that calls a factory function to supply a value for a missing key. defaultdict(list) groups items into lists and defaultdict(int) starts every count at zero, so no key check is required.</p>
+<h2>Example</h2>
+<pre><code>groups = defaultdict(list)
+for name, team in members:
+    groups[team].append(name)</code></pre>
+<h2>Caveat</h2>
+<p>Merely reading a missing key inserts it into the mapping. Use the in operator or get when you must not create entries.</p>
+</main>
+</body>
+</html>

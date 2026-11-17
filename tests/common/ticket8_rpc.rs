@@ -1,6 +1,7 @@
 use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -33,6 +34,9 @@ pub struct Run {
     pub dir: PathBuf,
     pub id: String,
     pub address: SocketAddr,
+    /// Where the coordinator serves `/metrics`; set only by `new_with_metrics`, so that the
+    /// sampler's extra connection never disturbs the tests that count coordinator connections.
+    pub metrics_address: Option<SocketAddr>,
     pub coordinator_app_name: String,
 }
 
@@ -64,6 +68,50 @@ impl Run {
         spacing_ms: u64,
         attempts: usize,
         overrides: &[(String, usize, u64)],
+    ) -> Self {
+        Self::start(
+            label,
+            sources,
+            global,
+            origin_limit,
+            spacing_ms,
+            attempts,
+            overrides,
+            false,
+        )
+    }
+
+    /// Like `new`, with the coordinator's `/metrics` endpoint enabled (see `metrics`).
+    #[allow(dead_code)]
+    pub fn new_with_metrics(
+        label: &str,
+        sources: &[SourceSpec],
+        global: usize,
+        origin_limit: usize,
+        spacing_ms: u64,
+        attempts: usize,
+    ) -> Self {
+        Self::start(
+            label,
+            sources,
+            global,
+            origin_limit,
+            spacing_ms,
+            attempts,
+            &[],
+            true,
+        )
+    }
+
+    fn start(
+        label: &str,
+        sources: &[SourceSpec],
+        global: usize,
+        origin_limit: usize,
+        spacing_ms: u64,
+        attempts: usize,
+        overrides: &[(String, usize, u64)],
+        with_metrics: bool,
     ) -> Self {
         let raw_database_url = std::env::var("SCOUT_TEST_DATABASE_URL").expect(
             "set SCOUT_TEST_DATABASE_URL to the dedicated disposable Ticket 8 test database",
@@ -127,7 +175,14 @@ impl Run {
             .unwrap()
             .local_addr()
             .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_scout"))
+        let metrics_address = with_metrics.then(|| {
+            TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        });
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scout"));
+        command
             .args([
                 "coordinator",
                 "--config",
@@ -147,9 +202,11 @@ impl Run {
             ))
             .stderr(Stdio::from(
                 fs::File::create(dir.join("coordinator.stderr")).unwrap(),
-            ))
-            .spawn()
-            .unwrap();
+            ));
+        if let Some(metrics_address) = metrics_address {
+            command.args(["--metrics-bind", &metrics_address.to_string()]);
+        }
+        let child = command.spawn().unwrap();
         let mut run = Self {
             child,
             database: connect_named(&database_url, "scout-ticket8-test-observer"),
@@ -157,10 +214,27 @@ impl Run {
             dir,
             id,
             address,
+            metrics_address,
             coordinator_app_name,
         };
         run.wait_ready();
         run
+    }
+
+    /// The coordinator's `/metrics` text. Needs a run made by `new_with_metrics`.
+    #[allow(dead_code)]
+    pub fn metrics(&self) -> String {
+        let address = self
+            .metrics_address
+            .expect("run was started without metrics");
+        let mut stream = TcpStream::connect(address).expect("connect to /metrics");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(b"GET /metrics HTTP/1.0\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
     }
 
     fn wait_ready(&mut self) {

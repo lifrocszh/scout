@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Foreign keys</title>
+</head>
+<body>
+<main>
+<h1>Foreign keys</h1>
+<h2>Referential integrity</h2>
+<p>A foreign key constraint requires values in a column to match an existing row in another table, which keeps related data consistent. Inserting an order for a customer that does not exist is rejected.</p>
+<h2>Actions</h2>
+<p>ON DELETE CASCADE removes referencing rows automatically when the parent row is deleted, while RESTRICT and NO ACTION block the delete. Index the referencing column to keep deletes and joins fast.</p>
+</main>
+</body>
+</html>

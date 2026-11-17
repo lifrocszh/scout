@@ -1,0 +1,35 @@
+# Prometheus scrape config for the Helm chart (deploy/helm/scout). No Prometheus Operator and no
+# ServiceMonitor: the chart puts prometheus.io/* annotations on its pods and this config discovers
+# them with plain Kubernetes service discovery.
+#
+# Use it as the config of any Prometheus whose ServiceAccount may get, list and watch pods.
+#
+# The job label becomes scout-coordinator, scout-worker or scout-serve, which is what the Grafana
+# dashboard in deploy/grafana expects.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: scout
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      # Only Scout pods that opted in.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape, __meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: "true;scout"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+        replacement: scout-$1
+        target_label: job
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace

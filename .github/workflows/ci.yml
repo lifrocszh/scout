@@ -81,6 +81,8 @@ jobs:
       - uses: actions/checkout@v5
       - run: python3 -B tests/local_monitor_test.py
       - run: python3 -B scripts/databricks/test_transport_state.py
+      - run: python3 -B tests/search_quality_test.py
+      - run: python3 -B tests/scaling_benchmark_test.py
 
   features:
     runs-on: ubuntu-24.04
@@ -93,9 +95,51 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --features openvino-gpu
 
+  # Search-quality regression gate (docs/search-quality-gate.md). Crawls the
+  # fixture corpus in data/eval, builds keyword, semantic and hybrid indexes, and
+  # fails when NDCG@10, Recall@10 or MRR of any mode drops more than the limit
+  # below data/eval/baseline.json. The before/after table is in the job summary.
+  search-quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # Largest tolerated drop per metric.
+      SEARCH_QUALITY_MAX_DROP: "0.02"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      # fastembed downloads BGE Small on first use. The build verifies the cached
+      # files against the hashes pinned in data/eval/index-profile.toml, so the
+      # cache key only needs the model revision.
+      - name: Model revision
+        id: model
+        run: echo "revision=$(sed -n 's/^model_revision = "\(.*\)"/\1/p' data/eval/index-profile.toml)" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: data/search-quality/models
+          key: bge-small-en-v1.5-${{ steps.model.outputs.revision }}
+      - name: Search-quality gate
+        run: scripts/ci/search-quality.sh
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-quality-results
+          path: |
+            data/search-quality/results.json
+            data/search-quality/evaluations/*/report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Builds the image (dependency layers come from the GitHub Actions cache) and
-  # runs the core Compose stack end to end against the fixture site: crawl with
-  # 3 workers, keyword index, /v1/readyz, search assertions.
+  # runs the Compose stack end to end against the fixture site: crawl with
+  # 3 workers, keyword index, /v1/readyz, search assertions. The obs profile runs
+  # too (Prometheus, Grafana): the key metrics must reach Prometheus and the
+  # dashboard must be provisioned (scripts/ci/compose-obs-checks.sh).
   compose-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -118,6 +162,20 @@ jobs:
         run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' "$SCOUT_IMAGE"
       - name: Compose smoke test
         run: scripts/ci/compose-smoke.sh 3
+
+  # The Helm chart (deploy/helm/scout): lint, render the main variants, and validate what they
+  # render against the Kubernetes schemas. The cluster tests are in e2e-kind.yml.
+  helm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install kubeconform
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+      - run: helm version --short
+      - run: make helm-lint
 
   # Manual only: macOS runners can queue for a long time, and this guards a small
   # cfg(target_os = "macos") branch in src/generation/embeddings.rs.

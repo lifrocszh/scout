@@ -1,0 +1,143 @@
+{{- $probe := `[ -e /tmp/crawl-finished ] && exit 0
+exec 3<>/dev/tcp/127.0.0.1/9101 || exit 1
+printf 'GET %s HTTP/1.0\r\n\r\n' >&3
+read -r status <&3
+[[ $status == *' 200 '* ]]` }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scout.coordinatorHost" . }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  # gRPC for the workers. The coordinator has no authentication: never expose this Service.
+  type: ClusterIP
+  selector:
+    {{- include "scout.selector" (dict "root" . "component" "coordinator") | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout.coordinatorHost" . }}
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One coordinator owns the run and the RWO data volume: never run two at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "coordinator") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: coordinator
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.podAnnotations }}
+        {{- include "scout.scrapeAnnotations" (dict "port" 9101) | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Service links would inject SCOUT_COORDINATOR_PORT=tcp://<ip>:50051 (from the Service of that name),
+      # which docker/stack.sh reads as its port.
+      enableServiceLinks: false
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      # stack.sh stops the coordinator with SIGINT and the wrapper forwards SIGTERM to it.
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.postgresHost" .) "port" 5432) | nindent 8 }}
+      containers:
+        - name: coordinator
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [bash, /etc/scout/coordinator.sh]
+          env:
+            {{- include "scout.databaseEnv" . | nindent 12 }}
+            - name: SCOUT_CRAWL_RUN_ID
+              value: {{ .Values.crawl.runId | quote }}
+            # The coordinator only binds a private address: the pod's own.
+            - name: SCOUT_COORDINATOR_BIND_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SCOUT_METRICS_BIND
+              value: 0.0.0.0:9101
+            - name: SCOUT_METRICS_SAMPLE_SECS
+              value: {{ .Values.coordinator.metricsSampleSeconds | quote }}
+            - name: SCOUT_METRICS_LINGER_SECS
+              value: {{ .Values.coordinator.metricsLingerSeconds | quote }}
+            {{- with .Values.coordinator.dbLanes }}
+            - name: SCOUT_COORDINATOR_DB_LANES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.coordinator.completionLanes }}
+            - name: SCOUT_COMPLETION_LANES
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: metrics
+              containerPort: 9101
+          # exec probes, because the process is gone (and the pod parked) after the crawl.
+          startupProbe:
+            exec:
+              command: [bash, -c, {{ printf $probe "/healthz" | quote }}]
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [bash, -c, {{ printf $probe "/readyz" | quote }}]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: [bash, -c, {{ printf $probe "/healthz" | quote }}]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/scout
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "scout.fullname" . }}-data
+        - name: config
+          configMap:
+            name: {{ include "scout.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

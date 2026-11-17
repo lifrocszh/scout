@@ -1,0 +1,9 @@
+apiVersion: v2
+name: scout
+description: Scout on Kubernetes - coordinator, crawl workers, search API and Postgres
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [crawler, search]
+home: https://github.com/lifrocszh/scout
+sources: [https://github.com/lifrocszh/scout]

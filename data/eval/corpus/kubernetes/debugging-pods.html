@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Debugging Pods with kubectl logs and exec</title>
+</head>
+<body>
+<main>
+<h1>Debugging Pods with kubectl logs and exec</h1>
+<h2>Reading logs</h2>
+<p>The kubectl logs command prints container output. When a container keeps crashing and restarting, add --previous to read the logs of the last terminated instance, which usually shows the reason for a CrashLoopBackOff.</p>
+<h2>Running commands</h2>
+<p>The kubectl exec command opens a shell or runs a command inside a running container, and kubectl describe pod lists events such as failed image pulls or scheduling problems.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Liveness and readiness probes</title>
+</head>
+<body>
+<main>
+<h1>Liveness and readiness probes</h1>
+<h2>Liveness</h2>
+<p>A liveness probe tells the kubelet whether a container is still healthy. When it keeps failing the kubelet kills the container and restarts it, which recovers an application that is deadlocked.</p>
+<h2>Readiness</h2>
+<p>A readiness probe decides whether a Pod should receive traffic. While it fails the Pod is removed from Service endpoints but is not restarted, which suits an application that is warming up or temporarily overloaded.</p>
+</main>
+</body>
+</html>

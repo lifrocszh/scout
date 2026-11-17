@@ -52,6 +52,7 @@ pub(crate) struct EvaluationRanking {
 pub(crate) struct QueryMetrics {
     pub(crate) ndcg_at_10: f64,
     pub(crate) mrr_at_10: f64,
+    pub(crate) recall_at_10: f64,
     pub(crate) recall_at_100: f64,
 }
 
@@ -201,15 +202,24 @@ pub(crate) fn load_evaluation_metadata(package: &Path) -> Result<Value, Error> {
             ));
         }
     }
-    let owner_reviewed_llm_review = metadata
-        .get("judgment_provenance")
-        .and_then(Value::as_object)
-        .and_then(|provenance| provenance.get("owner_reviewed_llm_review"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if judges.is_empty() || (judges.len() < 2 && !owner_reviewed_llm_review) {
+    let provenance_flag = |name: &str| {
+        metadata
+            .get("judgment_provenance")
+            .and_then(Value::as_object)
+            .and_then(|provenance| provenance.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let owner_reviewed_llm_review = provenance_flag("owner_reviewed_llm_review");
+    // Grades defined by how a small synthetic fixture corpus was written, not by
+    // judging real pages. Only the search-quality regression gate uses this; it
+    // cannot stand in for the two-judge or owner-reviewed protocol on real data.
+    let fixture_by_construction = provenance_flag("fixture_by_construction");
+    if judges.is_empty()
+        || (judges.len() < 2 && !owner_reviewed_llm_review && !fixture_by_construction)
+    {
         return Err(Error::invalid(
-            "evaluation metadata must record two judges or one owner-reviewed LLM reviewer",
+            "evaluation metadata must record two judges, one owner-reviewed LLM reviewer, or fixture_by_construction judgment provenance",
         ));
     }
     let adjudication = metadata_string(&metadata, &["adjudication", "adjudication_method"])
@@ -903,15 +913,19 @@ pub(crate) fn compute_query_metrics(
         .position(|page_id| judgments.get(*page_id).is_some_and(|grade| *grade >= 2))
         .map(|index| 1.0 / (index + 1) as f64)
         .unwrap_or(0.0);
-    let recalled = ranking
-        .iter()
-        .take(100)
-        .filter(|page_id| judgments.get(**page_id).is_some_and(|grade| *grade >= 2))
-        .count();
+    let recalled_at = |cutoff: usize| {
+        ranking
+            .iter()
+            .take(cutoff)
+            .filter(|page_id| judgments.get(**page_id).is_some_and(|grade| *grade >= 2))
+            .count() as f64
+            / relevant as f64
+    };
     Ok(QueryMetrics {
         ndcg_at_10: if idcg == 0.0 { 0.0 } else { dcg / idcg },
         mrr_at_10: mrr,
-        recall_at_100: recalled as f64 / relevant as f64,
+        recall_at_10: recalled_at(10),
+        recall_at_100: recalled_at(100),
     })
 }
 
@@ -920,6 +934,7 @@ fn aggregate_metrics(metrics: &[QueryMetrics]) -> QueryMetrics {
         return QueryMetrics {
             ndcg_at_10: 0.0,
             mrr_at_10: 0.0,
+            recall_at_10: 0.0,
             recall_at_100: 0.0,
         };
     }
@@ -927,6 +942,11 @@ fn aggregate_metrics(metrics: &[QueryMetrics]) -> QueryMetrics {
     QueryMetrics {
         ndcg_at_10: metrics.iter().map(|metric| metric.ndcg_at_10).sum::<f64>() / count,
         mrr_at_10: metrics.iter().map(|metric| metric.mrr_at_10).sum::<f64>() / count,
+        recall_at_10: metrics
+            .iter()
+            .map(|metric| metric.recall_at_10)
+            .sum::<f64>()
+            / count,
         recall_at_100: metrics
             .iter()
             .map(|metric| metric.recall_at_100)

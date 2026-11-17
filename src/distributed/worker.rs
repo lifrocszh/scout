@@ -7,13 +7,27 @@ use crate::crawl::{
     RobotsPolicy, extract_sitemap_locations, is_sitemap_index, normalize_sitemap_url, parse_robots,
 };
 use crate::error::Error;
-use crate::observability::{Events, emit_shared};
+use crate::observability::metrics::{self, Role};
+use crate::observability::{Events, emit_shared, set_ready, start_exporter};
 use crate::storage::{new_run_id, sha256_hex};
 use crate::url::{normalize_url, origin_key};
 use ::url::Url;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
+
+/// Seconds an in-flight task gets to finish after a stop request before its lease is released.
+/// Keep it below the pod's `terminationGracePeriodSeconds`.
+const DRAIN_ENV: &str = "SCOUT_WORKER_DRAIN_SECS";
+const DEFAULT_DRAIN_SECS: u64 = 20;
+const MAX_DRAIN_SECS: u64 = 3600;
+/// When set (`1`/`true`), a worker that finds the crawl finished idles until it is stopped instead
+/// of exiting 0, so a Deployment does not restart it in a loop.
+const IDLE_ENV: &str = "SCOUT_WORKER_IDLE_WHEN_DONE";
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn run_worker(cli: &Cli) -> i32 {
     let Operation::Worker {
@@ -58,6 +72,9 @@ struct WorkerContext {
     worker_id: String,
     config: Arc<WorkerConfig>,
     events: Arc<Mutex<Events>>,
+    drain: Duration,
+    /// Set once the coordinator reports the crawl target reached and has no more work.
+    crawl_finished: Arc<AtomicBool>,
 }
 
 struct TaskReport {
@@ -89,10 +106,14 @@ fn worker_main(
             "worker coordinator address must use http:// on the private network",
         ));
     }
+    // Held until the worker returns; SCOUT_METRICS_LINGER_SECS keeps it serving after the last task.
+    let _metrics = start_exporter(cli.metrics_bind.as_deref(), Role::Worker)?;
     let worker_id = worker_id.map(str::to_owned).unwrap_or_else(new_run_id);
     validate_identity(&worker_id, "worker_id")
         .map_err(|status| Error::invalid(status.message().to_owned()))?;
     let concurrency = benchmark_concurrency()?;
+    let drain = drain_timeout()?;
+    let idle_when_done = env_flag(IDLE_ENV);
     if concurrency > 1 && max_tasks.is_some() {
         return Err(Error::invalid(
             "benchmark concurrency cannot be combined with --max-tasks",
@@ -161,6 +182,8 @@ fn worker_main(
             worker_id: worker_id.clone(),
             config: worker_config,
             events: events.clone(),
+            drain,
+            crawl_finished: Arc::new(AtomicBool::new(false)),
         };
         emit_shared(
             &events,
@@ -168,12 +191,15 @@ fn worker_main(
             "success",
             serde_json::json!({"worker_id": worker_id, "coordinator": address, "protocol_version": PROTOCOL_VERSION, "concurrency": concurrency, "prefetch": 0}),
         );
-        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let (shutdown, _) = watch::channel(false);
         let signal = shutdown.clone();
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            crate::shutdown::requested().await;
+            // Unready first, so the orchestrator stops counting this worker while it drains.
+            set_ready(false);
             signal.send_replace(true);
         });
+        tokio::spawn(heartbeat_loop(ctx.clone(), shutdown.subscribe()));
         let mut lanes = tokio::task::JoinSet::new();
         for _ in 0..concurrency {
             lanes.spawn(worker_loop(ctx.clone(), shutdown.subscribe(), max_tasks));
@@ -191,6 +217,15 @@ fn worker_main(
         }
         if let Some(error) = failure {
             return Err(error);
+        }
+        if idle_when_done && ctx.crawl_finished.load(Ordering::Relaxed) {
+            emit_shared(
+                &ctx.events,
+                "worker.idle",
+                "success",
+                serde_json::json!({"worker_id": ctx.worker_id, "reason": "crawl_finished"}),
+            );
+            idle_until_stopped(shutdown.subscribe()).await;
         }
         emit_shared(
             &ctx.events,
@@ -223,9 +258,98 @@ fn parse_benchmark_concurrency(value: &str) -> Result<usize, Error> {
         .ok_or_else(|| Error::invalid("benchmark worker concurrency must be between 1 and 32"))
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+}
+
+fn drain_timeout() -> Result<Duration, Error> {
+    let Some(value) = std::env::var(DRAIN_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Duration::from_secs(DEFAULT_DRAIN_SECS));
+    };
+    match value.parse::<u64>() {
+        Ok(seconds) if seconds <= MAX_DRAIN_SECS => Ok(Duration::from_secs(seconds)),
+        _ => Err(Error::invalid(format!(
+            "{DRAIN_ENV} must be a whole number of seconds from 0 to {MAX_DRAIN_SECS}"
+        ))),
+    }
+}
+
+/// Keeps `/readyz` honest: the worker is ready while the coordinator answers a heartbeat.
+/// Returns once a stop is requested.
+async fn heartbeat_loop(ctx: WorkerContext, mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        let beat = tokio::time::timeout(
+            HEARTBEAT_TIMEOUT,
+            ctx.rpc.clone().heartbeat(proto::WorkerRequest {
+                protocol_version: PROTOCOL_VERSION,
+                worker_id: ctx.worker_id.clone(),
+            }),
+        )
+        .await;
+        set_ready(matches!(beat, Ok(Ok(_))));
+        tokio::select! {
+            _ = tokio::time::sleep(HEARTBEAT_EVERY) => {}
+            _ = shutdown.changed() => {}
+        }
+    }
+    set_ready(false);
+}
+
+/// Wait for a stop request. The coordinator of a finished crawl has stopped, so the worker is
+/// unready here, and it stays up: the orchestrator replaces it when a new crawl is deployed.
+async fn idle_until_stopped(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Pending until a stop is requested, then resolves once `drain` has passed: the time an
+/// in-flight task has to finish before it is given up.
+async fn drain_expired(shutdown: &mut watch::Receiver<bool>, drain: Duration) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+    tokio::time::sleep(drain).await;
+}
+
+/// Hand the lease of an unfinished task back so another worker can claim it at once instead of
+/// waiting for the lease to expire. The attempt it used still counts. Best effort: if this fails,
+/// lease expiry fences the task anyway.
+async fn release_lease(ctx: &WorkerContext, lease: &proto::Lease) {
+    let released = ctx
+        .rpc
+        .clone()
+        .fail_task(proto::FailTaskRequest {
+            protocol_version: PROTOCOL_VERSION,
+            lease: Some(lease.clone()),
+            error_code: "worker_shutdown".into(),
+            error_message: "worker stopped before the task finished".into(),
+            // The coordinator rejects 0; 1 ms makes the task claimable at once.
+            retry_delay_ms: 1,
+        })
+        .await;
+    let (outcome, detail) = match released {
+        Ok(response) => ("success", response.into_inner().status),
+        Err(status) => ("failure", status.message().to_owned()),
+    };
+    emit_shared(
+        &ctx.events,
+        "worker.task_released",
+        outcome,
+        serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch, "detail": detail}),
+    );
+}
+
 async fn worker_loop(
     ctx: WorkerContext,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut shutdown: watch::Receiver<bool>,
     max_tasks: Option<usize>,
 ) -> Result<usize, Error> {
     let mut completed = 0_usize;
@@ -247,6 +371,7 @@ async fn worker_loop(
             .map_err(|error| Error::invalid(error.message().to_owned()))?;
         let Some(lease) = response.lease else {
             if response.target_reached {
+                ctx.crawl_finished.store(true, Ordering::Relaxed);
                 break;
             }
             return Err(Error::storage(
@@ -259,7 +384,14 @@ async fn worker_loop(
             "success",
             serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "source_id": lease.source_id, "url": safe_event_url(&lease.normalized_url), "lease_epoch": lease.lease_epoch}),
         );
-        let report = run_with_lease_renewal(&ctx, lease.clone()).await;
+        let report = tokio::select! {
+            report = run_with_lease_renewal(&ctx, lease.clone()) => report,
+            // Dropping the task future aborts its HTTP work (see run_with_lease_renewal).
+            _ = drain_expired(&mut shutdown, ctx.drain) => {
+                release_lease(&ctx, &lease).await;
+                break 'work;
+            }
+        };
         match report {
             Ok(report) => {
                 let mut lease = lease;
@@ -738,10 +870,18 @@ async fn request(
             request_kind,
             permit_id,
         );
+        // Only page fetches count towards throughput; robots and sitemap requests are
+        // visible per origin in the coordinator's permit counter.
+        let count_page = |outcome: &'static str| {
+            if request_kind == "page" {
+                metrics::PAGES_FETCHED.inc(&[outcome]);
+            }
+        };
         let sent = ctx.http.get(value).send().await;
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
+                count_page("transport_error");
                 measurement.finish("transport_error", 0);
                 release_permit(ctx, permit_id, "transport_error").await?;
                 if attempt == ctx.config.max_attempts {
@@ -775,6 +915,7 @@ async fn request(
             .content_length()
             .is_some_and(|length| length > body_limit as u64)
         {
+            count_page("body_error");
             measurement.finish("body_limit", 0);
             release_permit(ctx, permit_id, "body_limit").await?;
             return Err(Error::safety("response body exceeded configured limit"));
@@ -782,6 +923,7 @@ async fn request(
         let body = match read_limited(response, body_limit).await {
             Ok(body) => body,
             Err(error) => {
+                count_page("body_error");
                 measurement.finish("body_read_error", 0);
                 release_permit(ctx, permit_id, "body_read_error").await?;
                 return Err(error);
@@ -792,6 +934,11 @@ async fn request(
         } else {
             format!("http_{status}")
         };
+        count_page(if status < 400 {
+            "success"
+        } else {
+            "http_error"
+        });
         measurement.finish(&outcome, body.len());
         release_permit(ctx, permit_id, &outcome).await?;
         if retryable_status_code(status) && attempt < ctx.config.max_attempts {

@@ -1,0 +1,27 @@
+# Same crawl as sources.fixture.toml, with 2 s between request starts, so the
+# crawl takes about half a minute instead of a few seconds. For watching the
+# Grafana dashboard fill in live (README, "Observability"):
+#   SCOUT_SOURCES_CONFIG_FILE=./docker/sources.fixture-slow.toml docker compose --profile obs up
+# The run ID is fixed, so start from fresh volumes: docker compose down -v.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "ScoutCompose/0.1 (+https://github.com/lifrocszh/scout)"
+embedding_model = "BAAI/bge-small-en-v1.5"
+
+# The fixture has 11 crawlable pages. The target is higher on purpose, so the
+# run ends because the frontier is exhausted, not because a quota was hit.
+page_target = 50
+max_frontier = 200
+max_duration_seconds = 120
+
+# The spacing is long on purpose here (the default config uses 200 ms), so the
+# crawl is slow enough to watch.
+global_concurrency = 6
+origin_concurrency = 3
+min_start_spacing_ms = 2000
+
+[[sources]]
+source_id = "fixture"
+seeds = ["http://fixture:8080/"]
+allowed_origins = ["http://fixture:8080"]
+path_prefixes = ["/"]

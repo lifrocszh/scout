@@ -1,0 +1,24 @@
+Scout {{ .Chart.AppVersion }} is installing as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+The crawl runs first, then the index Job builds a Generation, then the search API turns ready:
+
+  kubectl -n {{ .Release.Namespace }} get pods -w
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "scout.fullname" . }}-serve
+
+Search:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "scout.fullname" . }}-serve 8080:{{ .Values.serve.service.port }}
+  curl -s localhost:8080/v1/readyz
+
+Check it:  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Scale the crawl workers (they pick up tasks as soon as they are ready, no config change):
+
+  kubectl -n {{ .Release.Namespace }} scale deploy/{{ include "scout.fullname" . }}-worker --replicas=8
+{{- if .Values.worker.autoscaling.enabled }}
+  (the HPA is on: it sets the replica count from CPU, between {{ .Values.worker.autoscaling.minReplicas }} and {{ .Values.worker.autoscaling.maxReplicas }})
+{{- end }}
+
+Once a crawl has finished the coordinator parks and the workers idle (not Ready: their coordinator
+has stopped). For a new crawl, set a new run ID, which replaces them:
+  helm upgrade ... --set crawl.runId=run-<64 hex characters>

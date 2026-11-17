@@ -3,6 +3,9 @@ pub(crate) struct Cli {
     pub(crate) operation: Operation,
     pub(crate) data_dir: PathBuf,
     pub(crate) json_errors: bool,
+    /// `--metrics-bind`: where coordinator, worker and serve expose `/metrics`. The
+    /// `SCOUT_METRICS_BIND` environment variable is the fallback; unset means off.
+    pub(crate) metrics_bind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -182,6 +185,7 @@ where
     let mut worker_id = None;
     let mut max_tasks = None;
     let mut access_log = None;
+    let mut metrics_bind = None;
     let mut package = None;
     let mut data_dir = None;
     let mut json_errors = false;
@@ -488,6 +492,9 @@ where
                     args.next().ok_or("--access-log needs a path")?,
                 ))
             }
+            Some("--metrics-bind") => {
+                metrics_bind = Some(next_string(&mut args, "--metrics-bind")?);
+            }
             Some("--package") => {
                 package = Some(PathBuf::from(
                     args.next().ok_or("--package needs a directory")?,
@@ -499,7 +506,7 @@ where
             Some("--json") => json_errors = true,
             Some("--help") | Some("-h") => {
                 println!(
-                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout coordinator --config <sources.toml> --data-dir <dir> [--bind <private-address>] [--run-id <crawl-run-id>] [--scheduled]\nscout worker --coordinator <http://address:port> --data-dir <dir> [--worker-id <id>] [--max-tasks <count>]\nscout events consume --run-id <crawl-run-id> --consumer-id <stable-id> [--batch-size <1..128>] [--poll-interval-ms <n>] [--follow]\nscout events export --run-id <crawl-run-id> --consumer-id <stable-id> [--max-records <1..128>] [--max-bytes <4096..67108864>] [--max-local-bytes <n>] [--max-batches <1..10000>] [--max-elapsed-ms <n>] [--poll-interval-ms <n>] [--follow]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] (default: keyword-only) [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>\nscout recrawl enable --enabled <true|false> --actor <id>\nscout recrawl configure --config <sources.toml> --source-id <id> --policy-version <id> --current-hours <h> --minimum-hours <h> --maximum-hours <h> --max-interval-decrease-fraction <0..1> --actor <id> --reason <text> [--enable-source]\nscout recrawl import --config <sources.toml> --recommendation <json>\nscout recrawl pending\nscout recrawl review --config <sources.toml> --recommendation-id <sha256:id> (--approve|--deny) --actor <id> --reason <text>"
+                    "scout crawl --config <sources.toml> --data-dir <dir> [--json]\nscout crawl --config <sources.toml> --data-dir <dir> --materialize-spool <run-id> [--json]\nscout coordinator --config <sources.toml> --data-dir <dir> [--bind <private-address>] [--run-id <crawl-run-id>] [--scheduled] [--metrics-bind <address>]\nscout worker --coordinator <http://address:port> --data-dir <dir> [--worker-id <id>] [--max-tasks <count>] [--metrics-bind <address>]\nscout events consume --run-id <crawl-run-id> --consumer-id <stable-id> [--batch-size <1..128>] [--poll-interval-ms <n>] [--follow]\nscout events export --run-id <crawl-run-id> --consumer-id <stable-id> [--max-records <1..128>] [--max-bytes <4096..67108864>] [--max-local-bytes <n>] [--max-batches <1..10000>] [--max-elapsed-ms <n>] [--poll-interval-ms <n>] [--follow]\nscout index build --corpus <snapshot-id> --data-dir <dir> [--mode <hybrid|semantic-only|keyword-only>] (default: keyword-only) [--resume <run-id>] [--json]\nscout index activate --generation <generation-id> --data-dir <dir> [--json]\nscout index recover --data-dir <dir> [--json]\nscout index verify --data-dir <dir>\nscout index prune --data-dir <dir> [--retain <generation-id>]... [--json]\nscout serve --data-dir <dir> --bind <address> [--access-log <path>] [--metrics-bind <address>]\nscout evaluate --package <dir> --data-dir <dir>\nscout benchmark --config <benchmark.toml> --data-dir <dir>\nscout recrawl enable --enabled <true|false> --actor <id>\nscout recrawl configure --config <sources.toml> --source-id <id> --policy-version <id> --current-hours <h> --minimum-hours <h> --maximum-hours <h> --max-interval-decrease-fraction <0..1> --actor <id> --reason <text> [--enable-source]\nscout recrawl import --config <sources.toml> --recommendation <json>\nscout recrawl pending\nscout recrawl review --config <sources.toml> --recommendation-id <sha256:id> (--approve|--deny) --actor <id> --reason <text>"
                 );
                 println!(
                     "scout events consumer-register --consumer-id <id> [--required] [--replay-days <1..3650>]\nscout events consumer-retire --consumer-id <id>\nscout events acknowledge --receipt-file <databricks-receipt.json>\nscout events archive --batch-id <batch-id> --data-dir <dir>\nscout events preflight --run-id <crawl-run-id> --consumer-id <id> --data-dir <dir>\nscout events prune (--run-id <crawl-run-id>|--batch-id <batch-id>) [--max-events <1..128>] [--execute] --data-dir <dir>"
@@ -536,6 +543,9 @@ where
     }
     if scheduled && command != "coordinator" {
         return Err("--scheduled is only valid for coordinator".into());
+    }
+    if metrics_bind.is_some() && !matches!(command, "coordinator" | "worker" | "serve") {
+        return Err("--metrics-bind is only valid for coordinator, worker, and serve".into());
     }
     let events_action = events_command.as_deref().and_then(OsStr::to_str);
     let event_consume = command == "events" && events_action == Some("consume");
@@ -806,6 +816,7 @@ where
             None => return Err("missing --data-dir".into()),
         },
         json_errors,
+        metrics_bind,
     })
 }
 
@@ -831,4 +842,72 @@ where
         return Err(format!("{option} must be finite"));
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, String> {
+        parse_cli(
+            std::iter::once("scout")
+                .chain(args.iter().copied())
+                .map(OsString::from),
+        )
+    }
+
+    #[test]
+    fn metrics_bind_is_accepted_by_the_three_serving_roles() {
+        let serve = parse(&[
+            "serve",
+            "--data-dir",
+            "d",
+            "--metrics-bind",
+            "127.0.0.1:9102",
+        ])
+        .expect("serve");
+        assert_eq!(serve.metrics_bind.as_deref(), Some("127.0.0.1:9102"));
+        let worker = parse(&[
+            "worker",
+            "--coordinator",
+            "http://127.0.0.1:50051",
+            "--data-dir",
+            "d",
+            "--metrics-bind",
+            "0.0.0.0:9102",
+        ])
+        .expect("worker");
+        assert_eq!(worker.metrics_bind.as_deref(), Some("0.0.0.0:9102"));
+        let coordinator = parse(&[
+            "coordinator",
+            "--config",
+            "c.toml",
+            "--data-dir",
+            "d",
+            "--metrics-bind",
+            "127.0.0.1:9101",
+        ])
+        .expect("coordinator");
+        assert_eq!(coordinator.metrics_bind.as_deref(), Some("127.0.0.1:9101"));
+    }
+
+    #[test]
+    fn metrics_are_off_unless_a_bind_is_given_and_other_commands_reject_it() {
+        let plain = parse(&["serve", "--data-dir", "d"]).expect("serve");
+        assert_eq!(plain.metrics_bind, None);
+        let error = parse(&[
+            "index",
+            "verify",
+            "--data-dir",
+            "d",
+            "--metrics-bind",
+            "127.0.0.1:1",
+        ])
+        .expect_err("index rejects --metrics-bind");
+        assert_eq!(
+            error,
+            "--metrics-bind is only valid for coordinator, worker, and serve"
+        );
+        assert!(parse(&["serve", "--data-dir", "d", "--metrics-bind"]).is_err());
+    }
 }

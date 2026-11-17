@@ -1,0 +1,144 @@
+# Scout on Kubernetes. Install as release "scout" (resources are named <release>-<component>):
+#   helm upgrade --install scout deploy/helm/scout -n scout --create-namespace
+# `make kind-up` does that on a local kind cluster. Defaults crawl the bundled fixture site, build a
+# keyword-only index and serve it, which is what the smoke test and CI exercise.
+
+image:
+  repository: ghcr.io/lifrocszh/scout
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+crawl:
+  # One crawl is one run, named by this ID: "run-" plus 64 lowercase hex characters. Re-installing
+  # with the same ID resumes (or, once finished, skips) that crawl; set a new ID to crawl again.
+  runId: run-5c0a7f1e0d3b4a29b8e6f4a1c7d2e9035b8a6f4c1e7d0a39b2c5e8f1a4d7b0c3
+  # The crawl config, mounted at /etc/scout/sources.toml. Rendered with tpl, so it may use chart
+  # helpers. Replace it (--set-file crawl.sources=my-sources.toml) to crawl something else.
+  sources: |
+    schema_version = "scout.sources.v1"
+    contact_url = "https://github.com/lifrocszh/scout"
+    user_agent = "ScoutKubernetes/0.1 (+https://github.com/lifrocszh/scout)"
+    embedding_model = "BAAI/bge-small-en-v1.5"
+
+    # The fixture has 11 crawlable pages. The target is higher on purpose, so the run ends because
+    # the frontier is exhausted, not because a quota was hit.
+    page_target = 50
+    max_frontier = 200
+    max_duration_seconds = 120
+
+    # Our own pod, so the spacing is short. It is not zero on purpose: a crawl that takes a few
+    # seconds lets every worker join before the frontier is empty.
+    global_concurrency = 6
+    origin_concurrency = 3
+    min_start_spacing_ms = 200
+
+    [[sources]]
+    source_id = "fixture"
+    seeds = ["http://{{ include "scout.fixtureHost" . }}:8080/"]
+    allowed_origins = ["http://{{ include "scout.fixtureHost" . }}:8080"]
+    path_prefixes = ["/"]
+
+postgres:
+  # Official image as a single-instance StatefulSet (see docs/kubernetes.md for why not an operator).
+  image: postgres:17
+  # Leave empty to generate one (kept across upgrades), or name a Secret holding a `password` key.
+  # Use letters and digits only: the password goes into a connection URL unescaped.
+  password: ""
+  existingSecret: ""
+  storage: 2Gi
+  storageClass: ""
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+# Crawl spool, corpus snapshots, index Generations and event logs. The coordinator, the index Job
+# and serve share it, so it is ReadWriteOnce and those pods are co-located on one node (see
+# docs/kubernetes.md). Use a ReadWriteMany class and accessMode to spread them out.
+persistence:
+  size: 2Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+coordinator:
+  # Binds the pod's private IP; it has no authentication, so the Service is ClusterIP only.
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  # Connections to Postgres for control-plane work (2-8) and for completion processing. Unset keeps
+  # the binary's defaults (4 each).
+  dbLanes: ""
+  completionLanes: ""
+  # Seconds to keep serving /metrics after the crawl ends, for a final scrape.
+  metricsLingerSeconds: 0
+  # How often the frontier-depth gauges are sampled from Postgres.
+  metricsSampleSeconds: 5
+
+worker:
+  replicas: 3
+  # Seconds an in-flight task may keep running after SIGTERM before its lease is released. The
+  # pod's terminationGracePeriodSeconds is this plus 15.
+  drainSeconds: 20
+  resources:
+    requests: {cpu: 200m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  autoscaling:
+    # Scales on CPU, which needs metrics-server (`make kind-metrics-server` on kind). When enabled,
+    # `replicas` is ignored. Without it, scale by hand:  kubectl scale deploy/scout-worker --replicas=8
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+serve:
+  replicas: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  service:
+    type: ClusterIP
+    port: 8080
+    # Only for type NodePort (deploy/kind/values.yaml maps it to the host).
+    nodePort: null
+
+# One-shot Job: waits for the crawl to finish, then snapshots it, builds a Generation, activates
+# and verifies it (docker/stack.sh index). Serve picks the new Generation up without a restart.
+index:
+  enabled: true
+  mode: keyword-only
+  activeDeadlineSeconds: 1800
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+# The site the default crawl fetches, so a bare install is self-contained. Disable it when
+# crawl.sources points elsewhere.
+fixture:
+  enabled: true
+  # static: docker/fixture/site behind busybox httpd.
+  # synthetic: `origins` hosts (ports basePort..), `pagesPerOrigin` generated pages each, answering
+  # after `latencyMs`; used by the scaling benchmark (scripts/benchmark-distributed-kubernetes.py).
+  mode: static
+  synthetic:
+    image: python:3.13-slim
+    origins: 32
+    basePort: 9000
+    pagesPerOrigin: 125
+    latencyMs: 100
+  resources:
+    requests: {cpu: 50m, memory: 32Mi}
+    limits: {memory: 256Mi}
+
+# Scrape hints on the pods; deploy/prometheus/prometheus-k8s.yml turns them into scrape jobs.
+# No Prometheus Operator needed.
+metrics:
+  podAnnotations: true
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []

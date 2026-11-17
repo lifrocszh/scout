@@ -1,0 +1,64 @@
+{"query_id": "q-001", "query": "Vec retain", "source": "rust-docs", "intent": "exact-api", "split": "development"}
+{"query_id": "q-002", "query": "HashMap entry or_insert_with", "source": "rust-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-003", "query": "Option ok_or", "source": "rust-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-004", "query": "Vec dedup_by_key", "source": "rust-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-005", "query": "what is ownership in Rust", "source": "rust-docs", "intent": "conceptual", "split": "development"}
+{"query_id": "q-006", "query": "shared versus mutable references", "source": "rust-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-007", "query": "what do lifetime annotations mean", "source": "rust-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-008", "query": "difference between String and str", "source": "rust-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-009", "query": "how to remove elements from a vector that match a condition", "source": "rust-docs", "intent": "how-to", "split": "development"}
+{"query_id": "q-010", "query": "how to count word frequency with a hash map", "source": "rust-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-011", "query": "how to share mutable state between threads", "source": "rust-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-012", "query": "how to return an error early from a function", "source": "rust-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-013", "query": "keeping only the items of a list that pass a test", "source": "rust-docs", "intent": "semantic-paraphrase", "split": "development"}
+{"query_id": "q-014", "query": "a value that has a single owner and is freed when that owner leaves scope", "source": "rust-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-015", "query": "send work results from many worker threads to one place", "source": "rust-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-016", "query": "changing data through a shared handle with checks done while the program runs", "source": "rust-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-017", "query": "collections.Counter most_common", "source": "python-docs", "intent": "exact-api", "split": "development"}
+{"query_id": "q-018", "query": "asyncio.gather return_exceptions", "source": "python-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-019", "query": "itertools.groupby", "source": "python-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-020", "query": "functools.lru_cache maxsize", "source": "python-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-021", "query": "what is a context manager", "source": "python-docs", "intent": "conceptual", "split": "development"}
+{"query_id": "q-022", "query": "how do generators work lazily", "source": "python-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-023", "query": "what is a decorator in Python", "source": "python-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-024", "query": "why use dataclasses", "source": "python-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-025", "query": "how to count occurrences of items in a list", "source": "python-docs", "intent": "how-to", "split": "development"}
+{"query_id": "q-026", "query": "how to group items by a key into lists", "source": "python-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-027", "query": "how to run several coroutines at the same time", "source": "python-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-028", "query": "how to create an isolated environment for a project", "source": "python-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-029", "query": "produce items one by one so a huge file never sits in memory", "source": "python-docs", "intent": "semantic-paraphrase", "split": "development"}
+{"query_id": "q-030", "query": "remember the answers of an expensive function so repeat calls are instant", "source": "python-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-031", "query": "make sure a file gets closed even when an error happens inside the block", "source": "python-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-032", "query": "turn a dictionary into text and read it back", "source": "python-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-033", "query": "kubectl rollout undo deployment", "source": "kubernetes-docs", "intent": "exact-api", "split": "development"}
+{"query_id": "q-034", "query": "maxSurge maxUnavailable", "source": "kubernetes-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-035", "query": "volumeClaimTemplate", "source": "kubernetes-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-036", "query": "kubectl logs previous container", "source": "kubernetes-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-037", "query": "what is a Pod", "source": "kubernetes-docs", "intent": "conceptual", "split": "development"}
+{"query_id": "q-038", "query": "difference between liveness and readiness probes", "source": "kubernetes-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-039", "query": "ClusterIP versus NodePort", "source": "kubernetes-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-040", "query": "what is a taint", "source": "kubernetes-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-041", "query": "how to expose an application to external HTTP traffic by host name", "source": "kubernetes-docs", "intent": "how-to", "split": "development"}
+{"query_id": "q-042", "query": "how to scale replicas automatically based on CPU", "source": "kubernetes-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-043", "query": "how to give a team its own isolated area with a resource cap", "source": "kubernetes-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-044", "query": "how to keep configuration out of the container image", "source": "kubernetes-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-045", "query": "my container was killed because it used more memory than allowed", "source": "kubernetes-docs", "intent": "semantic-paraphrase", "split": "development"}
+{"query_id": "q-046", "query": "give a workload only the permissions it needs to call the API", "source": "kubernetes-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-047", "query": "reserve special machines so ordinary workloads do not land on them", "source": "kubernetes-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-048", "query": "database replicas that keep their own name and disk after a restart", "source": "kubernetes-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-049", "query": "CREATE INDEX CONCURRENTLY", "source": "postgres-docs", "intent": "exact-api", "split": "development"}
+{"query_id": "q-050", "query": "INSERT ON CONFLICT DO UPDATE", "source": "postgres-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-051", "query": "to_tsvector tsquery", "source": "postgres-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-052", "query": "pg_restore custom format", "source": "postgres-docs", "intent": "exact-api", "split": "held-out"}
+{"query_id": "q-053", "query": "what is MVCC", "source": "postgres-docs", "intent": "conceptual", "split": "development"}
+{"query_id": "q-054", "query": "transaction isolation levels", "source": "postgres-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-055", "query": "what does VACUUM do", "source": "postgres-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-056", "query": "what is a window function", "source": "postgres-docs", "intent": "conceptual", "split": "held-out"}
+{"query_id": "q-057", "query": "how to speed up a slow query", "source": "postgres-docs", "intent": "how-to", "split": "development"}
+{"query_id": "q-058", "query": "how to load a large CSV file into a table", "source": "postgres-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-059", "query": "how to query fields inside JSON documents", "source": "postgres-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-060", "query": "how to walk a tree of parent and child rows", "source": "postgres-docs", "intent": "how-to", "split": "held-out"}
+{"query_id": "q-061", "query": "split a huge table by date so old data can be dropped cheaply", "source": "postgres-docs", "intent": "semantic-paraphrase", "split": "development"}
+{"query_id": "q-062", "query": "stop orders from pointing at customers that do not exist", "source": "postgres-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-063", "query": "let a user read one table but not change it", "source": "postgres-docs", "intent": "semantic-paraphrase", "split": "held-out"}
+{"query_id": "q-064", "query": "show only departments whose average pay is above a threshold", "source": "postgres-docs", "intent": "semantic-paraphrase", "split": "held-out"}

@@ -8,6 +8,11 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+mod exporter;
+pub(crate) mod metrics;
+
+pub(crate) use exporter::{set_ready, start_exporter};
+
 const EVENT_SCHEMA: &str = "scout.operational-event.v1";
 
 #[derive(Debug, Serialize)]

@@ -1,0 +1,28 @@
+# Prometheus for the Compose `obs` profile: docker compose --profile obs up
+#
+# Every Scout process serves /metrics on a port inside the Compose network
+# (SCOUT_METRICS_BIND in compose.yaml); none of them is published on the host.
+# The short intervals suit the small fixture crawl, which ends in seconds.
+global:
+  scrape_interval: 2s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # One coordinator. It exits when the crawl completes, so its target goes down
+  # afterwards; the series it exposed stay queryable.
+  - job_name: scout-coordinator
+    static_configs:
+      - targets: ["coordinator:9101"]
+
+  # `docker compose up --scale worker=N` gives the name `worker` one A record per
+  # replica, so DNS service discovery follows the scaling.
+  - job_name: scout-worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9102
+        refresh_interval: 2s
+
+  - job_name: scout-serve
+    static_configs:
+      - targets: ["serve:9103"]

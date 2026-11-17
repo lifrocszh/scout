@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Generators and yield</title>
+</head>
+<body>
+<main>
+<h1>Generators and yield</h1>
+<h2>Lazy sequences</h2>
+<p>A function that contains the yield keyword returns a generator. The body runs only when the next value is requested, and its local state is preserved between requests. This lets you process a huge file or an endless sequence one item at a time without holding it all in memory.</p>
+<h2>Example</h2>
+<pre><code>def read_chunks(handle, size):
+    while chunk := handle.read(size):
+        yield chunk</code></pre>
+</main>
+</body>
+</html>
