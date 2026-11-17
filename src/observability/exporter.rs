@@ -4,10 +4,16 @@
 //! It serves plain-text metrics to a Prometheus scraper, one connection at a time,
 //! with no authentication or TLS: bind it to a private interface and never publish
 //! the port (the Compose stack keeps it on the internal network).
+//!
+//! The same listener answers the orchestrator's probes: `GET /healthz` is 200 while the
+//! process is up, and `GET /readyz` is 200 only after the process calls [`set_ready`]
+//! (the coordinator once it serves RPCs; a worker while it can reach its coordinator).
+//! `scout serve` keeps its own `/v1/healthz` and `/v1/readyz`.
 use super::metrics::{self, Role};
 use crate::error::Error;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +24,14 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_REQUEST_HEAD_BYTES: usize = 8 * 1024;
 const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+/// What `/readyz` reports. One role runs per process, so the flag is process-wide.
+static READY: AtomicBool = AtomicBool::new(false);
+
+/// Flip `/readyz` between 200 and 503. A no-op in effect when the endpoint is off.
+pub(crate) fn set_ready(ready: bool) {
+    READY.store(ready, Ordering::Relaxed);
+}
 
 /// A running `/metrics` endpoint. Dropping it waits out `SCOUT_METRICS_LINGER_SECS`
 /// (default 0) with the endpoint still serving, so a short-lived process (a crawl
@@ -111,15 +125,24 @@ fn answer(mut stream: TcpStream, role: Role) {
     let path = target.split('?').next().unwrap_or("");
     let (status, content_type, body) = match (method, path) {
         ("GET", "/metrics") => ("200 OK", CONTENT_TYPE, metrics::render(role)),
+        ("GET", "/healthz") => ("200 OK", "text/plain", "ok\n".to_owned()),
+        ("GET", "/readyz") if READY.load(Ordering::Relaxed) => {
+            ("200 OK", "text/plain", "ready\n".to_owned())
+        }
+        ("GET", "/readyz") => (
+            "503 Service Unavailable",
+            "text/plain",
+            "not ready\n".to_owned(),
+        ),
         ("GET", _) => (
             "404 Not Found",
             "text/plain",
-            "not found; try /metrics\n".to_owned(),
+            "not found; try /metrics, /healthz or /readyz\n".to_owned(),
         ),
         _ => (
             "405 Method Not Allowed",
             "text/plain",
-            "only GET /metrics is served\n".to_owned(),
+            "only GET is served\n".to_owned(),
         ),
     };
     let head = format!(
@@ -218,6 +241,28 @@ mod tests {
             post.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
             "{post}"
         );
+    }
+
+    #[test]
+    fn healthz_is_always_up_and_readyz_follows_set_ready() {
+        let exporter = start_exporter(Some("127.0.0.1:0"), Role::Worker)
+            .expect("start")
+            .expect("enabled");
+        let health = get(exporter.address(), "GET /healthz HTTP/1.1\r\n\r\n");
+        assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health}");
+
+        set_ready(false);
+        let unready = get(exporter.address(), "GET /readyz HTTP/1.1\r\n\r\n");
+        assert!(
+            unready.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "{unready}"
+        );
+        set_ready(true);
+        let ready = get(exporter.address(), "GET /readyz HTTP/1.1\r\n\r\n");
+        assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"), "{ready}");
+        set_ready(false);
+        let again = get(exporter.address(), "GET /readyz HTTP/1.1\r\n\r\n");
+        assert!(again.starts_with("HTTP/1.1 503"), "{again}");
     }
 
     #[test]

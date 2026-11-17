@@ -75,6 +75,12 @@ pub(crate) fn run_serve(cli: &Cli) -> i32 {
             return error.exit_code;
         }
     };
+    // The accept loop below never returns; SIGTERM/SIGINT end the process from this thread.
+    if let Err(error) = crate::shutdown::exit_when_requested() {
+        let error = Error::storage(format!("start shutdown handler: {error}"));
+        report_error(cli, &error);
+        return error.exit_code;
+    }
     let run_id = new_run_id();
     let mut events = match Events::open(&cli.data_dir, &run_id, "serve") {
         Ok(events) => events,

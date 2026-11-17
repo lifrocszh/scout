@@ -16,7 +16,7 @@ use crate::crawl::{
 };
 use crate::error::Error;
 use crate::observability::metrics::{self, Role};
-use crate::observability::{Events, emit_shared, start_exporter};
+use crate::observability::{Events, emit_shared, set_ready, start_exporter};
 use crate::storage::new_run_id;
 use crate::url::{normalize_origin, normalize_url, origin_key};
 use ::url::Url;
@@ -482,6 +482,8 @@ fn coordinator_main(
             runtime_state.context.events.clone(),
         );
         let dispatcher = tokio::spawn(scheduling::run(runtime_state.clone(), scheduler_receiver));
+        // Everything that can fail at startup has run: /readyz now says 200.
+        set_ready(true);
         let server_result = Server::builder()
             .add_service(
                 CoordinatorServer::new(service)
@@ -490,9 +492,10 @@ fn coordinator_main(
             )
             .serve_with_shutdown(address, async move {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {},
+                    _ = crate::shutdown::requested() => {},
                     _ = shutdown_state.shutdown.notified() => {},
                 }
+                set_ready(false);
                 scheduling::close(&shutdown_state);
             })
             .await
