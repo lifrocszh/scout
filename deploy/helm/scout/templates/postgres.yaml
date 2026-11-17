@@ -89,12 +89,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
-            # The official image writes its socket and lock files here.
-            - name: run
-              mountPath: /var/run/postgresql
-      volumes:
-        - name: run
-          emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

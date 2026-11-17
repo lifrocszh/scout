@@ -66,6 +66,11 @@ spec:
             {{- include "scout.databaseEnv" . | nindent 12 }}
             - name: SCOUT_CRAWL_RUN_ID
               value: {{ .Values.crawl.runId | quote }}
+            # The coordinator only binds a private address: the pod's own.
+            - name: SCOUT_COORDINATOR_BIND_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: SCOUT_METRICS_BIND
               value: 0.0.0.0:9101
             - name: SCOUT_METRICS_SAMPLE_SECS
