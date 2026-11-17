@@ -51,6 +51,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Service links would inject SCOUT_COORDINATOR_PORT=tcp://<ip>:50051 (from the Service of that name),
+      # which docker/stack.sh reads as its port.
+      enableServiceLinks: false
       securityContext:
         {{- include "scout.podSecurityContext" . | nindent 8 }}
       # stack.sh stops the coordinator with SIGINT and the wrapper forwards SIGTERM to it.

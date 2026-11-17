@@ -24,6 +24,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      enableServiceLinks: false
       securityContext:
         {{- include "scout.podSecurityContext" . | nindent 8 }}
       {{- if eq .Values.persistence.accessMode "ReadWriteOnce" }}

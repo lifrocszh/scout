@@ -34,6 +34,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      enableServiceLinks: false
       # Postgres' default stop (SIGTERM) waits for every client to leave, and the coordinator keeps
       # its connections open. The preStop hook asks for a fast shutdown instead.
       terminationGracePeriodSeconds: 60

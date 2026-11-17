@@ -45,6 +45,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      enableServiceLinks: false
       securityContext:
         {{- include "scout.podSecurityContext" . | nindent 8 }}
       # ReadWriteOnce data volume: land on the node that already has it mounted.

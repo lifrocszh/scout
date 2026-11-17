@@ -60,6 +60,7 @@ spec:
       annotations:
         checksum/fixture: {{ printf "%s%s" (toJson .Values.fixture) (.Files.Get "files/origins.py") | sha256sum }}
     spec:
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
