@@ -214,8 +214,7 @@ fn validate_interval(
             .parse::<f64>()
             .unwrap_or(f64::NAN);
         if !maximum_fraction.is_finite()
-            || maximum_fraction < 0.0
-            || maximum_fraction > 0.5
+            || !(0.0..=0.5).contains(&maximum_fraction)
             || interval
                 .adjustment_fraction
                 .is_none_or(|fraction| fraction.abs() > maximum_fraction + 0.0000011)
@@ -351,17 +350,16 @@ fn validate_evidence(
                 "invalid",
             );
         }
-        if let Some(fraction) = evidence.change_fraction {
-            if !fraction.is_finite()
+        if let Some(fraction) = evidence.change_fraction
+            && (!fraction.is_finite()
                 || !(0.0..=1.0).contains(&fraction)
                 || (comparable > 0
-                    && !same_six_decimal(fraction, changed as f64 / comparable as f64))
-            {
-                validation.push(
-                    "change_fraction does not match evidence counts".into(),
-                    "invalid",
-                );
-            }
+                    && !same_six_decimal(fraction, changed as f64 / comparable as f64)))
+        {
+            validation.push(
+                "change_fraction does not match evidence counts".into(),
+                "invalid",
+            );
         }
     } else if completed {
         validation.push(

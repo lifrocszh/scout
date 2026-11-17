@@ -38,6 +38,7 @@ impl FrontierStore {
         Ok(())
     }
 
+    #[expect(dead_code, reason = "not yet wired into scheduled-run cleanup")]
     pub(crate) fn discard_unstarted_run(&mut self, run_id: &str) -> Result<(), Error> {
         self.client.execute(
             "DELETE FROM scout_crawl_runs AS run

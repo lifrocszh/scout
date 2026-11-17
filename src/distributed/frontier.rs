@@ -990,11 +990,12 @@ mod tests {
     fn postgres_shared_request_policy_contract() {
         let database_url = std::env::var("SCOUT_TEST_DATABASE_URL")
             .expect("set SCOUT_TEST_DATABASE_URL to a disposable PostgreSQL database");
+        // Concurrency limits only: permits must outlive several DB round-trips on a loaded runner.
         let limits = policy_limits(
             2,
             1,
             Duration::from_millis(100),
-            Duration::from_millis(120),
+            Duration::from_secs(5),
             Duration::from_millis(150),
         );
         let (run_id, _cleanup, mut store) = setup_policy_run(&database_url, limits, "limits");
@@ -1188,7 +1189,7 @@ mod tests {
                 1,
                 1,
                 Duration::ZERO,
-                Duration::from_millis(200),
+                Duration::from_secs(5),
                 Duration::from_millis(100),
             )
         };
@@ -1234,11 +1235,12 @@ mod tests {
             .get(0);
         assert_eq!(pending_after_cap, 0);
 
+        // Fairness only: permits must outlive several DB round-trips on a loaded runner.
         let rr_limits = policy_limits(
             1,
             1,
             Duration::ZERO,
-            Duration::from_millis(200),
+            Duration::from_secs(5),
             Duration::from_millis(100),
         );
         let (rr_run, _rr_cleanup, mut rr_store) =
@@ -1372,10 +1374,11 @@ mod tests {
         assert!(task_a_second.normalized_url.ends_with("/a-second"));
         assert!(rr_store.complete_task(&task_a_second).unwrap());
 
+        // Wide enough that release + reconnect on a loaded runner stays inside the window.
         let spacing_limits = policy_limits(
             1,
             1,
-            Duration::from_millis(160),
+            Duration::from_secs(1),
             Duration::from_millis(500),
             Duration::from_millis(100),
         );
@@ -1393,6 +1396,8 @@ mod tests {
                 )
                 .unwrap(),
         );
+        // Measure from the first grant so reconnect latency cannot eat the spacing window.
+        let spacing_started = Instant::now();
         assert!(
             spacing_store
                 .release_request_permit(
@@ -1406,7 +1411,6 @@ mod tests {
         drop(spacing_store);
         thread::sleep(Duration::from_millis(20));
         let mut restarted = FrontierStore::connect(&database_url).unwrap();
-        let spacing_started = Instant::now();
         assert!(matches!(
             restarted
                 .try_acquire_request_permit(
@@ -1429,7 +1433,7 @@ mod tests {
             "https://spacing-b.example",
             "redirect",
         );
-        assert!(spacing_started.elapsed() >= Duration::from_millis(120));
+        assert!(spacing_started.elapsed() >= Duration::from_millis(900));
         assert!(
             restarted
                 .release_request_permit(
@@ -1564,13 +1568,21 @@ mod tests {
             RobotsDecision::Cached { allowed: false, .. }
         ));
 
+        // Expiry is under test here: permits and robots claims live request_timeout + margin.
+        // Liveness checks run well inside that window; expiry waits sleep past a deadline
+        // measured from the grant, so DB latency cannot flip either outcome.
+        let death_lifetime = Duration::from_secs(1);
         let death_limits = policy_limits(
             1,
             1,
             Duration::ZERO,
-            Duration::from_millis(100),
+            death_lifetime - Duration::from_millis(100),
             Duration::from_millis(100),
         );
+        let sleep_past = |granted: Instant| {
+            let deadline = granted + death_lifetime + Duration::from_millis(100);
+            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        };
         let (death_run, _death_cleanup, mut dying_store) =
             setup_policy_run(&database_url, death_limits, "worker-death");
         let abandoned = acquired(
@@ -1585,6 +1597,7 @@ mod tests {
                 )
                 .unwrap(),
         );
+        let abandoned_at = Instant::now();
         drop(dying_store);
         thread::sleep(Duration::from_millis(80));
         let mut death_restarted = FrontierStore::connect(&database_url).unwrap();
@@ -1602,7 +1615,7 @@ mod tests {
             PermitDecision::Waiting(_)
         ));
         drop(death_restarted);
-        thread::sleep(Duration::from_millis(150));
+        sleep_past(abandoned_at);
         let mut death_restarted = FrontierStore::connect(&database_url).unwrap();
         let replacement = acquired(
             death_restarted
@@ -1645,8 +1658,9 @@ mod tests {
             RobotsDecision::Refresh { epoch } => epoch,
             other => panic!("expected robots refresh claim, got {other:?}"),
         };
+        let dead_claim_at = Instant::now();
         drop(death_restarted);
-        thread::sleep(Duration::from_millis(230));
+        sleep_past(dead_claim_at);
         let mut replacement_store = FrontierStore::connect(&database_url).unwrap();
         let replacement_epoch = match replacement_store
             .robots_decision(

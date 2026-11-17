@@ -646,12 +646,12 @@ fn inspect_plan<C: GenericClient>(
         })
         .map(|batch| batch.batch_id.clone())
         .collect::<HashSet<_>>();
-    if let Some(batch_id) = &target_batch {
-        if !delete_batch_ids.contains(batch_id) {
-            blockers.push(format!(
-                "target batch {batch_id} is not cleanly archived and cannot be pruned"
-            ));
-        }
+    if let Some(batch_id) = &target_batch
+        && !delete_batch_ids.contains(batch_id)
+    {
+        blockers.push(format!(
+            "target batch {batch_id} is not cleanly archived and cannot be pruned"
+        ));
     }
     let batch_files = load_batch_files(
         client,
@@ -811,25 +811,26 @@ fn load_batches<C: GenericClient>(
         if let (Some(root), Some(row)) = (archive_root, archive_row.as_ref()) {
             let saved_sha: String = row.get(1);
             let saved_bytes: i64 = row.get(2);
-            if saved_sha == manifest_sha256 && saved_bytes == records_bytes {
-                if let Ok(path) = analytics::safe_relative_path(root, &row.get::<_, String>(0)) {
-                    if verify_files {
-                        if analytics::verify_batch_files(&path, &batch_copy).is_ok()
-                            && verify_batch_coverage(
-                                &path,
-                                &batch_id,
-                                &batch_run,
-                                &consumer_id,
-                                &event_coverage,
-                                &coverage_sha256,
-                            )
-                            .is_ok()
-                        {
-                            archive_valid = true;
-                        }
-                    } else {
+            if saved_sha == manifest_sha256
+                && saved_bytes == records_bytes
+                && let Ok(path) = analytics::safe_relative_path(root, &row.get::<_, String>(0))
+            {
+                if verify_files {
+                    if analytics::verify_batch_files(&path, &batch_copy).is_ok()
+                        && verify_batch_coverage(
+                            &path,
+                            &batch_id,
+                            &batch_run,
+                            &consumer_id,
+                            &event_coverage,
+                            &coverage_sha256,
+                        )
+                        .is_ok()
+                    {
                         archive_valid = true;
                     }
+                } else {
+                    archive_valid = true;
                 }
             }
         }
@@ -849,14 +850,12 @@ fn load_batches<C: GenericClient>(
                     }
                 }
             }
-            if recovered.is_none() {
-                if let (Some(root), Some(relative)) = (archive_root, archive_path.as_deref()) {
-                    if let Ok(path) = analytics::safe_relative_path(root, relative) {
-                        if analytics::verify_batch_files(&path, &batch_copy).is_ok() {
-                            recovered = analytics::batch_quarantine_count(&path, &batch_copy).ok();
-                        }
-                    }
-                }
+            if recovered.is_none()
+                && let (Some(root), Some(relative)) = (archive_root, archive_path.as_deref())
+                && let Ok(path) = analytics::safe_relative_path(root, relative)
+                && analytics::verify_batch_files(&path, &batch_copy).is_ok()
+            {
+                recovered = analytics::batch_quarantine_count(&path, &batch_copy).ok();
             }
             match recovered {
                 Some(count) => {
@@ -869,7 +868,7 @@ fn load_batches<C: GenericClient>(
             }
         }
 
-        if target_batch.as_deref() == Some(batch_id.as_str()) && quarantine_count != 0 {
+        if target_batch == Some(batch_id.as_str()) && quarantine_count != 0 {
             blockers.push(format!(
                 "target batch {batch_id} contains quarantined records"
             ));
@@ -1041,12 +1040,14 @@ fn load_artifacts<C: GenericClient>(
             let path_text: String = row.get(0);
             let saved_sha: String = row.get(1);
             let saved_bytes: i64 = row.get(2);
-            if saved_sha == sha256 && saved_bytes == bytes && bytes >= 0 {
-                if let Ok(path) = analytics::safe_relative_path(root, &path_text) {
-                    archive_path = Some(path_text);
-                    archive_valid = !verify_files
-                        || analytics::read_verified(&path, &sha256, bytes as u64).is_ok();
-                }
+            if saved_sha == sha256
+                && saved_bytes == bytes
+                && bytes >= 0
+                && let Ok(path) = analytics::safe_relative_path(root, &path_text)
+            {
+                archive_path = Some(path_text);
+                archive_valid =
+                    !verify_files || analytics::read_verified(&path, &sha256, bytes as u64).is_ok();
             }
         }
         artifacts.push(ArtifactPlan {

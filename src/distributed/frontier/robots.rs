@@ -79,10 +79,10 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("create robots refresh state: {error}")))?
             == 1;
         if inserted {
-            if let Some(task) = task {
-                if !super::lock_live_task(&mut tx, task)? {
-                    return Err(Error::stale_lease("task lease is stale or unknown"));
-                }
+            if let Some(task) = task
+                && !super::lock_live_task(&mut tx, task)?
+            {
+                return Err(Error::stale_lease("task lease is stale or unknown"));
             }
             tx.commit()
                 .map_err(|error| Error::storage(format!("commit robots refresh claim: {error}")))?;
@@ -96,10 +96,10 @@ impl FrontierStore {
                 &[&run_id, &origin],
             )
             .map_err(|error| Error::storage(format!("lock robots policy state: {error}")))?;
-        if let Some(task) = task {
-            if !super::lock_live_task(&mut tx, task)? {
-                return Err(Error::stale_lease("task lease is stale or unknown"));
-            }
+        if let Some(task) = task
+            && !super::lock_live_task(&mut tx, task)?
+        {
+            return Err(Error::stale_lease("task lease is stale or unknown"));
         }
         // These deadlines can expire while either row lock is being acquired. Read clock time
         // only after the robots row and, for task RPCs, its lease row are both locked.

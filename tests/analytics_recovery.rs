@@ -521,10 +521,10 @@ fn pending_retry_reuses_identical_published_batch_and_receipt_is_strict() {
     let (batch_id, batch_dir) = published_batch(&fixture.export(&[]));
     let original = ["batch-manifest.json", "records.jsonl", "_PUBLISHED"]
         .map(|name| fs::read(batch_dir.join(name)).unwrap());
-    assert_eq!(fixture.database.query_one(
+    assert!(fixture.database.query_one(
         "SELECT acknowledged_at IS NOT NULL FROM scout_crawl_event_checkpoints WHERE consumer_id=$1 AND event_id=$2",
         &[&fixture.consumer_id, &event_id],
-    ).unwrap().get::<_, bool>(0), true);
+    ).unwrap().get::<_, bool>(0));
 
     // Recreate the crash window: immutable files and batch registration survived,
     // while the local-export checkpoint did not.

@@ -52,7 +52,7 @@ struct PendingPermit {
 
 enum ReadyPermit {
     Initializing,
-    Pending(PendingPermit),
+    Pending(Box<PendingPermit>),
     Missing,
 }
 
@@ -63,7 +63,7 @@ fn take_ready_permit(waits: &mut Waits, request_id: &str) -> ReadyPermit {
         waits
             .permits
             .remove(request_id)
-            .map(ReadyPermit::Pending)
+            .map(|permit| ReadyPermit::Pending(Box::new(permit)))
             .unwrap_or(ReadyPermit::Missing)
     }
 }
@@ -316,10 +316,10 @@ pub(super) async fn run(state: Arc<CoordinatorState>, mut commands: mpsc::Receiv
                 started.elapsed().as_nanos().saturating_sub(pool_wait),
                 dispatch_started.elapsed().as_nanos(),
             );
-            if let Err(error) = &result {
-                if error.code() == tonic::Code::Internal {
-                    rpc::fail_coordinator(&state_for_dispatch, error.message());
-                }
+            if let Err(error) = &result
+                && error.code() == tonic::Code::Internal
+            {
+                rpc::fail_coordinator(&state_for_dispatch, error.message());
             }
             (waits, result)
         })
@@ -458,13 +458,12 @@ async fn process_command(
                             .get(&request_id)
                             .is_some_and(|wait| wait.generation == generation)
                     })
+                    && let Some(wait) = waits.permits.remove(&request_id)
                 {
-                    if let Some(wait) = waits.permits.remove(&request_id) {
-                        for pending in wait.replies {
-                            let _ = pending
-                                .reply
-                                .send(Err(Status::cancelled("request wait cancelled")));
-                        }
+                    for pending in wait.replies {
+                        let _ = pending
+                            .reply
+                            .send(Err(Status::cancelled("request wait cancelled")));
                     }
                 }
                 let _ = reply.send(Ok(proto::BoolResponse {
@@ -1152,7 +1151,7 @@ fn dispatch(
         // durable round-robin head in place until its completion command installs the waiter.
         let wait = match take_ready_permit(waits, &id) {
             ReadyPermit::Initializing => break,
-            ReadyPermit::Pending(wait) => wait,
+            ReadyPermit::Pending(wait) => *wait,
             ReadyPermit::Missing => {
                 return Err(Status::internal(
                     "durable queued request has no connected waiter",

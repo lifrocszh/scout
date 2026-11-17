@@ -12,7 +12,9 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SOURCE_ID: &str = "ticket07-09-local";
-const FIXTURE: &str = "docs/runs/ticket09-history-2026-10-14/completed-history-recommendation.json";
+// Synthetic completed-history recommendation shaped like the Ticket 09 output (24h -> 18h at the
+// 25% cap). Its scope and extraction hashes match `ticket09_source_config()`.
+const FIXTURE: &str = "tests/fixtures/recrawl/completed-history-recommendation.json";
 
 #[derive(Deserialize, Serialize)]
 struct Basis {
@@ -182,7 +184,7 @@ fn ticket10_operator_workflow_is_disabled_audited_and_restart_safe() {
     );
     assert!(global_enabled(&mut database));
 
-    // The real T09 24h→18h recommendation is exactly at the approved 25% cap.
+    // The T09-shaped 24h→18h recommendation is exactly at the approved 25% cap.
     let routine = write_recommendation(
         fixture_dir.path(),
         "routine-automation",

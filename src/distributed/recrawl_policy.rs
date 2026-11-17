@@ -32,6 +32,10 @@ pub(crate) struct SourcePolicyConfig {
     pub(crate) enabled: bool,
 }
 
+#[expect(
+    dead_code,
+    reason = "coordinator consumer seam described in the module docs"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ScheduleAdjustment {
     pub(crate) recommendation_id: String,
@@ -585,7 +589,7 @@ impl RecrawlPolicyStore {
                 })?;
             let scope_sha256: String = row.get(0);
             let enabled: bool = row.get(1);
-            let interval_hours: f64 = row.get(2);
+            let _interval_hours: f64 = row.get(2);
             let mut next_due_at_ms: i64 = row.get(3);
             let claimed_run: Option<String> = row.get(4);
             let claimed_status: Option<String> = row.get(5);
@@ -884,16 +888,9 @@ impl RecrawlPolicyStore {
         if recommendation.evidence.status == "provisional"
             && validation.status != "invalid"
             && validation.status != "unsupported"
+            && let Ok(basis) = parse_idempotency_basis(&recommendation)
         {
-            if let Some(basis) = parse_idempotency_basis(&recommendation).ok() {
-                validate_provisional_ownership(
-                    &mut tx,
-                    &recommendation,
-                    &basis,
-                    now,
-                    &mut validation,
-                )?;
-            }
+            validate_provisional_ownership(&mut tx, &recommendation, &basis, now, &mut validation)?;
         }
 
         match policy.as_ref() {

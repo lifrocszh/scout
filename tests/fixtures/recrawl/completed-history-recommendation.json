@@ -1,0 +1,58 @@
+{
+  "schema_version": "scout.recrawl-recommendation.v1",
+  "recommendation_id": "sha256:02d64d73d933c297a3e5663573b102a7152f2c9eeaac7df7983af1cd6f1c8990",
+  "idempotency_key": "sha256:02d64d73d933c297a3e5663573b102a7152f2c9eeaac7df7983af1cd6f1c8990",
+  "adjustment_type": "decrease",
+  "idempotency_basis": "{\"schema_version\":\"scout.recrawl-recommendation.v1\",\"generation_id\":\"ticket09-fixture\",\"source_id\":\"ticket07-09-local\",\"generated_at_utc\":\"2026-10-14T04:00:00Z\",\"expires_at_utc\":\"2026-10-15T04:00:00Z\",\"expected_policy_version\":\"recrawl-policy.v3\",\"interval_hours\":{\"minimum\":\"6.000\",\"current\":\"24.000\",\"maximum\":\"168.000\",\"proposed\":\"18.000\",\"adjustment\":\"-6.000\",\"adjustment_fraction\":\"-0.250000\"},\"recommendation_settings\":{\"max_adjustment_fraction\":\"0.250000\",\"minimum_completed_snapshots\":\"3\",\"minimum_comparable_page_observations\":\"20\",\"maximum_evidence_age_days\":\"30\",\"maximum_provisional_event_age_seconds\":\"86400\",\"change_fraction_decrease_threshold\":\"0.250000\",\"change_fraction_increase_threshold\":\"0.020000\",\"decrease_target_multiplier\":\"0.500000\",\"increase_target_multiplier\":\"1.500000\",\"high_confidence_minimum_snapshots\":\"4\",\"high_confidence_minimum_comparable_page_observations\":\"100\"},\"evidence\":{\"status\":\"completed_history\",\"snapshot_ids\":\"snapshot-78846fce99d510990fc381e6f56bb48ec0c807768167b6eb28a84ec53f721998,snapshot-8ddec5b2127990c1cb71b54fac7d13a1f50875aaaabdc358e1b8a6bd07502ce1,snapshot-e78f9da3c0596d11e8ef87dfc0987d862445acfefb13f0a6cebfbc72bd915652\",\"snapshot_refs\":[{\"snapshot_id\":\"snapshot-78846fce99d510990fc381e6f56bb48ec0c807768167b6eb28a84ec53f721998\",\"source_snapshot_manifest_sha256\":\"971dad86ec330aeeed8845a767255c73170371dca7171c9706bc79a22377941e\",\"crawl_manifest_sha256\":\"4f95c3cb859663980f15720780b5ab88290802e9e7e1aff019bcb1261f81e826\",\"observed_at_utc\":\"2026-10-14T03:00:00.000Z\"},{\"snapshot_id\":\"snapshot-8ddec5b2127990c1cb71b54fac7d13a1f50875aaaabdc358e1b8a6bd07502ce1\",\"source_snapshot_manifest_sha256\":\"f80bbbd4a9ff55fee6e831be633d920fa956597aa0b512f45c59f045cf1b3724\",\"crawl_manifest_sha256\":\"9896e05e69d6dd98c7b509afa7d6a668ea700ece12e73f6fc81765cf3067d5e6\",\"observed_at_utc\":\"2026-10-14T02:00:00.000Z\"},{\"snapshot_id\":\"snapshot-e78f9da3c0596d11e8ef87dfc0987d862445acfefb13f0a6cebfbc72bd915652\",\"source_snapshot_manifest_sha256\":\"05133c6e70674547877000f85b4980c76ea685c3754799b2a1cca2a61f25d4ef\",\"crawl_manifest_sha256\":\"b3e2c1d3f59501cbbc8442003a8cb08b85a4940f06728a9409a0bab0fa21bd83\",\"observed_at_utc\":\"2026-10-14T01:00:00.000Z\"}],\"provisional_run_id\":\"\",\"provisional_event_ids\":\"\",\"scope_sha256\":\"96a8a3ed1039680067f022219b0a29274b211b90151f91e58d2151f943105044\",\"extraction_contract_sha256\":\"40c1d222d618e406555f077a8ac6c7df4f2078ea6d6ee5122d7507cac637290a\",\"latest_observed_at_utc\":\"2026-10-14T03:00:00.000Z\",\"latest_capture_event_at_utc\":\"2026-10-14T02:59:00.000Z\",\"latest_run_event_at_utc\":\"2026-10-14T03:00:00.000Z\",\"comparable_page_observations\":\"48\",\"changed_page_observations\":\"24\",\"change_fraction\":\"0.500000\"}}",
+  "generation_id": "ticket09-fixture",
+  "source_id": "ticket07-09-local",
+  "generated_at_utc": "2026-10-14T04:00:00Z",
+  "expires_at_utc": "2026-10-15T04:00:00Z",
+  "expected_policy_version": "recrawl-policy.v3",
+  "interval_hours": {
+    "minimum": 6.0,
+    "current": 24.0,
+    "maximum": 168.0,
+    "proposed": 18.0,
+    "adjustment": -6.0,
+    "adjustment_fraction": -0.25
+  },
+  "evidence": {
+    "status": "completed_history",
+    "snapshot_refs": [
+      {
+        "snapshot_id": "snapshot-78846fce99d510990fc381e6f56bb48ec0c807768167b6eb28a84ec53f721998",
+        "source_snapshot_manifest_sha256": "971dad86ec330aeeed8845a767255c73170371dca7171c9706bc79a22377941e",
+        "crawl_manifest_sha256": "4f95c3cb859663980f15720780b5ab88290802e9e7e1aff019bcb1261f81e826",
+        "observed_at_utc": "2026-10-14T03:00:00.000Z"
+      },
+      {
+        "snapshot_id": "snapshot-8ddec5b2127990c1cb71b54fac7d13a1f50875aaaabdc358e1b8a6bd07502ce1",
+        "source_snapshot_manifest_sha256": "f80bbbd4a9ff55fee6e831be633d920fa956597aa0b512f45c59f045cf1b3724",
+        "crawl_manifest_sha256": "9896e05e69d6dd98c7b509afa7d6a668ea700ece12e73f6fc81765cf3067d5e6",
+        "observed_at_utc": "2026-10-14T02:00:00.000Z"
+      },
+      {
+        "snapshot_id": "snapshot-e78f9da3c0596d11e8ef87dfc0987d862445acfefb13f0a6cebfbc72bd915652",
+        "source_snapshot_manifest_sha256": "05133c6e70674547877000f85b4980c76ea685c3754799b2a1cca2a61f25d4ef",
+        "crawl_manifest_sha256": "b3e2c1d3f59501cbbc8442003a8cb08b85a4940f06728a9409a0bab0fa21bd83",
+        "observed_at_utc": "2026-10-14T01:00:00.000Z"
+      }
+    ],
+    "provisional_run_id": null,
+    "provisional_event_ids": [],
+    "scope_sha256": "96a8a3ed1039680067f022219b0a29274b211b90151f91e58d2151f943105044",
+    "extraction_contract_sha256": "40c1d222d618e406555f077a8ac6c7df4f2078ea6d6ee5122d7507cac637290a",
+    "latest_observed_at_utc": "2026-10-14T03:00:00.000Z",
+    "latest_capture_event_at_utc": "2026-10-14T02:59:00.000Z",
+    "latest_run_event_at_utc": "2026-10-14T03:00:00.000Z",
+    "comparable_page_observations": 48,
+    "changed_page_observations": 24,
+    "change_fraction": 0.5
+  },
+  "confidence": "medium",
+  "reasons": [
+    "change_fraction 0.500000 is at or above the 0.250000 decrease threshold",
+    "decrease capped at max_adjustment_fraction 0.250000"
+  ]
+}

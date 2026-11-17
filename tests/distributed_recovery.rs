@@ -444,26 +444,26 @@ impl Run {
 impl Drop for Run {
     fn drop(&mut self) {
         // Preserve only fixture config/logs on failure, while still removing all crawl data.
-        if thread::panicking() {
-            if let Ok(output) = std::env::var("SCOUT_TEST_EVIDENCE_DIR") {
-                let output = PathBuf::from(output).join(format!("failure-{}", self.id));
-                let _ = fs::create_dir_all(&output);
-                let _ = fs::copy(self.dir.join("sources.toml"), output.join("sources.toml"));
-                for root in [&self.dir, &self.dir.join("logs")] {
-                    if let Ok(entries) = fs::read_dir(root) {
-                        for entry in entries.filter_map(Result::ok) {
-                            if entry.path().is_file()
-                                && (root.ends_with("logs")
-                                    || matches!(
-                                        entry
-                                            .path()
-                                            .extension()
-                                            .and_then(|extension| extension.to_str()),
-                                        Some("stdout" | "stderr")
-                                    ))
-                            {
-                                let _ = fs::copy(entry.path(), output.join(entry.file_name()));
-                            }
+        if thread::panicking()
+            && let Ok(output) = std::env::var("SCOUT_TEST_EVIDENCE_DIR")
+        {
+            let output = PathBuf::from(output).join(format!("failure-{}", self.id));
+            let _ = fs::create_dir_all(&output);
+            let _ = fs::copy(self.dir.join("sources.toml"), output.join("sources.toml"));
+            for root in [&self.dir, &self.dir.join("logs")] {
+                if let Ok(entries) = fs::read_dir(root) {
+                    for entry in entries.filter_map(Result::ok) {
+                        if entry.path().is_file()
+                            && (root.ends_with("logs")
+                                || matches!(
+                                    entry
+                                        .path()
+                                        .extension()
+                                        .and_then(|extension| extension.to_str()),
+                                    Some("stdout" | "stderr")
+                                ))
+                        {
+                            let _ = fs::copy(entry.path(), output.join(entry.file_name()));
                         }
                     }
                 }
@@ -649,15 +649,16 @@ fn all_request_classes_obey_shared_policy_and_terminal_failures_continue() {
     let burst_accepted: i64 = burst.get(0);
     let burst_rejected: i64 = burst.get(1);
     assert!(burst_accepted <= 12 && burst_rejected > 0);
-    let status: String = run
-        .database
-        .query_one(
-            "SELECT status FROM scout_crawl_runs WHERE crawl_run_id=$1",
-            &[&run.id],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(status, "active");
+    // Terminal task failures do not fail the run: the exhausted frontier completes it.
+    wait(
+        || {
+            run.count(
+                "scout_crawl_runs",
+                "status='completed' AND stop_reason='frontier_exhausted'",
+            ) == 1
+        },
+        "frontier-exhausted run completion",
+    );
     let requests = fixture.metrics.lock().unwrap();
     run.evidence("boundaries", serde_json::json!({"run_id":run.id,"global_peak":requests.peak,"origin_peak":requests.origin_peak,"requests":requests.counts,"failed_tasks":2,"wrong_owner":0,"configured_spacing_ms":100,"fixture_spacing_tolerance_ms":80,"durable_spacing_violations":spacing_violations,"minimum_permit_gap_ms":min_permit_gap_ms,"minimum_http_gap_ms":min_http_gap_ms,"frontier_limit":12,"burst_accepted":burst_accepted,"burst_rejected":burst_rejected,"body_limit":2048}));
 }
@@ -867,7 +868,7 @@ fn storage_integrity_failure_fails_coordinator_and_run() {
     let bodies = run.dir.join("crawls").join(&run.id).join("bodies");
     fs::remove_dir(&bodies).unwrap();
     fs::write(&bodies, "blocked body store").unwrap();
-    let mut workers = vec![run.worker("integrity-worker", None)];
+    let mut workers = [run.worker("integrity-worker", None)];
     wait(
         || coordinator.0.try_wait().unwrap().is_some(),
         "coordinator integrity exit",
@@ -1770,7 +1771,11 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
             || event_acknowledged(&mut run, consumer_id, snapshot_event_id),
             "snapshot event acknowledgement",
         );
-        assert!(process.0.try_wait().unwrap().is_some());
+        // The consumer exits after committing its acknowledgement, so allow it time to exit.
+        wait(
+            || process.0.try_wait().unwrap().is_some(),
+            "consumer exit after snapshot acknowledgement",
+        );
         assert!(process.0.wait().unwrap().success());
     }
 
@@ -1800,7 +1805,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
                 .unwrap()
         );
         assert_eq!(format!("{:x}", Sha256::digest(&body)), digest);
-        assert_eq!(path.exists(), true, "capture body missing for {event_id}");
+        assert!(path.exists(), "capture body missing for {event_id}");
     }
     let snapshot_event_json: String = run
         .database
