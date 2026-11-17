@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lifetime annotations</title>
+</head>
+<body>
+<main>
+<h1>Lifetime annotations</h1>
+<h2>What they describe</h2>
+<p>A lifetime annotation such as &#x27;a does not change how long a reference lives. It tells the compiler how the lifetimes of several references in a function signature relate, so it can prove a returned reference never outlives the data it points to.</p>
+<h2>Elision</h2>
+<p>In common cases the compiler fills in lifetimes for you. With one input reference, the output reference gets the same lifetime. With a self parameter on a method, the output borrows from self.</p>
+<h2>Example</h2>
+<pre><code>fn longest&lt;&#x27;a&gt;(left: &amp;&#x27;a str, right: &amp;&#x27;a str) -&gt; &amp;&#x27;a str {
+    if left.len() &gt;= right.len() { left } else { right }
+}</code></pre>
+</main>
+</body>
+</html>

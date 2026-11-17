@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Taints and tolerations</title>
+</head>
+<body>
+<main>
+<h1>Taints and tolerations</h1>
+<h2>Keeping Pods away</h2>
+<p>A taint on a node repels Pods unless they carry a matching toleration. With the NoSchedule effect new Pods are kept off the node, and NoExecute also evicts running Pods.</p>
+<h2>Dedicated nodes</h2>
+<p>Tainting nodes that have special hardware and adding a toleration to selected Pods reserves those nodes for the workloads that need them.</p>
+</main>
+</body>
+</html>

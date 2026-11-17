@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Concurrency control and MVCC</title>
+</head>
+<body>
+<main>
+<h1>Concurrency control and MVCC</h1>
+<h2>Snapshots</h2>
+<p>PostgreSQL uses multiversion concurrency control. Each transaction sees a snapshot of the data as it was when the transaction or statement began, so readers never block writers and writers never block readers.</p>
+<h2>Row versions</h2>
+<p>An update creates a new version of the row while the old version stays visible to older snapshots until it is vacuumed away.</p>
+</main>
+</body>
+</html>

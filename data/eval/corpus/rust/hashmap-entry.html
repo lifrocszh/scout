@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HashMap::entry</title>
+</head>
+<body>
+<main>
+<h1>HashMap::entry</h1>
+<h2>Overview</h2>
+<p>The entry method gives access to a single slot in a HashMap, whether or not the key is already present. The returned Entry enum is either Occupied or Vacant, which lets you insert or update with one lookup instead of two.</p>
+<h2>Common patterns</h2>
+<p>The or_insert method stores a default value when the key is missing and returns a mutable reference to the value. The or_insert_with method computes the default lazily with a closure, and and_modify updates an existing value before an optional fallback insert.</p>
+<h2>Example</h2>
+<pre><code>let mut counts = HashMap::new();
+for word in text.split_whitespace() {
+    *counts.entry(word).or_insert(0) += 1;
+}</code></pre>
+</main>
+</body>
+</html>

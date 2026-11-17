@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VACUUM and autovacuum</title>
+</head>
+<body>
+<main>
+<h1>VACUUM and autovacuum</h1>
+<h2>Dead rows</h2>
+<p>Updates and deletes leave behind dead row versions. VACUUM reclaims that space for reuse and updates the visibility map, and the autovacuum daemon runs it automatically in the background.</p>
+<h2>Bloat</h2>
+<p>If autovacuum cannot keep up, tables and indexes bloat and queries slow down. VACUUM FULL rewrites the table to return space to the operating system but takes an exclusive lock.</p>
+</main>
+</body>
+</html>

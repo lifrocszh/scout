@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EXPLAIN and EXPLAIN ANALYZE</title>
+</head>
+<body>
+<main>
+<h1>EXPLAIN and EXPLAIN ANALYZE</h1>
+<h2>Reading plans</h2>
+<p>EXPLAIN shows the execution plan the planner chose for a statement, including scan types, join methods and estimated costs. A sequential scan reads the whole table, while an index scan follows an index.</p>
+<h2>Actual timings</h2>
+<p>EXPLAIN ANALYZE really runs the statement and adds actual row counts and timings next to the estimates. Large differences between estimated and actual rows suggest stale statistics, which ANALYZE can refresh.</p>
+</main>
+</body>
+</html>

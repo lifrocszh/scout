@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Decorators</title>
+</head>
+<body>
+<main>
+<h1>Decorators</h1>
+<h2>Overview</h2>
+<p>A decorator is a callable that takes a function and returns a replacement, applied with the at sign above a definition. They are used to add logging, timing, caching or access checks without editing the function body.</p>
+<h2>Preserving metadata</h2>
+<p>A wrapper hides the name and docstring of the original function. Apply functools.wraps to the wrapper so those attributes are copied over.</p>
+<h2>Example</h2>
+<pre><code>def timed(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        return func(*args, **kwargs)
+    return wrapper</code></pre>
+</main>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "evaluation_id": "scout-search-quality-fixture-v1",
+  "description": "Search-quality regression gate: 64 queries over the 64-page fixture corpus in data/eval/corpus.",
+  "judges": ["fixture-author"],
+  "adjudication": "by-construction",
+  "judgment_unit": "page",
+  "judgment_provenance": {
+    "fixture_by_construction": true,
+    "note": "The corpus was written together with the labels: grade 3 is the page written to answer the query, 2 a page that answers it substantially, 1 a related page, and unlisted pages are 0. These are not independent human judgments and say nothing about absolute search quality; the gate only detects regressions against the committed baseline."
+  }
+}

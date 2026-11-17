@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vec::drain</title>
+</head>
+<body>
+<main>
+<h1>Vec::drain</h1>
+<h2>Overview</h2>
+<p>The drain method removes a contiguous range of elements from a vector and returns an iterator over the removed items. The vector is shortened immediately and the tail is shifted down when the iterator is dropped.</p>
+<h2>Example</h2>
+<pre><code>let mut letters = vec![&#x27;a&#x27;, &#x27;b&#x27;, &#x27;c&#x27;, &#x27;d&#x27;, &#x27;e&#x27;];
+let middle: Vec&lt;char&gt; = letters.drain(1..4).collect();
+assert_eq!(letters, [&#x27;a&#x27;, &#x27;e&#x27;]);</code></pre>
+<h2>Notes</h2>
+<p>Draining the full range with drain(..) empties the vector while keeping its allocated capacity, which makes it a cheap way to move every item into another collection.</p>
+</main>
+</body>
+</html>

@@ -2,6 +2,7 @@
 /.scratch/
 /data/*
 !/data/configs/
+!/data/eval/
 /data/configs/*
 !/data/configs/*.toml
 !/data/configs/archive/

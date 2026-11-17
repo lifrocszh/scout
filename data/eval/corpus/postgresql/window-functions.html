@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Window functions</title>
+</head>
+<body>
+<main>
+<h1>Window functions</h1>
+<h2>Overview</h2>
+<p>A window function computes a value across a set of rows related to the current row without collapsing them into one row, unlike an aggregate with GROUP BY. The OVER clause defines the window with PARTITION BY and ORDER BY.</p>
+<h2>Example</h2>
+<pre><code>SELECT name, department,
+       row_number() OVER (PARTITION BY department ORDER BY salary DESC) AS rank_in_dept
+FROM employees;</code></pre>
+</main>
+</body>
+</html>

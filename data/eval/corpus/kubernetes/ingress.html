@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ingress</title>
+</head>
+<body>
+<main>
+<h1>Ingress</h1>
+<h2>HTTP routing</h2>
+<p>An Ingress routes external HTTP and HTTPS traffic to Services based on the host name and URL path, and can terminate TLS. An Ingress resource has no effect unless an ingress controller is running in the cluster.</p>
+<h2>Example</h2>
+<pre><code>rules:
+- host: shop.example.test
+  http:
+    paths:
+    - path: /api
+      backend:
+        service:
+          name: api</code></pre>
+</main>
+</body>
+</html>

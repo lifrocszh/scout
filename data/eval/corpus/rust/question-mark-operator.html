@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The question mark operator</title>
+</head>
+<body>
+<main>
+<h1>The question mark operator</h1>
+<h2>Propagating errors</h2>
+<p>The question mark operator placed after an expression of type Result returns early from the enclosing function when the value is an Err, and otherwise unwraps the Ok value. It removes the boilerplate of writing a match for every fallible call.</p>
+<h2>Error conversion</h2>
+<p>When the error is returned, the operator calls From::from to convert it into the error type of the function, so a function returning Box&lt;dyn Error&gt; or a custom enum can use it with several different error types. It also works on Option inside functions that return Option.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Full text search</title>
+</head>
+<body>
+<main>
+<h1>Full text search</h1>
+<h2>Overview</h2>
+<p>Full text search matches documents against a query by words rather than by exact text. A document is turned into a tsvector of normalised lexemes with to_tsvector, and a query becomes a tsquery with to_tsquery or websearch_to_tsquery.</p>
+<h2>Indexing and ranking</h2>
+<p>A GIN index on a tsvector column speeds up the @@ match operator, and ts_rank orders results by relevance.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Understanding ownership</title>
+</head>
+<body>
+<main>
+<h1>Understanding ownership</h1>
+<h2>The rules</h2>
+<p>Every value in Rust has exactly one owner at a time. When the owner goes out of scope the value is dropped and its memory is released. Assigning a heap value to another variable moves it, and the previous variable can no longer be used.</p>
+<h2>Moves and clones</h2>
+<p>Types such as String and Vec move on assignment. To keep using both bindings you must call clone for an explicit deep copy. Simple scalar types that implement Copy are duplicated instead of moved.</p>
+</main>
+</body>
+</html>

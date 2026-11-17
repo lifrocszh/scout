@@ -1,0 +1,51 @@
+# Index build profile for the search-quality gate (scripts/ci/search-quality.sh).
+# scripts/ci/search-quality.sh replaces @SNAPSHOT_ID@ with the fixture snapshot.
+#
+# Same BGE Small profile as docker/index-profile.toml (the model pins must stay
+# in sync with it), except for the depths: the Compose profile returns at most 5
+# candidates per channel, but the gate measures @10, and the evaluator filters
+# by source after retrieval, so each channel retrieves up to 100 Passages (the
+# maximum fusion depth).
+schema_version = "scout.index.v1"
+snapshot_id = "@SNAPSHOT_ID@"
+extraction_schema = "scout.extraction.v1"
+passage_schema = "scout.passage.v1"
+max_passage_tokens = 384
+overlap_tokens = 0
+no_overlap = true
+analyzer_id = "scout.unicode-token-v1"
+title_boost = 2.0
+heading_boost = 1.5
+body_boost = 1.0
+candidate_depth = 100
+writer_memory_bytes = 16000000
+worker_count = 1
+model_source = "hf://Xenova/bge-small-en-v1.5"
+model_revision = "ea104dacec62c0de699686887e3f920caeb4f3e3"
+model_license = "MIT"
+onnx_sha256 = "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+tokenizer_sha256 = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+model_config_sha256 = "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+embedding_backend = "fastembed"
+snippet_limit = 240
+model_max_tokens = 512
+pooling = "cls"
+normalization = "l2"
+query_instruction = "Represent this sentence for searching relevant passages: "
+document_representation = "heading-path-and-passage-body"
+dimensions = 384
+embedding_batch_size = 4
+embedding_workers = 1
+embedding_intra_op_threads = 1
+quantization = "none"
+metric = "cosine"
+scalar_kind = "f32"
+connectivity = 16
+construction_expansion = 64
+search_expansion = 32
+key_map = "one-based-catalog-order-page-id-passage-id"
+fusion_candidate_depth = 100
+fusion_algorithm = "rrf"
+rrf_k = 60
+page_aggregation = "max"
+snippet_window = 240

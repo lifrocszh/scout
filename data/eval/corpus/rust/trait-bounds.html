@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trait bounds</title>
+</head>
+<body>
+<main>
+<h1>Trait bounds</h1>
+<h2>Constraining generics</h2>
+<p>A trait bound restricts a generic type parameter to types that implement a trait, for example T: Display + Clone. Bounds can be written inline, in a where clause, or with impl Trait in argument position.</p>
+<h2>Example</h2>
+<pre><code>fn print_all&lt;T&gt;(items: &amp;[T]) where T: std::fmt::Display {
+    for item in items { println!(&quot;{item}&quot;); }
+}</code></pre>
+</main>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Iterator::collect</title>
+</head>
+<body>
+<main>
+<h1>Iterator::collect</h1>
+<h2>Overview</h2>
+<p>The collect method consumes an iterator and builds a collection from its items. The target type decides what is built, so it is usually named with a type annotation or the turbofish, as in collect::&lt;Vec&lt;_&gt;&gt;().</p>
+<h2>Collecting results</h2>
+<p>Collecting an iterator of Result values into Result&lt;Vec&lt;T&gt;, E&gt; stops at the first Err and returns it, which is a concise way to parse many inputs and fail fast. The same works for Option.</p>
+</main>
+</body>
+</html>

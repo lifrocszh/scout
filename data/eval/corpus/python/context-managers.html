@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The with statement and context managers</title>
+</head>
+<body>
+<main>
+<h1>The with statement and context managers</h1>
+<h2>Overview</h2>
+<p>The with statement runs setup code on entry and cleanup code on exit, even if an exception is raised inside the block. Files, locks and database transactions use it so that resources are always released.</p>
+<h2>Writing your own</h2>
+<p>A class becomes a context manager by defining __enter__ and __exit__ methods. The contextlib.contextmanager decorator turns a generator function with a single yield into a context manager with much less code.</p>
+</main>
+</body>
+</html>

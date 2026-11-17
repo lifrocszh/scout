@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>INSERT ON CONFLICT</title>
+</head>
+<body>
+<main>
+<h1>INSERT ON CONFLICT</h1>
+<h2>Upsert</h2>
+<p>INSERT ... ON CONFLICT inserts a row, or does something else if it would violate a unique constraint. ON CONFLICT DO NOTHING skips the row, and ON CONFLICT DO UPDATE changes the existing row, which is how an upsert is written.</p>
+<h2>Example</h2>
+<pre><code>INSERT INTO counters (name, hits) VALUES (&#x27;home&#x27;, 1)
+ON CONFLICT (name) DO UPDATE SET hits = counters.hits + 1;</code></pre>
+</main>
+</body>
+</html>
