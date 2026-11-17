@@ -15,12 +15,6 @@ fi
 
 failed=()
 for target in "${targets[@]}"; do
-  # This test reads local Ticket 09 evidence that is not committed (docs/runs/* is gitignored).
-  fixture=docs/runs/ticket09-history-2026-10-14/completed-history-recommendation.json
-  if [ "$target" = recrawl_policy_verification ] && [ ! -f "$fixture" ]; then
-    echo "::warning::Not running $target: missing fixture $fixture"
-    continue
-  fi
   # Some tests refuse databases without these exact names/prefixes.
   case "$target" in
     recrawl_policy_verification) db=scout_ticket10_20261014 ;;

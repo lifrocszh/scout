@@ -31,11 +31,8 @@ Each test binary gets a fresh database. The tests are picky about the DSN:
 I ran this in a cloud container on PostgreSQL 16.15. Postgres 17 could not be installed there; CI uses 17.
 
 - clippy: clean after the fixes below. `cargo test`: 61 passed.
-- Postgres suite: 50 of 51 passed in about 2m17s, after a warm build.
-- `recrawl_policy_verification` (1 test) was not run. It reads
-  `docs/runs/ticket09-history-2026-10-14/completed-history-recommendation.json`, and that file was
-  never committed because `docs/runs/*` is gitignored. The script emits a `::warning::` and skips this
-  binary until the fixture is in the checkout.
+- Postgres suite: all 51 passed. Without `recrawl_policy_verification` it took about 2m17s, after a
+  warm build.
 
 ## Code changes needed for green
 
@@ -54,10 +51,16 @@ I ran this in a cloud container on PostgreSQL 16.15. Postgres 17 could not be in
   failed on the first CI run. Right after the snapshot ack became visible, it asserted that the
   consumer had already exited. The consumer exits only after it commits that ack, so this is a race.
   The test now waits for the exit (bounded by the 40 s `wait` helper), then still asserts success.
+- `recrawl_policy_verification` read its fixture from
+  `docs/runs/ticket09-history-2026-10-14/`. That path is gitignored, so the file only existed on the
+  author's machine and the test could not run from a clean checkout. It now reads a committed
+  synthetic fixture, `tests/fixtures/recrawl/completed-history-recommendation.json`. The fixture has
+  the Ticket 09 shape: completed history, 3 snapshots, 24 of 48 pages changed, and 24h→18h at the 25%
+  cap. Its scope and extraction hashes are computed from the test's own Source config. With a corrupted
+  scope hash, the test fails (`out_of_scope`).
 
 ## Follow-ups
 
-- Commit the Ticket 09 fixture to a tracked path so `recrawl_policy_verification` runs in CI.
 - Ruff is not added yet. Even the default rules report 275 findings, mostly F821 from Databricks
   globals such as `spark`.
 - Turn on branch protection for `main` and require these checks.
