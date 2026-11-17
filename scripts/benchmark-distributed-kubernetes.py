@@ -446,9 +446,9 @@ def run_once(cluster, args, workers, repetition, output, diagnostic=False):
             done.wait(1)
 
     def sample_postgres():
-        query = ("SELECT state || ':' || coalesce(wait_event_type || '/' || wait_event, 'cpu') || '|' || count(*) "
-                 "FROM pg_stat_activity WHERE datname = 'scout' AND pid <> pg_backend_pid() "
-                 "AND state IN ('active', 'idle in transaction') GROUP BY 1")
+        query = ("SELECT key || '|' || n FROM (SELECT state || ':' || coalesce(wait_event_type || '/' || wait_event, 'cpu') AS key, "
+                 "count(*) AS n FROM pg_stat_activity WHERE datname = 'scout' AND pid <> pg_backend_pid() "
+                 "AND state IN ('active', 'idle in transaction') GROUP BY 1) counts")
         commits = "SELECT 'commits|' || xact_commit FROM pg_stat_database WHERE datname = 'scout'"
         while not done.is_set():
             try:
