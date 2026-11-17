@@ -63,10 +63,10 @@ where
         let result = operation(&state.context, &mut memory);
         let state_lock_hold = servicing.elapsed();
         drop(memory);
-        if let Err(error) = &result {
-            if error.code() == tonic::Code::Internal {
-                fail_coordinator(&state, error.message());
-            }
+        if let Err(error) = &result
+            && error.code() == tonic::Code::Internal
+        {
+            fail_coordinator(&state, error.message());
         }
         super::super::metrics::rpc(
             operation_name,
@@ -122,10 +122,10 @@ where
         ) {
             state.schedule_changed.notify_one();
         }
-        if let Err(error) = &result {
-            if error.code() == tonic::Code::Internal {
-                fail_coordinator(&state, error.message());
-            }
+        if let Err(error) = &result
+            && error.code() == tonic::Code::Internal
+        {
+            fail_coordinator(&state, error.message());
         }
         super::super::metrics::rpc(
             operation_name,
@@ -600,14 +600,14 @@ impl Coordinator for CoordinatorRpc {
         })
         .await
         .map_err(|error| Status::internal(format!("completion intake task failed: {error}")))?;
-        if let Err(error) = &intake {
-            if error.code() == tonic::Code::Internal {
-                let message = error.message().to_owned();
-                let _ = tokio::task::spawn_blocking(move || {
-                    fail_coordinator(&failure_state, &message);
-                })
-                .await;
-            }
+        if let Err(error) = &intake
+            && error.code() == tonic::Code::Internal
+        {
+            let message = error.message().to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                fail_coordinator(&failure_state, &message);
+            })
+            .await;
         }
         intake?;
         let response = receive

@@ -32,3 +32,8 @@ protoc-bin-vendored = "3.2.0"
 tonic-prost-build = "0.14.2"
 
 [dev-dependencies]
+
+# Stylistic lints the existing transaction-heavy code deliberately does not follow.
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

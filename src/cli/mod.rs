@@ -607,10 +607,8 @@ where
     if event_preflight && (run_id.is_none() || consumer_id.is_none()) {
         return Err("events preflight requires --run-id and --consumer-id".into());
     }
-    if event_consumer_register || event_consumer_retire {
-        if consumer_id.is_none() {
-            return Err("events consumer commands require --consumer-id".into());
-        }
+    if (event_consumer_register || event_consumer_retire) && consumer_id.is_none() {
+        return Err("events consumer commands require --consumer-id".into());
     }
     if (event_acknowledge && batch_id.is_some()) || (!event_acknowledge && receipt_file.is_some()) {
         return Err("receipt options are only valid for events acknowledge".into());
@@ -653,7 +651,7 @@ where
                     && approve.is_some()
                     && actor.is_some()
                     && reason.is_some() => {}
-            Some("enable" | "configure" | "import" | "pending" | "review") => {
+            Some("enable" | "configure" | "import" | "review") => {
                 return Err("missing required option for recrawl command".into());
             }
             _ => {

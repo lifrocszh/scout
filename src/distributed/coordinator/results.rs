@@ -204,12 +204,11 @@ impl ResultPool {
                         let mut job = job;
                         let reply = job.reply.take().expect("completion reply");
                         let result = process(&mut frontier, &config, &run_id, &spool, &events, job);
-                        if let Err(message) = &result {
-                            if message.code() == tonic::Code::Internal {
-                                if let Some(state) = state.upgrade() {
-                                    super::rpc::fail_coordinator(&state, message.message());
-                                }
-                            }
+                        if let Err(message) = &result
+                            && message.code() == tonic::Code::Internal
+                            && let Some(state) = state.upgrade()
+                        {
+                            super::rpc::fail_coordinator(&state, message.message());
                         }
                         let _ = reply.send(result);
                         // A disconnected caller does not undo a committed result.

@@ -1393,6 +1393,8 @@ mod tests {
                 )
                 .unwrap(),
         );
+        // Measure from the first grant so reconnect latency cannot eat the spacing window.
+        let spacing_started = Instant::now();
         assert!(
             spacing_store
                 .release_request_permit(
@@ -1406,7 +1408,6 @@ mod tests {
         drop(spacing_store);
         thread::sleep(Duration::from_millis(20));
         let mut restarted = FrontierStore::connect(&database_url).unwrap();
-        let spacing_started = Instant::now();
         assert!(matches!(
             restarted
                 .try_acquire_request_permit(
@@ -1429,7 +1430,7 @@ mod tests {
             "https://spacing-b.example",
             "redirect",
         );
-        assert!(spacing_started.elapsed() >= Duration::from_millis(120));
+        assert!(spacing_started.elapsed() >= Duration::from_millis(140));
         assert!(
             restarted
                 .release_request_permit(
