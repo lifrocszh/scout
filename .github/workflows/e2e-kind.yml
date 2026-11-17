@@ -1,0 +1,121 @@
+name: Kubernetes (kind)
+
+# Runs the Helm chart on a kind cluster: install, crawl the fixture site in-cluster, index, search,
+# `helm test`, scale workers 1 -> 8, check the HPA (scripts/ci/kind-smoke.sh). The scaling
+# benchmark (docs/runs/reports/) runs on manual dispatch only.
+#   pull request  when it touches the chart, the image build or this workflow
+#   nightly       against main
+#   dispatch      also runs the benchmark unless switched off
+on:
+  pull_request:
+    paths:
+      - deploy/**
+      - docker/**
+      - Dockerfile
+      - Makefile
+      - scripts/ci/kind-smoke.sh
+      - scripts/benchmark-distributed-kubernetes.py
+      - src/distributed/**
+      - src/observability/**
+      - src/shutdown.rs
+      - .github/workflows/e2e-kind.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      benchmark:
+        description: Run the scaling benchmark after the smoke test
+        type: boolean
+        default: true
+      workers:
+        description: Worker counts to compare
+        default: "1 2 4 8"
+      repetitions:
+        description: Runs per worker count
+        default: "3"
+      pages:
+        description: Page budget of every run
+        default: "2000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REPO: scout
+  IMAGE_TAG: kind
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=scout-image
+          # Only main writes the cache, so PR runs cannot evict it.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=scout-image' || '' }}
+      - name: Tool versions
+        run: |
+          kind version
+          kubectl version --client
+          helm version --short
+      - name: Cluster, image and chart
+        run: make kind-up BUILD_IMAGE=0
+      - name: Smoke test
+        run: HPA=1 make kind-smoke
+      - name: Cluster state
+        if: failure()
+        run: kubectl get all,pvc,events -A
+
+  benchmark:
+    if: github.event_name == 'workflow_dispatch' && inputs.benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=scout-image
+      - name: Cluster
+        run: |
+          kind create cluster --config deploy/kind/cluster.yaml
+          kind load docker-image "$IMAGE_REPO:$IMAGE_TAG" --name scout
+      - name: Scaling benchmark
+        run: |
+          nproc
+          python3 scripts/benchmark-distributed-kubernetes.py \
+            --output benchmark-results \
+            --workers ${{ inputs.workers }} \
+            --repetitions ${{ inputs.repetitions }} \
+            --pages ${{ inputs.pages }}
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f benchmark-results/results.json ]; then
+            python3 scripts/analyze-distributed-scaling.py benchmark-results/results.json --markdown >>"$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scaling-benchmark
+          path: benchmark-results
+          if-no-files-found: ignore
+          retention-days: 30
