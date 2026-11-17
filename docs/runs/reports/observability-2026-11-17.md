@@ -111,4 +111,20 @@ is built by CI.
 
 ## CI results
 
-Filled in after the first run on the pull request.
+First run on the pull request (head `0df1480`, run 13): all jobs green, about 3.6 minutes wall time.
+
+| Job | Result | Duration |
+| --- | --- | --- |
+| `lint` | success | 35 s |
+| `test` | success | 1 min 8 s |
+| `test-postgres` | success | 3 min 14 s |
+| `python` | success | 7 s |
+| `features` | success | 42 s |
+| `search-quality` | success | 1 min 6 s |
+| `compose-smoke` | success | 3 min 33 s |
+| `features-macos` | skipped (manual only) | |
+
+`compose-smoke` ran the obs checks on a GitHub runner: all 27 dashboard queries valid, 18 panels
+provisioned, per-container peak memory summing to 226 MiB (grafana 119, postgres 52, prometheus 36,
+coordinator 6, the rest 3 each) against the 2048 MiB budget. The Prometheus and Grafana pulls did not
+hit a rate limit.
