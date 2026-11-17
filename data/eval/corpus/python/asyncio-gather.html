@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>asyncio.gather</title>
+</head>
+<body>
+<main>
+<h1>asyncio.gather</h1>
+<h2>Running coroutines concurrently</h2>
+<p>The gather function schedules several awaitables at once and returns their results as a list in the same order as the arguments. Total time is close to that of the slowest coroutine instead of the sum of all of them.</p>
+<h2>Errors</h2>
+<p>By default the first exception is raised to the caller while the other tasks keep running. With return_exceptions=True, exceptions are returned in the results list so one failure does not hide the rest.</p>
+</main>
+</body>
+</html>

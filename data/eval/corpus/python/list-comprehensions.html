@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>List comprehensions</title>
+</head>
+<body>
+<main>
+<h1>List comprehensions</h1>
+<h2>Overview</h2>
+<p>A list comprehension builds a new list from any iterable in a single expression. It can include an optional if clause to filter items and more than one for clause to combine iterables.</p>
+<h2>Example</h2>
+<pre><code>squares = [n * n for n in range(10) if n % 2 == 0]
+pairs = [(x, y) for x in range(3) for y in range(3) if x != y]</code></pre>
+<h2>Compared with map and filter</h2>
+<p>A comprehension is usually clearer than chaining map and filter with lambda functions. Replace the square brackets with parentheses to get a lazy generator expression instead of a list.</p>
+</main>
+</body>
+</html>

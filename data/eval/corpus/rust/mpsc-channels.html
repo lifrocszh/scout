@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Message passing with mpsc channels</title>
+</head>
+<body>
+<main>
+<h1>Message passing with mpsc channels</h1>
+<h2>Channels</h2>
+<p>The std::sync::mpsc module provides a multiple-producer, single-consumer channel. The channel function returns a Sender and a Receiver. The sender can be cloned and given to several threads, while the receiver stays with one consumer.</p>
+<h2>Sending and receiving</h2>
+<p>The send method moves a value into the channel and recv blocks until a value arrives or every sender is dropped. Iterating over the receiver is a convenient way to process messages until the channel closes.</p>
+</main>
+</body>
+</html>

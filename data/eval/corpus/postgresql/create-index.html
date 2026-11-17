@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CREATE INDEX</title>
+</head>
+<body>
+<main>
+<h1>CREATE INDEX</h1>
+<h2>Overview</h2>
+<p>CREATE INDEX builds an index on one or more columns of a table. The default index type is B-tree, which supports equality and range comparisons and can return rows in sorted order.</p>
+<h2>Options</h2>
+<p>A multicolumn index serves queries that filter on its leading columns. A partial index covers only rows that match a WHERE condition, which keeps it small. Adding CONCURRENTLY builds the index without blocking writes, at the cost of a slower build.</p>
+<h2>Example</h2>
+<pre><code>CREATE INDEX CONCURRENTLY orders_customer_idx
+    ON orders (customer_id, created_at);</code></pre>
+</main>
+</body>
+</html>

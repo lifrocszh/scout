@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>String and str</title>
+</head>
+<body>
+<main>
+<h1>String and str</h1>
+<h2>Owned and borrowed text</h2>
+<p>String is an owned, growable UTF-8 buffer on the heap. The str type, usually seen as &amp;str, is a borrowed view into UTF-8 bytes that may live in a String, in a literal, or elsewhere. Functions that only read text should accept &amp;str.</p>
+<h2>Slicing</h2>
+<p>String indices are byte offsets, and slicing must land on a character boundary or the program panics. Use chars or char_indices to walk Unicode scalar values safely.</p>
+</main>
+</body>
+</html>

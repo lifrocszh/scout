@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Resource requests and limits</title>
+</head>
+<body>
+<main>
+<h1>Resource requests and limits</h1>
+<h2>Requests</h2>
+<p>A container&#x27;s CPU and memory request is the amount the scheduler reserves when choosing a node. A Pod stays Pending if no node has enough unreserved capacity.</p>
+<h2>Limits</h2>
+<p>A limit is a hard ceiling. A container that exceeds its CPU limit is throttled, while one that exceeds its memory limit is terminated with the reason OOMKilled.</p>
+</main>
+</body>
+</html>

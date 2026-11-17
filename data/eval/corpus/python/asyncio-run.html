@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>asyncio.run</title>
+</head>
+<body>
+<main>
+<h1>asyncio.run</h1>
+<h2>Entry point</h2>
+<p>The run function creates a new event loop, runs a coroutine to completion, closes the loop and returns the result. Call it once from the top level of a program, never from inside code that is already running in an event loop.</p>
+<h2>Example</h2>
+<pre><code>async def main():
+    await asyncio.sleep(1)
+    print(&quot;done&quot;)</code></pre>
+<pre><code>asyncio.run(main())</code></pre>
+</main>
+</body>
+</html>

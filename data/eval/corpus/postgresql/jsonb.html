@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JSONB data type</title>
+</head>
+<body>
+<main>
+<h1>JSONB data type</h1>
+<h2>Storing documents</h2>
+<p>The jsonb type stores JSON in a binary format that can be indexed and searched. The -&gt; operator extracts an element as jsonb, -&gt;&gt; extracts it as text, and the @&gt; containment operator tests whether one document contains another.</p>
+<h2>Indexing</h2>
+<p>A GIN index on a jsonb column makes containment and key-existence queries fast.</p>
+</main>
+</body>
+</html>

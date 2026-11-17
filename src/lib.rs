@@ -69,7 +69,24 @@ mod tests {
 
         assert!((metrics.ndcg_at_10 - 0.9508013338940989).abs() < 1e-12);
         assert_eq!(metrics.mrr_at_10, 1.0);
+        assert_eq!(metrics.recall_at_10, 1.0);
         assert_eq!(metrics.recall_at_100, 1.0);
+    }
+
+    #[test]
+    fn evaluation_recall_at_10_ignores_relevant_pages_below_rank_ten() {
+        let mut ranking = (1..=11)
+            .map(|rank| format!("filler-{rank}"))
+            .collect::<Vec<_>>();
+        ranking.push("deep".into());
+        let ranking = ranking.iter().map(String::as_str).collect::<Vec<_>>();
+        let judgments = BTreeMap::from([("deep".into(), 3_u8), ("absent".into(), 2_u8)]);
+
+        let metrics = compute_query_metrics(&ranking, &judgments).expect("metrics");
+
+        assert_eq!(metrics.recall_at_10, 0.0);
+        assert_eq!(metrics.recall_at_100, 0.5);
+        assert_eq!(metrics.mrr_at_10, 0.0);
     }
 
     #[test]

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Table partitioning</title>
+</head>
+<body>
+<main>
+<h1>Table partitioning</h1>
+<h2>Overview</h2>
+<p>Declarative partitioning splits one large logical table into smaller physical partitions by range, list or hash of a key such as a date. Queries that filter on the key skip irrelevant partitions through partition pruning.</p>
+<h2>Maintenance</h2>
+<p>Old data can be dropped by detaching or dropping a single partition instead of running a slow bulk DELETE.</p>
+</main>
+</body>
+</html>

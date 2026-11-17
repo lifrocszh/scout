@@ -1,0 +1,41 @@
+# Crawl config for the search-quality gate. Crawls the committed fixture corpus
+# (data/eval/corpus) as served by scripts/ci/search-quality.sh on 127.0.0.1:18099.
+# The port is fixed on purpose: Page IDs derive from the URL, and the sitemap
+# lists absolute URLs.
+schema_version = "scout.sources.v1"
+contact_url = "https://github.com/lifrocszh/scout"
+user_agent = "ScoutEval/0.1 (+https://github.com/lifrocszh/scout)"
+embedding_model = "BAAI/bge-small-en-v1.5"
+
+# 64 fixture pages. The target is higher on purpose, so the crawl ends because
+# the frontier is exhausted rather than because a quota was hit.
+page_target = 200
+max_frontier = 400
+max_duration_seconds = 120
+global_concurrency = 4
+origin_concurrency = 4
+min_start_spacing_ms = 10
+
+[[sources]]
+source_id = "rust"
+seeds = ["http://127.0.0.1:18099/rust/vec-retain.html"]
+allowed_origins = ["http://127.0.0.1:18099"]
+path_prefixes = ["/rust/"]
+
+[[sources]]
+source_id = "python"
+seeds = ["http://127.0.0.1:18099/python/list-comprehensions.html"]
+allowed_origins = ["http://127.0.0.1:18099"]
+path_prefixes = ["/python/"]
+
+[[sources]]
+source_id = "kubernetes"
+seeds = ["http://127.0.0.1:18099/kubernetes/pods.html"]
+allowed_origins = ["http://127.0.0.1:18099"]
+path_prefixes = ["/kubernetes/"]
+
+[[sources]]
+source_id = "postgresql"
+seeds = ["http://127.0.0.1:18099/postgresql/create-index.html"]
+allowed_origins = ["http://127.0.0.1:18099"]
+path_prefixes = ["/postgresql/"]

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rc and RefCell</title>
+</head>
+<body>
+<main>
+<h1>Rc and RefCell</h1>
+<h2>Shared ownership</h2>
+<p>Rc is a reference-counted pointer that allows several owners of the same value inside a single thread. The value is freed when the last Rc is dropped. Rc itself gives only shared, read-only access.</p>
+<h2>Interior mutability</h2>
+<p>RefCell moves the borrowing rules from compile time to runtime. Combining them as Rc&lt;RefCell&lt;T&gt;&gt; lets several owners mutate one value, and a violation such as two active mutable borrows panics instead of failing to compile.</p>
+</main>
+</body>
+</html>

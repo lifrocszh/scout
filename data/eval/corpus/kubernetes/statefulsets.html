@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>StatefulSets</title>
+</head>
+<body>
+<main>
+<h1>StatefulSets</h1>
+<h2>Stable identity</h2>
+<p>A StatefulSet manages Pods that need a stable network identity and their own persistent storage. Pods are created in order and named with an ordinal suffix such as db-0 and db-1, and keep that name across restarts.</p>
+<h2>Storage</h2>
+<p>A volumeClaimTemplate gives each replica its own PersistentVolumeClaim, so data survives when the Pod is rescheduled.</p>
+</main>
+</body>
+</html>

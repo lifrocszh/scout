@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>References and borrowing</title>
+</head>
+<body>
+<main>
+<h1>References and borrowing</h1>
+<h2>Shared and mutable references</h2>
+<p>A reference lets code use a value without taking ownership of it. At any moment you can have either many shared references or exactly one mutable reference to a value, never both. The compiler checks this rule at compile time.</p>
+<h2>Why the rule exists</h2>
+<p>Forbidding a mutable reference to coexist with other references prevents data races and iterator invalidation, such as pushing to a vector while a loop is reading from it.</p>
+</main>
+</body>
+</html>

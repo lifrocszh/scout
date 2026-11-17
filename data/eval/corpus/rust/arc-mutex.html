@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Arc and Mutex</title>
+</head>
+<body>
+<main>
+<h1>Arc and Mutex</h1>
+<h2>Sharing state across threads</h2>
+<p>Arc is an atomically reference-counted pointer that is safe to clone and send between threads. Wrapping the data in Mutex as Arc&lt;Mutex&lt;T&gt;&gt; allows several threads to mutate it, because the lock method blocks until the calling thread has exclusive access.</p>
+<h2>Poisoning</h2>
+<p>If a thread panics while holding the guard, the mutex becomes poisoned and later lock calls return an error. Releasing the guard early by dropping it keeps the critical section short.</p>
+<h2>Example</h2>
+<pre><code>let total = Arc::new(Mutex::new(0));
+let handle = { let total = Arc::clone(&amp;total); thread::spawn(move || *total.lock().unwrap() += 1) };</code></pre>
+</main>
+</body>
+</html>

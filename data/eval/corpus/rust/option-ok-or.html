@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Option::ok_or</title>
+</head>
+<body>
+<main>
+<h1>Option::ok_or</h1>
+<h2>Overview</h2>
+<p>The ok_or method turns an Option into a Result. Some(value) becomes Ok(value), and None becomes Err with the error value you supply. Use ok_or_else when building the error is expensive and should only happen on the None path.</p>
+<h2>Example</h2>
+<pre><code>let port = config.get(&quot;port&quot;).ok_or(ConfigError::MissingPort)?;</code></pre>
+</main>
+</body>
+</html>

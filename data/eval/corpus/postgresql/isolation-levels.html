@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Transaction isolation</title>
+</head>
+<body>
+<main>
+<h1>Transaction isolation</h1>
+<h2>Levels</h2>
+<p>PostgreSQL offers Read Committed, Repeatable Read and Serializable. Read Committed, the default, sees data committed before each statement starts. Repeatable Read keeps one snapshot for the whole transaction.</p>
+<h2>Serializable</h2>
+<p>Serializable behaves as if transactions ran one after another and may abort one with a serialization failure, so applications must be ready to retry.</p>
+</main>
+</body>
+</html>
