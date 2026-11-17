@@ -42,7 +42,10 @@ I ran this in a cloud container on PostgreSQL 16.15. Postgres 17 could not be in
   `discard_unstarted_run`). Allowed `too_many_arguments` and `type_complexity` crate-wide in `Cargo.toml`.
 - `frontier::tests::postgres_shared_request_policy_contract`: the spacing timer used to start after
   reconnecting. Reconnect latency (~55 ms here) ate the 160 ms window, so the test failed every time.
-  The timer now starts at the first grant, and the test asserts at least 140 ms.
+  The timer now starts at the first grant, and the test asserts at least 140 ms. The same test's
+  round-robin section also failed once in CI. Its blocker permit lived only 300 ms (200 ms timeout
+  plus 100 ms margin) and expired during two DB round-trips before the release. That section tests
+  fairness, not expiry, so it now uses a 5 s request timeout.
 - `distributed_recovery::all_request_classes_obey_shared_policy_and_terminal_failures_continue`: this
   test asserted that the run stays `active`. That assertion predates `complete_run_if_quiescent`
   (de86d6b), which now completes a frontier-exhausted run. The test now waits for

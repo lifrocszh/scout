@@ -1234,11 +1234,12 @@ mod tests {
             .get(0);
         assert_eq!(pending_after_cap, 0);
 
+        // Fairness only: permits must outlive several DB round-trips on a loaded runner.
         let rr_limits = policy_limits(
             1,
             1,
             Duration::ZERO,
-            Duration::from_millis(200),
+            Duration::from_secs(5),
             Duration::from_millis(100),
         );
         let (rr_run, _rr_cleanup, mut rr_store) =
