@@ -12,10 +12,18 @@
 # environment and command line only. The sources config and index profile are
 # mounted read-only from ./docker, not baked into the image.
 #
-# Planned profiles (not implemented here). Services that join a profile set
-# `profiles: [<name>]`, so a plain `docker compose up` stays at the core stack:
-#   obs   Prometheus + Grafana scraping the coordinator and search API  (#7)
-#   data  Apache Kafka and lakehouse tooling for the durable event log (#13, #14)
+# Profiles. Services that join a profile set `profiles: [<name>]`, so a plain
+# `docker compose up` stays at the core stack:
+#   obs   Prometheus + Grafana scraping every Scout process:
+#           docker compose --profile obs up --scale worker=3
+#         Grafana: http://127.0.0.1:3000 (dashboard "Scout overview").
+#         Prometheus: http://127.0.0.1:9090. The fixture crawl ends in seconds, so
+#         keep the processes up for a last scrape with SCOUT_METRICS_LINGER_SECS=10.
+#   data  (planned) Apache Kafka and lakehouse tooling for the durable event log (#13, #14)
+#
+# The coordinator, workers and serve always serve /metrics on a port inside the
+# Compose network (SCOUT_METRICS_BIND). Nothing publishes those ports, so the
+# core stack is unchanged without the obs profile.
 
 name: scout
 
@@ -78,6 +86,11 @@ services:
     command: ["coordinator"]
     environment:
       <<: [*scout-env, *crawl-run-id]
+      SCOUT_METRICS_BIND: 0.0.0.0:9101
+      # How often the frontier-depth gauges are sampled from Postgres.
+      SCOUT_METRICS_SAMPLE_SECS: ${SCOUT_METRICS_SAMPLE_SECS:-2}
+      # Seconds to keep serving /metrics after the crawl, for a final scrape.
+      SCOUT_METRICS_LINGER_SECS: ${SCOUT_METRICS_LINGER_SECS:-0}
     volumes:
       - scout-data:/data
       - scout-models:/data/models
@@ -100,7 +113,10 @@ services:
     <<: *scout
     entrypoint: ["/bin/bash", "/opt/scout/stack.sh"]
     command: ["worker"]
-    environment: *crawl-run-id
+    environment:
+      <<: *crawl-run-id
+      SCOUT_METRICS_BIND: 0.0.0.0:9102
+      SCOUT_METRICS_LINGER_SECS: ${SCOUT_METRICS_LINGER_SECS:-0}
     volumes:
       # Read-only: stack.sh only reads the event log to tell whether the crawl
       # is already done. Not healthy-gated: see stack.sh worker.
@@ -131,7 +147,8 @@ services:
   serve:
     <<: *scout
     command: ["serve", "--data-dir", "/data", "--bind", "0.0.0.0:8080"]
-    environment: {}
+    environment:
+      SCOUT_METRICS_BIND: 0.0.0.0:9103
     volumes:
       - scout-data:/data
       - scout-models:/data/models
@@ -150,6 +167,54 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ---- obs profile: docker compose --profile obs up ------------------------------------------
+  # Both services publish on loopback only and keep no secrets. Config and the
+  # dashboard are mounted read-only from ./deploy.
+
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v3.13.5
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=3d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana-oss:12.4.3
+    environment:
+      # Anonymous viewers can open the dashboard; edits need the admin login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/scout.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
 volumes:
   pgdata:
   # Crawl spool, corpus snapshots, index Generations and event logs.
@@ -158,3 +223,5 @@ volumes:
   # hybrid/semantic builds download the BGE Small model here on first use. Kept
   # as its own volume so it survives removing scout-data.
   scout-models:
+  # Prometheus time series (obs profile), kept for 3 days.
+  prometheus-data:

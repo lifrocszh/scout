@@ -146,10 +146,82 @@ curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json'
   copy and set a new `SCOUT_CRAWL_RUN_ID` (see `.env.example`).
 - **Published image.** `SCOUT_IMAGE=ghcr.io/lifrocszh/scout:latest docker compose up --no-build`.
   It is built from `main` (tags: commit SHA and `latest`) and from `v*` tags.
-- **Smoke test.** `scripts/ci/compose-smoke.sh 3` is what CI runs.
+- **Smoke test.** `scripts/ci/compose-smoke.sh 3` is what CI runs. It starts the `obs` profile too
+  and checks the metrics (see [Observability](#observability)).
 
-`obs` (Prometheus, Grafana) and `data` (Kafka, lakehouse) Compose profiles are planned and not
-part of this stack yet.
+The `data` profile (Kafka, lakehouse) is planned and not part of this stack yet.
+
+## Observability
+
+The coordinator, workers and `serve` expose Prometheus metrics at `/metrics`. The endpoint is off
+unless you give it an address, with `--metrics-bind <addr:port>` or `SCOUT_METRICS_BIND`; the flag
+wins. It is plain text with no authentication or TLS, so bind it to a private interface.
+
+```bash
+scout serve --data-dir data/x --bind 127.0.0.1:8080 --metrics-bind 127.0.0.1:9103
+curl http://127.0.0.1:9103/metrics
+```
+
+**Prometheus and Grafana under Compose.** The `obs` profile adds both; the core stack is unchanged
+without it. The processes always serve `/metrics` on ports inside the Compose network
+(`coordinator:9101`, `worker:9102`, `serve:9103`), and nothing publishes them.
+
+```bash
+docker compose --profile obs up --scale worker=3
+# Grafana     http://127.0.0.1:3000   dashboard "Scout overview", anonymous viewer
+#                                     (admin login: GRAFANA_ADMIN_PASSWORD, default "admin")
+# Prometheus  http://127.0.0.1:9090
+```
+
+The default fixture crawl ends in a few seconds. To watch a crawl live, slow it down and start on
+fresh volumes (a finished crawl is not repeated):
+
+```bash
+docker compose --profile obs down -v
+SCOUT_SOURCES_CONFIG_FILE=./docker/sources.fixture-slow.toml docker compose --profile obs up --scale worker=3
+```
+
+The coordinator and workers exit when the crawl ends, and Prometheus then marks their series stale.
+Grafana still draws the history; instant queries do not see them, so use `max_over_time(...)`
+(the dashboard's tiles do). `SCOUT_METRICS_LINGER_SECS=10` keeps them serving that long after the
+crawl, so a short crawl still gets a last scrape. The smoke test sets it.
+
+The dashboard (`deploy/grafana/dashboards/scout.json`) shows throughput, frontier depth by status,
+lease expirations and renewals, fencing rejections, DB pool wait and search latency. Grafana loads
+it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start. Prometheus
+(Apache-2.0) and Grafana OSS (AGPL-3.0) run as unmodified upstream images, pinned in `compose.yaml`.
+
+| Metric | Type | Process | Meaning |
+| --- | --- | --- | --- |
+| `scout_pages_fetched_total{outcome}` | counter | worker | Page fetches: `success`, `http_error`, `transport_error`, `body_error` |
+| `scout_task_claims_total` | counter | coordinator | Tasks leased to workers |
+| `scout_task_completions_total{outcome}` | counter | coordinator | Results: `accepted`, `duplicate`, `stale` |
+| `scout_task_failures_total{outcome}` | counter | coordinator | Reported failures: `retry` (requeued), `failed` (attempts used up) |
+| `scout_lease_renewals_total{outcome}` | counter | coordinator | `renewed`, `rejected` |
+| `scout_lease_expirations_total` | counter | coordinator | Expired leases taken over by a later claim |
+| `scout_stale_results_total{rpc}` | counter | coordinator | Calls refused by lease fencing, by RPC |
+| `scout_origin_requests_total{origin,kind}` | counter | coordinator | Request permits granted per Source origin (`page`, `robots`, `sitemap`) |
+| `scout_frontier_tasks{status}` | gauge | coordinator | Tasks by status, sampled from Postgres |
+| `scout_frontier_expired_leases` | gauge | coordinator | Leased tasks past their deadline, not yet reclaimed |
+| `scout_db_pool_wait_seconds` | histogram | coordinator | Wait for a free Postgres connection |
+| `scout_db_pool_connections`, `scout_db_pool_connections_in_use` | gauge | coordinator | General pool size and use |
+| `scout_search_duration_seconds{mode}` | histogram | serve | Search time per mode |
+| `scout_search_requests_total{mode,outcome}` | counter | serve | Searches: `ok`, `error` |
+| `scout_http_requests_total{route,status}` | counter | serve | Responses per route (unknown paths count as `other`) |
+| `scout_build_info{role,version}` | gauge | all | Always 1 |
+
+Labels are bounded: origins come from the configured Sources, and a family holds at most 512
+series (more fold into `overflow`). URLs and task IDs are never labels.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `SCOUT_METRICS_BIND` | unset (off) | `/metrics` address; `--metrics-bind` overrides it |
+| `SCOUT_METRICS_LINGER_SECS` | `0` | Keep serving this long after the process finishes |
+| `SCOUT_METRICS_SAMPLE_SECS` | `5` (Compose: `2`) | Coordinator: how often to sample frontier depth |
+
+With `/metrics` on, the coordinator opens one extra Postgres connection, outside its pool, and
+runs one grouped count over the run's tasks every sample interval for the frontier gauges. Scrapes
+never wait on the database.
 
 ## Distributed crawling
 

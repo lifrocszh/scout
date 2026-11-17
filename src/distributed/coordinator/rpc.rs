@@ -122,10 +122,11 @@ where
         ) {
             state.schedule_changed.notify_one();
         }
-        if let Err(error) = &result
-            && error.code() == tonic::Code::Internal
-        {
-            fail_coordinator(&state, error.message());
+        if let Err(error) = &result {
+            count_if_stale(operation_name, error);
+            if error.code() == tonic::Code::Internal {
+                fail_coordinator(&state, error.message());
+            }
         }
         super::super::metrics::rpc(
             operation_name,
@@ -608,6 +609,9 @@ impl Coordinator for CoordinatorRpc {
                 fail_coordinator(&failure_state, &message);
             })
             .await;
+        }
+        if let Err(status) = &intake {
+            count_if_stale("complete_task", status);
         }
         intake?;
         let response = receive

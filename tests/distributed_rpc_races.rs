@@ -251,6 +251,100 @@ fn retry_limits_fence_the_old_lease_at_the_rpc_boundary() {
     assert_eq!(row.get::<_, i32>(1), 2);
 }
 
+/// The value of one sample line (`name{labels} value`) in a Prometheus text exposition.
+fn metric(text: &str, series: &str) -> f64 {
+    text.lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("no sample {series} in:\n{text}"))
+        .parse()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "requires disposable Ticket 8 test database in SCOUT_TEST_DATABASE_URL"]
+fn coordinator_metrics_count_retries_and_lease_fencing() {
+    let origin = local_origin();
+    let run = Run::new_with_metrics("metrics", &one_source(&origin, &["/retry"]), 2, 1, 0, 2);
+    let (runtime, mut client) = run.client();
+    let first = run.claim(&runtime, &mut client, "metrics-owner-a").unwrap();
+    let mut fail_first = RpcProcess::spawn(&run, "fail", "fail-first", Some(&first), None, &[]);
+    assert_eq!(
+        parse_result(&fail_first.wait(Duration::from_secs(5)))["status"],
+        "pending"
+    );
+    let second = run.claim(&runtime, &mut client, "metrics-owner-b").unwrap();
+    assert_eq!(second.lease_epoch, first.lease_epoch + 1);
+    // The old lease is fenced on both paths: a late completion and a late renewal.
+    let mut stale_completion = RpcProcess::spawn(
+        &run,
+        "complete",
+        "stale-completion",
+        Some(&first),
+        None,
+        &[("SCOUT_RPC_REJECTION", "stale result")],
+    );
+    assert_eq!(
+        parse_result(&stale_completion.wait(Duration::from_secs(5)))["completed"],
+        false
+    );
+    let mut stale_renewal =
+        RpcProcess::spawn(&run, "renew", "stale-renew", Some(&first), None, &[]);
+    assert_eq!(
+        parse_result(&stale_renewal.wait(Duration::from_secs(5)))["error"],
+        "FailedPrecondition"
+    );
+    let mut fail_second = RpcProcess::spawn(&run, "fail", "fail-second", Some(&second), None, &[]);
+    assert_eq!(
+        parse_result(&fail_second.wait(Duration::from_secs(5)))["status"],
+        "failed"
+    );
+
+    let text = run.metrics();
+    assert!(
+        text.contains("scout_build_info{role=\"coordinator\",version=\""),
+        "{text}"
+    );
+    assert_eq!(metric(&text, "scout_task_claims_total"), 2.0);
+    assert_eq!(
+        metric(&text, "scout_task_failures_total{outcome=\"retry\"}"),
+        1.0
+    );
+    assert_eq!(
+        metric(&text, "scout_task_failures_total{outcome=\"failed\"}"),
+        1.0
+    );
+    assert_eq!(
+        metric(&text, "scout_task_completions_total{outcome=\"stale\"}"),
+        1.0
+    );
+    assert_eq!(
+        metric(&text, "scout_task_completions_total{outcome=\"accepted\"}"),
+        0.0
+    );
+    assert_eq!(
+        metric(&text, "scout_stale_results_total{rpc=\"complete_task\"}"),
+        1.0
+    );
+    assert_eq!(
+        metric(&text, "scout_stale_results_total{rpc=\"renew_lease\"}"),
+        1.0
+    );
+    assert!(
+        metric(&text, "scout_db_pool_wait_seconds_count") >= 1.0,
+        "{text}"
+    );
+    assert_eq!(metric(&text, "scout_db_pool_connections"), 4.0);
+    // The dispatcher may hold a connection at the instant of a scrape, but none may leak.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while metric(&run.metrics(), "scout_db_pool_connections_in_use") != 0.0 {
+        assert!(
+            Instant::now() < deadline,
+            "pool connections stayed checked out"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 #[ignore = "requires disposable Ticket 8 test database in SCOUT_TEST_DATABASE_URL"]
 fn robots_refresh_has_one_rpc_owner_and_fences_nonowner_commits() {

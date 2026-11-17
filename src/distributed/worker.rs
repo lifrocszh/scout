@@ -7,7 +7,8 @@ use crate::crawl::{
     RobotsPolicy, extract_sitemap_locations, is_sitemap_index, normalize_sitemap_url, parse_robots,
 };
 use crate::error::Error;
-use crate::observability::{Events, emit_shared};
+use crate::observability::metrics::{self, Role};
+use crate::observability::{Events, emit_shared, start_exporter};
 use crate::storage::{new_run_id, sha256_hex};
 use crate::url::{normalize_url, origin_key};
 use ::url::Url;
@@ -89,6 +90,8 @@ fn worker_main(
             "worker coordinator address must use http:// on the private network",
         ));
     }
+    // Held until the worker returns; SCOUT_METRICS_LINGER_SECS keeps it serving after the last task.
+    let _metrics = start_exporter(cli.metrics_bind.as_deref(), Role::Worker)?;
     let worker_id = worker_id.map(str::to_owned).unwrap_or_else(new_run_id);
     validate_identity(&worker_id, "worker_id")
         .map_err(|status| Error::invalid(status.message().to_owned()))?;
@@ -738,10 +741,18 @@ async fn request(
             request_kind,
             permit_id,
         );
+        // Only page fetches count towards throughput; robots and sitemap requests are
+        // visible per origin in the coordinator's permit counter.
+        let count_page = |outcome: &'static str| {
+            if request_kind == "page" {
+                metrics::PAGES_FETCHED.inc(&[outcome]);
+            }
+        };
         let sent = ctx.http.get(value).send().await;
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
+                count_page("transport_error");
                 measurement.finish("transport_error", 0);
                 release_permit(ctx, permit_id, "transport_error").await?;
                 if attempt == ctx.config.max_attempts {
@@ -775,6 +786,7 @@ async fn request(
             .content_length()
             .is_some_and(|length| length > body_limit as u64)
         {
+            count_page("body_error");
             measurement.finish("body_limit", 0);
             release_permit(ctx, permit_id, "body_limit").await?;
             return Err(Error::safety("response body exceeded configured limit"));
@@ -782,6 +794,7 @@ async fn request(
         let body = match read_limited(response, body_limit).await {
             Ok(body) => body,
             Err(error) => {
+                count_page("body_error");
                 measurement.finish("body_read_error", 0);
                 release_permit(ctx, permit_id, "body_read_error").await?;
                 return Err(error);
@@ -792,6 +805,11 @@ async fn request(
         } else {
             format!("http_{status}")
         };
+        count_page(if status < 400 {
+            "success"
+        } else {
+            "http_error"
+        });
         measurement.finish(&outcome, body.len());
         release_permit(ctx, permit_id, &outcome).await?;
         if retryable_status_code(status) && attempt < ctx.config.max_attempts {

@@ -1,0 +1,14 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: scout-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Matches scrape_interval in deploy/prometheus/prometheus.yml, so that
+      # $__rate_interval is four scrapes wide.
+      timeInterval: 2s

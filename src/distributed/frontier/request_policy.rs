@@ -571,6 +571,8 @@ impl FrontierStore {
         debug_assert!(active_origin < i64::from(selected_origin_limit));
         tx.commit()
             .map_err(|error| Error::storage(format!("commit request permit: {error}")))?;
+        // Origins are limited to the configured Sources and kinds to page/robots/sitemap.
+        crate::observability::metrics::ORIGIN_REQUESTS.inc(&[&selected_origin, request_kind]);
         Ok(Some(PermitDecision::Acquired(grant)))
     }
 

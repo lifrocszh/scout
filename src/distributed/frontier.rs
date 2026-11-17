@@ -53,7 +53,7 @@ WITH scheduler AS MATERIALIZED (
       AND EXISTS (SELECT 1 FROM active_run)
     RETURNING task_id
 ), candidate AS (
-    SELECT task.task_id, task.schedule_key
+    SELECT task.task_id, task.schedule_key, (task.status = 'leased') AS reclaimed_expired
     FROM scout_crawl_tasks AS task
     CROSS JOIN scheduler
     JOIN active_run ON active_run.crawl_run_id = scheduler.crawl_run_id
@@ -83,7 +83,8 @@ WITH scheduler AS MATERIALIZED (
     WHERE task.task_id = candidate.task_id
     RETURNING task.task_id, task.crawl_run_id, task.source_id, task.origin,
               task.normalized_url, task.schedule_key, task.task_attempt_count,
-              task.lease_owner, task.lease_epoch, task.lease_deadline, task.idempotency_key
+              task.lease_owner, task.lease_epoch, task.lease_deadline, task.idempotency_key,
+              candidate.reclaimed_expired
 ), advanced AS (
     UPDATE scout_crawl_task_scheduler AS cursor
     SET last_schedule_key = claimed.schedule_key
@@ -95,7 +96,7 @@ SELECT claimed.task_id, claimed.crawl_run_id, claimed.source_id, claimed.origin,
        claimed.normalized_url, claimed.schedule_key, claimed.task_attempt_count,
        claimed.lease_owner, claimed.lease_epoch,
        (extract(epoch FROM claimed.lease_deadline) * 1000)::BIGINT AS lease_deadline_unix_ms,
-       claimed.idempotency_key
+       claimed.idempotency_key, claimed.reclaimed_expired
 FROM claimed
 JOIN advanced USING (crawl_run_id)
 "#;
@@ -636,6 +637,109 @@ mod tests {
             ),
             "page-only result was blocked by scheduler cursor for run {result_run_id}"
         );
+    }
+
+    /// The claim/renew/fail/expiry counters and the status-count query behind the frontier gauges.
+    /// The counters are process-wide and other tests run in parallel, so this only asserts that each
+    /// one grew by at least the amount this test caused.
+    #[test]
+    #[ignore = "requires a coordinator-only PostgreSQL test database"]
+    fn postgres_task_metrics_and_status_counts() {
+        use crate::observability::metrics;
+        let database_url = std::env::var("SCOUT_TEST_DATABASE_URL")
+            .expect("set SCOUT_TEST_DATABASE_URL to a disposable PostgreSQL database");
+        let run_id = format!(
+            "metrics-test-{}",
+            sha256_hex(format!("{:?}", std::time::SystemTime::now()).as_bytes())
+        );
+        let _cleanup = RunCleanup {
+            database_url: database_url.clone(),
+            run_id: run_id.clone(),
+        };
+        let mut store = FrontierStore::connect(&database_url).unwrap();
+        store.apply_migrations().unwrap();
+        store
+            .ensure_run(&run_id, &sha256_hex(run_id.as_bytes()))
+            .unwrap();
+        for name in ["a", "b", "c"] {
+            store
+                .enqueue_url(&run_id, "docs", &format!("https://example.com/{name}"), 1)
+                .unwrap();
+        }
+        let before = (
+            metrics::TASK_CLAIMS.get(&[]),
+            metrics::LEASE_EXPIRATIONS.get(&[]),
+            metrics::LEASE_RENEWALS.get(&["renewed"]),
+            metrics::LEASE_RENEWALS.get(&["rejected"]),
+            metrics::TASK_FAILURES.get(&["failed"]),
+            metrics::STALE_RESULTS.get(&["fail_task"]),
+        );
+        let long = LeaseTiming::for_request_timeout(Duration::from_secs(30)).unwrap();
+        let short = LeaseTiming::new(
+            Duration::from_millis(10),
+            Duration::from_millis(120),
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        assert_eq!(
+            store.task_status_counts(&run_id).unwrap(),
+            super::tasks::TaskStatusCounts {
+                pending: 3,
+                ..Default::default()
+            }
+        );
+
+        let renewed = store.claim_one(&run_id, "w1", long).unwrap().unwrap();
+        assert!(store.renew_lease(&renewed, long).unwrap());
+        // One attempt allowed: a failure is terminal.
+        assert_eq!(
+            store
+                .fail_task(&renewed, "boom", Duration::from_millis(1))
+                .unwrap(),
+            Some(TaskStatus::Failed)
+        );
+        // The same lease reported again is fenced.
+        assert_eq!(
+            store
+                .fail_task(&renewed, "again", Duration::from_millis(1))
+                .unwrap(),
+            None
+        );
+        assert!(!store.renew_lease(&renewed, long).unwrap());
+
+        let lapsing = store.claim_one(&run_id, "w2", short).unwrap().unwrap();
+        thread::sleep(Duration::from_millis(180));
+        assert_eq!(
+            store.task_status_counts(&run_id).unwrap(),
+            super::tasks::TaskStatusCounts {
+                pending: 1,
+                leased: 1,
+                failed: 1,
+                expired_leases: 1,
+                ..Default::default()
+            },
+            "the lapsed lease is leased but expired until a claim reclaims it"
+        );
+        // The lapsed task has used its only attempt, so the next claim takes the pending one.
+        let third = store.claim_one(&run_id, "w3", long).unwrap().unwrap();
+        assert_ne!(third.task_id, lapsing.task_id);
+
+        // Same-task reclaim after expiry: a task with attempts left is taken over by a later claim.
+        store
+            .enqueue_url(&run_id, "docs", "https://example.com/d", 3)
+            .unwrap();
+        let first = store.claim_one(&run_id, "w4", short).unwrap().unwrap();
+        thread::sleep(Duration::from_millis(180));
+        let taken_over = store.claim_one(&run_id, "w5", long).unwrap().unwrap();
+        assert_eq!(taken_over.task_id, first.task_id);
+        assert_eq!(taken_over.lease_epoch, first.lease_epoch + 1);
+
+        assert!(metrics::TASK_CLAIMS.get(&[]) >= before.0 + 5);
+        assert!(metrics::LEASE_EXPIRATIONS.get(&[]) > before.1);
+        assert!(metrics::LEASE_RENEWALS.get(&["renewed"]) > before.2);
+        assert!(metrics::LEASE_RENEWALS.get(&["rejected"]) > before.3);
+        assert!(metrics::TASK_FAILURES.get(&["failed"]) > before.4);
+        assert!(metrics::STALE_RESULTS.get(&["fail_task"]) > before.5);
     }
 
     // Run with SCOUT_TEST_DATABASE_URL set and `cargo test --lib frontier::tests::postgres_frontier_contract -- --ignored`.

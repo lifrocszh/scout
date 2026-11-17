@@ -15,7 +15,8 @@ use super::app::report_error;
 use super::generation::{
     ActiveGeneration, IndexGeneration, LifecycleAction, PageQuery, SearchMode, read_pointer,
 };
-use super::observability::Events;
+use super::observability::metrics::{self, Role};
+use super::observability::{Events, start_exporter};
 use super::storage::{new_run_id, sha256_hex};
 use crate::cli::{Cli, Operation};
 use crate::error::Error;
@@ -29,7 +30,7 @@ use std::sync::{
     mpsc::{self, TrySendError},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SERVE_ACTIVE_WORKERS: usize = 1;
 const SERVE_CONNECTION_QUEUE_CAPACITY: usize = 1;
@@ -65,6 +66,14 @@ pub(crate) fn run_serve(cli: &Cli) -> i32 {
             }
         },
         None => None,
+    };
+    // Held for the life of the process; the serve loop below never returns normally.
+    let _metrics = match start_exporter(cli.metrics_bind.as_deref(), Role::Serve) {
+        Ok(exporter) => exporter,
+        Err(error) => {
+            report_error(cli, &error);
+            return error.exit_code;
+        }
     };
     let run_id = new_run_id();
     let mut events = match Events::open(&cli.data_dir, &run_id, "serve") {
@@ -138,6 +147,7 @@ fn reject_overloaded(
         serde_json::to_vec(&error_envelope(&error, &request_id)).unwrap_or_else(|_| b"{}".to_vec());
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let _ = write_http_response(&mut stream, 503, &body);
+    metrics::HTTP_REQUESTS.inc(&["overloaded", "503"]);
     write_access_log(access_log, peer, "UNKNOWN", "-", 503, body.len());
     if let Ok(mut events) = Events::open(data_dir, &request_id, "serve") {
         events.emit(
@@ -222,6 +232,7 @@ fn handle_http_connection(
     };
     let body_bytes = serde_json::to_vec(&response_body).unwrap_or_else(|_| b"{}".to_vec());
     let _ = write_http_response(&mut stream, status, &body_bytes);
+    metrics::HTTP_REQUESTS.inc(&[route_label(&method, &path), &status.to_string()]);
     write_access_log(access_log, peer, &method, &target, status, body_bytes.len());
     if let Ok(mut events) = Events::open(&state.data_dir, &request_id, "serve") {
         let event = if path == "/v1/search" {
@@ -241,6 +252,17 @@ fn handle_http_connection(
                 "query_length": if path == "/v1/search" { search_query_length(&body) } else { 0 },
             }),
         );
+    }
+}
+
+/// A bounded route label: unknown paths all count as `other`, never as their own series.
+fn route_label(method: &str, path: &str) -> &'static str {
+    match (method, path) {
+        ("GET", "/v1/healthz") => "healthz",
+        ("GET", "/v1/readyz") => "readyz",
+        ("GET", "/v1/generation") => "generation",
+        ("POST", "/v1/search") => "search",
+        _ => "other",
     }
 }
 
@@ -294,12 +316,17 @@ fn search_response(state: &ServingState, body: &[u8]) -> Result<Value, Error> {
         });
     }
     let generation = state.active_generation()?;
+    let started = Instant::now();
     let results = generation.search(PageQuery {
         query,
         mode,
         source: request.source.as_deref(),
         limit: Some(limit),
-    })?;
+    });
+    let mode_label = mode.as_str();
+    metrics::SEARCH_DURATION.observe(&[mode_label], started.elapsed());
+    metrics::SEARCH_REQUESTS.inc(&[mode_label, if results.is_ok() { "ok" } else { "error" }]);
+    let results = results?;
     let info = results.generation;
     Ok(json!({
         "schema_version": "scout.search.v1",

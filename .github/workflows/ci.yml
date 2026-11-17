@@ -135,8 +135,10 @@ jobs:
           retention-days: 14
 
   # Builds the image (dependency layers come from the GitHub Actions cache) and
-  # runs the core Compose stack end to end against the fixture site: crawl with
-  # 3 workers, keyword index, /v1/readyz, search assertions.
+  # runs the Compose stack end to end against the fixture site: crawl with
+  # 3 workers, keyword index, /v1/readyz, search assertions. The obs profile runs
+  # too (Prometheus, Grafana): the key metrics must reach Prometheus and the
+  # dashboard must be provisioned (scripts/ci/compose-obs-checks.sh).
   compose-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 40

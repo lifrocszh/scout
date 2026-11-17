@@ -15,7 +15,8 @@ use crate::crawl::{
     sitemap_url_allowed,
 };
 use crate::error::Error;
-use crate::observability::{Events, emit_shared};
+use crate::observability::metrics::{self, Role};
+use crate::observability::{Events, emit_shared, start_exporter};
 use crate::storage::new_run_id;
 use crate::url::{normalize_origin, normalize_url, origin_key};
 use ::url::Url;
@@ -31,6 +32,7 @@ use tonic::{Request, Response, Status, transport::Server};
 
 mod capture;
 mod database;
+mod frontier_gauges;
 mod results;
 mod rpc;
 mod scheduling;
@@ -73,6 +75,16 @@ struct CoordinatorMemory {
 struct CoordinatorSnapshot {
     registered_workers: HashSet<String>,
     fatal_error: Option<String>,
+}
+
+/// The status message for a lease that fencing rejects: wrong epoch, expired, or never issued.
+const STALE_LEASE_MESSAGE: &str = "task lease is stale or unknown";
+
+/// Count `status` against `rpc` when it is a lease-fencing rejection.
+fn count_if_stale(rpc: &'static str, status: &Status) {
+    if status.code() == tonic::Code::FailedPrecondition && status.message() == STALE_LEASE_MESSAGE {
+        metrics::STALE_RESULTS.inc(&[rpc]);
+    }
 }
 
 impl CoordinatorContext {
@@ -142,9 +154,7 @@ impl CoordinatorContext {
         let task = claimed_task(lease)?;
         self.validate_task_identity(&task, snapshot)?;
         if !frontier.lease_is_live(&task).map_err(to_status)? {
-            return Err(Status::failed_precondition(
-                "task lease is stale or unknown",
-            ));
+            return Err(Status::failed_precondition(STALE_LEASE_MESSAGE));
         }
         Ok(task)
     }
@@ -157,9 +167,7 @@ impl CoordinatorContext {
         if task.crawl_run_id != self.run_id
             || !snapshot.registered_workers.contains(&task.lease_owner)
         {
-            return Err(Status::failed_precondition(
-                "task lease is stale or unknown",
-            ));
+            return Err(Status::failed_precondition(STALE_LEASE_MESSAGE));
         }
         let owner = owner_for(&self.config, &task.normalized_url)
             .ok_or_else(|| Status::permission_denied("leased URL is outside configured Sources"))?;
@@ -253,6 +261,9 @@ fn coordinator_main(
             "coordinator bind must use loopback, private, link-local, or Tailscale IP",
         ));
     }
+    // Held until the coordinator returns; SCOUT_METRICS_LINGER_SECS keeps it serving after the
+    // crawl so the final counters get one last scrape.
+    let metrics_exporter = start_exporter(cli.metrics_bind.as_deref(), Role::Coordinator)?;
     let config = load_config(config_path)?;
     if config.max_body_bytes > MAX_BODY_TRANSFER_BYTES
         || config.max_extraction_bytes > MAX_BODY_TRANSFER_BYTES
@@ -340,6 +351,9 @@ fn coordinator_main(
         RecrawlPolicyStore::connect(&database_url)?.reject_scheduled_run_resume(&run_id)?;
     }
     frontier.configure_run(&run_id, &config.digest, policy_limits, &origin_policies)?;
+    if metrics_exporter.is_some() {
+        frontier_gauges::spawn(&database_url, &run_id)?;
+    }
     // Pending RPC connections do not survive restart; active HTTP permits still do.
     frontier.clear_pending_request_waits(&run_id)?;
     let crawl_dir = cli.data_dir.join("crawls").join(&run_id);
