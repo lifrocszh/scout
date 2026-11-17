@@ -97,13 +97,17 @@ services:
   # exit 0 when the coordinator reports the crawl finished. They need no
   # database credentials: only the coordinator talks to Postgres.
   worker:
-    image: ${SCOUT_IMAGE:-scout:local}
-    init: true
-    restart: "no"
-    stop_signal: SIGINT
-    command: ["worker", "--coordinator", "http://coordinator:50051", "--data-dir", "/tmp/scout-worker"]
+    <<: *scout
+    entrypoint: ["/bin/bash", "/opt/scout/stack.sh"]
+    command: ["worker"]
+    environment: *crawl-run-id
+    volumes:
+      # Read-only: stack.sh only reads the event log to tell whether the crawl
+      # is already done. Not healthy-gated: see stack.sh worker.
+      - scout-data:/data:ro
+      - ./docker/stack.sh:/opt/scout/stack.sh:ro
     depends_on:
-      coordinator: {condition: service_healthy}
+      coordinator: {condition: service_started}
 
   # One-shot: snapshot the finished crawl, build a keyword-only Generation,
   # activate and verify it.

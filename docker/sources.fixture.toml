@@ -13,10 +13,12 @@ page_target = 50
 max_frontier = 200
 max_duration_seconds = 120
 
-# Our own container, so no politeness delay; several workers run in parallel.
+# Our own container, so the spacing is short. It is not zero on purpose: a crawl
+# that takes a few seconds lets every `--scale worker=N` worker join before the
+# frontier is empty, so the stack visibly spreads work across workers.
 global_concurrency = 6
 origin_concurrency = 3
-min_start_spacing_ms = 0
+min_start_spacing_ms = 200
 
 [[sources]]
 source_id = "fixture"

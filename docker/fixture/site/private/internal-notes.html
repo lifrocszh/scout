@@ -8,9 +8,9 @@
 <main>
 <h1>Internal notes</h1>
 <h2>Do not index</h2>
-<p>These quokka notes are disallowed by robots.txt. A correct crawler never fetches this page, so its text must never appear in search results.</p>
+<p>These quokka notes are disallowed by robots.txt. A correct crawler never fetches this page, so its text must never appear in search results. The page is long enough to pass the crawler's minimum content check, so the only thing keeping it out of the index is the robots rule that covers the private directory.</p>
 <h2>Reminder</h2>
-<p>If a search for quokka returns this page, robots handling is broken.</p>
+<p>If a search for quokka returns this page, robots handling is broken. The smoke test searches for that word after every crawl and fails the build if it finds a result.</p>
 </main>
 </body>
 </html>

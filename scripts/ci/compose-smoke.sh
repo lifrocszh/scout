@@ -8,7 +8,7 @@
 # Env:   SCOUT_IMAGE          image to run; unset builds ./Dockerfile as scout:local
 #        POSTGRES_PASSWORD    default: random
 #        SCOUT_HTTP_PORT      default: 8080
-#        SMOKE_MEMORY_LIMIT_MIB  peak memory budget across containers (default 2048)
+#        SMOKE_MEMORY_LIMIT_MIB  budget for the sum of per-container peak memory (default 2048)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 command -v jq >/dev/null || { echo "smoke: jq is required" >&2; exit 2; }
@@ -30,7 +30,10 @@ pass() { echo "smoke: ok: $*"; }
 
 cleanup() {
   local status=$?
-  [ -z "$sampler" ] || kill "$sampler" 2>/dev/null || true
+  if [ -n "$sampler" ]; then
+    pkill -P "$sampler" 2>/dev/null || true # the docker stats and awk children
+    kill "$sampler" 2>/dev/null || true
+  fi
   if [ "$status" -ne 0 ]; then
     echo "::group::docker compose ps -a" >&2
     docker compose ps -a >&2 || true
@@ -45,17 +48,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Sum of container memory (MiB) once a second; the maximum is kept in a file.
+# Streams `docker stats` and records each container's peak memory (whole MiB) in
+# a file as "<name> <MiB>" lines. Summing per-container peaks over-estimates the
+# true peak, which is the safe direction for a budget check. Plain bash on
+# purpose: mawk buffers a pipe and would not see the stream in time.
 sample_memory() {
-  local peak=0 total
-  while sleep 1; do
-    total=$(docker stats --no-stream --format '{{.MemUsage}}' 2>/dev/null | awk '
-      { v = $1; u = v; gsub(/[0-9.]/, "", u); sub(/[A-Za-z]+$/, "", v)
-        if (u == "GiB") v *= 1024; else if (u == "KiB" || u == "kB") v /= 1024; else if (u == "B") v /= 1048576
-        sum += v }
-      END { printf "%d", sum }')
-    if [ "${total:-0}" -gt "$peak" ]; then peak=$total; echo "$peak" >"$peak_file"; fi
-  done
+  local name usage value unit
+  declare -A peaks=()
+  # docker stats emits cursor-control codes even when its output is piped.
+  docker stats --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | sed -u 's/\x1b\[[0-9;]*[A-Za-z]//g' |
+    while read -r name usage _; do
+      case $name in "$COMPOSE_PROJECT_NAME"-*) ;; *) continue ;; esac # not ours
+      value=${usage%%[A-Za-z]*}; unit=${usage#"$value"}; value=${value%%.*}
+      case $unit in GiB) value=$((value * 1024)) ;; MiB) ;; *) value=0 ;; esac
+      if [ "$value" -gt "${peaks[$name]:--1}" ]; then
+        peaks[$name]=$value
+        for name in "${!peaks[@]}"; do echo "$name ${peaks[$name]}"; done >"$peak_file"
+      fi
+    done
 }
 
 search() { # <query> -> response JSON (keyword mode: the default index is keyword-only)
@@ -77,10 +87,16 @@ done
 curl -fsS "$api/v1/readyz" | jq -e '.status == "ready"' >/dev/null || fail "/v1/readyz is not ready"
 pass "/v1/readyz is ready"
 
-# Every worker connected, and the one-shot steps finished cleanly.
-registered=$(docker compose logs --no-color worker | grep -c '"event":"worker.started"' || true)
-[ "$registered" -eq "$workers" ] || fail "expected $workers workers to start, saw $registered"
-pass "$workers workers registered with the coordinator"
+# Workers exit 0 when the crawl ends. A worker that starts after it ended leaves
+# quietly (see docker/stack.sh), so require that most of them joined and did work.
+for id in $(docker compose ps -a -q worker); do
+  code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
+  [ "$code" = 0 ] || fail "a worker exited with $code"
+done
+joined=$(docker compose logs --no-color worker | grep -c '"event":"worker.started"' || true)
+[ "$joined" -ge 2 ] || fail "expected at least 2 of $workers workers to join the crawl, saw $joined"
+tasks=$(docker compose logs --no-color worker | grep -o '"completed_tasks":[0-9]*' | cut -d: -f2 | paste -sd' ' -)
+pass "$joined of $workers workers joined the crawl (completed tasks per worker: $tasks)"
 for service in coordinator index; do
   code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -a -q "$service")")
   [ "$code" = 0 ] || fail "$service exited with $code"
@@ -106,8 +122,11 @@ leaked=$(search 'quokka' | jq -r '.results | length')
 [ "$leaked" = 0 ] || fail "robots.txt-disallowed page leaked into the index ($leaked results)"
 pass "robots.txt-disallowed page is not indexed"
 
-sleep 2 # let the sampler take one more reading with only the long-lived services up
-peak=$(cat "$peak_file" 2>/dev/null || echo 0)
-echo "smoke: peak memory across containers: ${peak} MiB (budget ${memory_limit_mib} MiB)"
+sleep 2 # one more sampling interval
+[ -s "$peak_file" ] || fail "the memory sampler recorded nothing"
+peak=$(awk '{ sum += $2 } END { printf "%d", sum }' "$peak_file")
+echo "smoke: per-container peak memory (MiB):" >&2
+sort "$peak_file" | sed 's/^/smoke:   /' >&2
+echo "smoke: sum of per-container peaks: ${peak} MiB (budget ${memory_limit_mib} MiB)"
 [ "$peak" -lt "$memory_limit_mib" ] || fail "peak memory ${peak} MiB exceeds ${memory_limit_mib} MiB"
 echo "smoke: PASS"

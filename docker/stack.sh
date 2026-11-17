@@ -7,6 +7,8 @@
 #                          has completed, so the capture spool is closed before
 #                          it is materialized (same order as
 #                          scripts/distributed-local.sh stop -> materialize).
+#   stack.sh worker        Run `scout worker` against the coordinator, or exit 0
+#                          if the crawl has already completed (a restart).
 #   stack.sh index         Materialize the finished crawl into a snapshot, build
 #                          an index Generation (keyword-only unless
 #                          SCOUT_INDEX_MODE says otherwise), activate and
@@ -53,6 +55,20 @@ coordinator() {
   wait "$pid"
 }
 
+worker() {
+  # compose.yaml cannot wait for a healthy coordinator: on a restart the crawl
+  # is already complete, so the coordinator exits 0 before it ever turns
+  # healthy. Wait for its port instead, and leave quietly if the crawl is done.
+  until (exec 3<>"/dev/tcp/coordinator/$PORT") 2>/dev/null; do
+    if crawl_completed; then
+      log "crawl $RUN_ID already completed; no work for this worker"
+      return 0
+    fi
+    sleep 1
+  done
+  exec scout worker --coordinator "http://coordinator:$PORT" --data-dir /tmp/scout-worker
+}
+
 index() {
   if scout index verify --data-dir "$DATA" >/dev/null 2>&1; then
     log "an index Generation is already active in $DATA; nothing to do"
@@ -80,6 +96,7 @@ index() {
 
 case "${1:-}" in
   coordinator) coordinator ;;
+  worker) worker ;;
   index) index ;;
-  *) echo "usage: stack.sh coordinator|index" >&2; exit 2 ;;
+  *) echo "usage: stack.sh coordinator|worker|index" >&2; exit 2 ;;
 esac

@@ -100,6 +100,10 @@ cp .env.example .env                  # set POSTGRES_PASSWORD
 docker compose up --scale worker=3
 ```
 
+The first `up` builds the image from the `Dockerfile`, which takes several minutes with a cold
+cache. Compose first tries to pull `scout:local` and prints a harmless "failed to resolve" line
+before it builds.
+
 The core stack starts Postgres, a static fixture site, a coordinator with three workers, a
 one-shot index build, and the search API. It crawls the fixture site (11 pages, plus a
 `robots.txt`-disallowed page it must skip and a page only the sitemap lists), builds and activates
@@ -114,8 +118,8 @@ curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json'
 - **Keyword only.** `mode` must be `keyword`: the default `hybrid` fails on a keyword-only index.
   `SCOUT_INDEX_MODE=hybrid docker compose up` builds embeddings too. The BGE Small model is not in
   the image; it downloads on first use into the `scout-models` volume (`/data/models`) and is reused
-  by later builds and by `serve`. Hybrid needs more memory than the ~2 GB core budget, and CI does
-  not cover it.
+  by later builds and by `serve`. Hybrid builds are not covered by CI and need more memory than the
+  keyword-only stack.
 - **State.** `scout-data` (`/data`) holds the crawl spool, snapshots, index Generations and event
   logs. `pgdata` holds the crawl frontier. `docker compose down -v` deletes all three volumes.
   `docker compose down` keeps them, and the next `up` skips work that is already done.
