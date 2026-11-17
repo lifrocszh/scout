@@ -35,7 +35,7 @@ on:
         default: "3"
       pages:
         description: Page budget of every run
-        default: "2000"
+        default: "3000"
 
 permissions:
   contents: read

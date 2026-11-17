@@ -127,9 +127,13 @@ def crawl_window(coordinator_rows, workers):
     # With fewer than `workers` workers claiming, the whole run is all there is to measure.
     window_start = full if len(first_claim) >= workers and full < end else begin
     pages_in_window = sum(1 for t in accepted if window_start < t <= end)
+    claims_by_worker = collections.Counter(row["data"]["worker_id"] for row in claims)
     return {"first_claim_unix": begin, "window_start_unix": window_start, "end_unix": end,
             "stop_reason": completed[0]["data"].get("stop_reason"),
             "workers_that_claimed": len(first_claim),
+            # Seconds after the first claim at which each worker first got work, and how many tasks it claimed.
+            "worker_first_claim_seconds": {w: round(t - begin, 2) for w, t in sorted(first_claim.items())},
+            "claims_by_worker": dict(sorted(claims_by_worker.items())),
             "pages_accepted": len(accepted), "pages_in_window": pages_in_window,
             "window_seconds": end - window_start, "run_seconds": end - begin,
             "pages_per_second": pages_in_window / (end - window_start) if end > window_start else None,
@@ -262,9 +266,28 @@ class Cluster:
                                f"deploy/{self.release}-coordinator", "--", "test", "-e", "/tmp/crawl-finished"],
                               capture_output=True, timeout=30).returncode == 0
 
-    def workers_ready(self, workers):
-        status = json.loads(self.kubectl("get", f"deploy/{self.release}-worker", "-o", "json"))["status"]
-        return all(status.get(key, 0) == workers for key in ("replicas", "updatedReplicas", "readyReplicas"))
+    def run_pods(self, component, run_id=None, ready=False):
+        """Running pods of a component that are not being deleted, optionally only those started for
+        `run_id` (the pod template carries it) and only the Ready ones."""
+        items = json.loads(self.kubectl("get", "pods", "-l", f"app.kubernetes.io/component={component}", "-o", "json"))["items"]
+        names = []
+        for pod in items:
+            meta = pod["metadata"]
+            if meta.get("deletionTimestamp") or pod["status"].get("phase") != "Running":
+                continue
+            if run_id and meta.get("annotations", {}).get("scout/run-id") != run_id:
+                continue
+            if ready and not any(c["type"] == "Ready" and c["status"] == "True" for c in pod["status"].get("conditions", [])):
+                continue
+            names.append(meta["name"])
+        return names
+
+    def stop_workers(self):
+        """Start every run from no workers at all, so no pod of an earlier run can join this one."""
+        if self.kubectl("get", f"deploy/{self.release}-worker", "-o", "name", check=False).strip():
+            self.kubectl("scale", f"deploy/{self.release}-worker", "--replicas=0")
+            self.wait("the worker pods to terminate",
+                      lambda: not self.kubectl("get", "pods", "-l", "app.kubernetes.io/component=worker", "-o", "name").strip(), 240)
 
     def wait(self, what, condition, timeout, interval=2):
         deadline = time.time() + timeout
@@ -313,20 +336,20 @@ def run_once(cluster, args, workers, repetition, output):
     sources.write_text(sources_toml(args, f"{cluster.release}-fixture"))
     print(json.dumps({"event": "run.start", "workers": workers, "repetition": repetition, "run_id": run_id,
                       "unix": time.time()}), flush=True)
-    cluster.deploy(workers, run_id, sources)
     release = cluster.release
-    cluster.wait("the coordinator", lambda: json.loads(cluster.kubectl("get", f"deploy/{release}-coordinator", "-o", "json"))
-                 ["status"].get("readyReplicas") == 1 and cluster.pods("coordinator"), 300)
-    cluster.wait(f"{workers} ready workers", lambda: cluster.workers_ready(workers), 300)
-    coordinator = cluster.pods("coordinator")[0]
-    postgres = f"{release}-postgres-0"
+    cluster.stop_workers()
+    cluster.deploy(workers, run_id, sources)
+    cluster.kubectl("scale", f"deploy/{release}-worker", f"--replicas={workers}")
+    cluster.wait("the origin pod", lambda: cluster.pods("fixture"), 300)
     fixture = cluster.pods("fixture")[0]
-    node_cpus = int(cluster.kubectl("get", "nodes", "-o", "jsonpath={.items[0].status.capacity.cpu}"))
+    cluster.wait("the fixture to answer", lambda: cluster.proxy(fixture, FIRST_PORT, "__stats"), 120)
     stats_before = json.loads(cluster.proxy(fixture, FIRST_PORT, "__stats"))
+    cluster.wait("this run's coordinator", lambda: cluster.run_pods("coordinator", run_id, ready=True), 300)
+    coordinator = cluster.run_pods("coordinator", run_id, ready=True)[0]
+    postgres = f"{release}-postgres-0"
+    node_cpus = int(cluster.kubectl("get", "nodes", "-o", "jsonpath={.items[0].status.capacity.cpu}"))
 
     metric_samples, cpu_samples = [], collections.defaultdict(list)
-    roles = {"coordinator": coordinator, "postgres": postgres, "fixture": fixture}
-    roles.update({f"worker-{pod}": pod for pod in cluster.pods("worker")})
     done = threading.Event()
 
     def sample_metrics():
@@ -341,6 +364,12 @@ def run_once(cluster, args, workers, repetition, output):
 
     def sample_cpu():
         while not done.is_set():
+            # Workers come and go as pods start, so list them each round.
+            roles = {"coordinator": coordinator, "postgres": postgres, "fixture": fixture}
+            try:
+                roles.update({f"worker-{pod}": pod for pod in cluster.run_pods("worker", run_id)})
+            except (RuntimeError, subprocess.TimeoutExpired):
+                pass
             for role, pod in roles.items():
                 try:
                     usec = cluster.cpu_usec(pod, "worker" if role.startswith("worker") else None)
@@ -354,6 +383,8 @@ def run_once(cluster, args, workers, repetition, output):
     for thread in threads:
         thread.start()
     try:
+        cluster.wait(f"{workers} ready workers", lambda: len(cluster.run_pods("worker", run_id, ready=True)) == workers
+                     and len(cluster.run_pods("worker")) == workers, 300)
         cluster.wait("the crawl to finish", cluster.crawl_finished, args.run_timeout, interval=3)
     finally:
         done.set()
@@ -443,7 +474,7 @@ def main():
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--workers", nargs="+", type=int, default=[1, 2, 4, 8])
     parser.add_argument("--repetitions", type=int, default=3)
-    parser.add_argument("--pages", type=int, default=2000, help="page budget of every run")
+    parser.add_argument("--pages", type=int, default=3000, help="page budget of every run")
     parser.add_argument("--origins", type=int, default=32)
     parser.add_argument("--pages-per-origin", type=int, default=125)
     parser.add_argument("--latency-ms", type=int, default=100, help="how long each origin takes to answer a page")

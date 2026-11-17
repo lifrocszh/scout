@@ -40,6 +40,8 @@ spec:
         app.kubernetes.io/component: coordinator
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Names the crawl this pod runs, so a pod of an earlier run can be told apart from it.
+        scout/run-id: {{ .Values.crawl.runId | quote }}
         {{- if .Values.metrics.podAnnotations }}
         {{- include "scout.scrapeAnnotations" (dict "port" 9101) | nindent 8 }}
         {{- end }}
