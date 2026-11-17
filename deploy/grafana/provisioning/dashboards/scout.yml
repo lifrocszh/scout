@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: scout
+    type: file
+    # Read-only mount: edit deploy/grafana/dashboards/*.json instead.
+    allowUiUpdates: false
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

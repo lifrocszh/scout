@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test for the core Compose stack: start it with N workers, let it crawl
-# the fixture site and build a keyword index, then check /v1/readyz and search
-# results against the known fixture pages. Tears the stack down (volumes
-# included) on exit, and dumps logs first if anything failed.
+# Smoke test for the Compose stack: start it with N workers, let it crawl the
+# fixture site and build a keyword index, then check /v1/readyz and search
+# results against the known fixture pages. The obs profile (Prometheus, Grafana)
+# runs too, and compose-obs-checks.sh asserts that the key metrics reached
+# Prometheus and that the Grafana dashboard is provisioned. Tears the stack down
+# (volumes included) on exit, and dumps logs first if anything failed.
 #
 # Usage: scripts/ci/compose-smoke.sh [workers]        (default 3)
 # Env:   SCOUT_IMAGE          image to run; unset builds ./Dockerfile as scout:local
 #        POSTGRES_PASSWORD    default: random
 #        SCOUT_HTTP_PORT      default: 8080
+#        PROMETHEUS_PORT, GRAFANA_PORT   default: 9090, 3000
 #        SMOKE_MEMORY_LIMIT_MIB  budget for the sum of per-container peak memory (default 2048)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -19,6 +22,13 @@ export SCOUT_HTTP_PORT=${SCOUT_HTTP_PORT:-8080}
 # A dedicated project name, so tearing down never touches a developer's own
 # `scout` stack or its volumes.
 export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-scout-smoke}
+# Include the obs profile in every compose command below, `down -v` included.
+export COMPOSE_PROFILES=obs
+export GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-$(openssl rand -hex 12)}
+# The fixture crawl ends in seconds. Keep the coordinator and workers serving
+# /metrics for longer than a scrape plus a service-discovery refresh (2 s each),
+# so Prometheus gets their final counters.
+export SCOUT_METRICS_LINGER_SECS=${SCOUT_METRICS_LINGER_SECS:-8}
 api="http://127.0.0.1:$SCOUT_HTTP_PORT"
 fixture="http://fixture:8080"
 memory_limit_mib=${SMOKE_MEMORY_LIMIT_MIB:-2048}
@@ -121,6 +131,8 @@ pass "sitemap-only page is indexed"
 leaked=$(search 'quokka' | jq -r '.results | length')
 [ "$leaked" = 0 ] || fail "robots.txt-disallowed page leaked into the index ($leaked results)"
 pass "robots.txt-disallowed page is not indexed"
+
+scripts/ci/compose-obs-checks.sh
 
 sleep 2 # one more sampling interval
 [ -s "$peak_file" ] || fail "the memory sampler recorded nothing"

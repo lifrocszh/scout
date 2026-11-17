@@ -1,6 +1,7 @@
 //! Bounded synchronous PostgreSQL connections for coordinator control-plane work.
 use super::FrontierStore;
 use crate::error::Error;
+use crate::observability::metrics;
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
@@ -38,6 +39,7 @@ impl FrontierPool {
             // Keep the caller's PostgreSQL connection parameters, including application_name.
             available.push(FrontierStore::connect(database_url)?);
         }
+        metrics::DB_POOL_CONNECTIONS.set(&[], lanes as f64);
         Ok(Self {
             available: Mutex::new(available),
             ready: Condvar::new(),
@@ -53,9 +55,12 @@ impl FrontierPool {
         while available.is_empty() {
             available = self.ready.wait(available).expect("frontier pool lock");
         }
-        let wait_ns = waiting.elapsed().as_nanos();
+        let wait = waiting.elapsed();
+        let wait_ns = wait.as_nanos();
         let store = available.pop().expect("frontier pool connection");
         drop(available);
+        metrics::DB_POOL_WAIT.observe(&[], wait);
+        metrics::DB_POOL_IN_USE.add(&[], 1.0);
         let mut checkout = Checkout {
             pool: self,
             store: Some(store),
@@ -69,6 +74,7 @@ impl FrontierPool {
 impl Drop for Checkout<'_> {
     fn drop(&mut self) {
         if let Some(store) = self.store.take() {
+            metrics::DB_POOL_IN_USE.add(&[], -1.0);
             self.pool
                 .available
                 .lock()

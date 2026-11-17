@@ -3,6 +3,7 @@ use super::{
     validate_digest, validate_schedule_key,
 };
 use crate::error::Error;
+use crate::observability::metrics;
 use crate::storage::sha256_hex;
 use crate::url::{normalize_url, origin_key};
 use ::url::Url;
@@ -218,7 +219,15 @@ impl FrontierStore {
                 CLAIM_ONE_TASK,
                 &[&run_id, &worker_id, &lease_ms, &excluded_source_ids],
             )
-            .map(|row| row.map(claimed_task))
+            .map(|row| {
+                row.map(|row| {
+                    metrics::TASK_CLAIMS.inc(&[]);
+                    if row.get::<_, bool>("reclaimed_expired") {
+                        metrics::LEASE_EXPIRATIONS.inc(&[]);
+                    }
+                    claimed_task(row)
+                })
+            })
             .map_err(|error| Error::storage(format!("claim crawl task: {error}")))
     }
 
@@ -234,6 +243,7 @@ impl FrontierStore {
             .transaction()
             .map_err(|error| Error::storage(format!("begin crawl task lease renewal: {error}")))?;
         if !super::lock_live_task(&mut tx, task)? {
+            metrics::LEASE_RENEWALS.inc(&["rejected"]);
             return Ok(false);
         }
         let changed = tx
@@ -262,6 +272,7 @@ impl FrontierStore {
             .map_err(|error| Error::storage(format!("renew crawl task lease: {error}")))?;
         tx.commit()
             .map_err(|error| Error::storage(format!("commit crawl task lease renewal: {error}")))?;
+        metrics::LEASE_RENEWALS.inc(&[if changed == 1 { "renewed" } else { "rejected" }]);
         Ok(changed == 1)
     }
 
@@ -306,6 +317,7 @@ impl FrontierStore {
             .transaction()
             .map_err(|error| Error::storage(format!("begin crawl task failure: {error}")))?;
         if !super::lock_live_task(&mut tx, task)? {
+            metrics::STALE_RESULTS.inc(&["fail_task"]);
             return Ok(None);
         }
         let row = tx
@@ -349,6 +361,11 @@ impl FrontierStore {
             .transpose()?;
         tx.commit()
             .map_err(|error| Error::storage(format!("commit crawl task failure: {error}")))?;
+        match result {
+            Some(TaskStatus::Failed) => metrics::TASK_FAILURES.inc(&["failed"]),
+            Some(_) => metrics::TASK_FAILURES.inc(&["retry"]),
+            None => metrics::STALE_RESULTS.inc(&["fail_task"]),
+        }
         Ok(result)
     }
 
@@ -374,6 +391,33 @@ impl FrontierStore {
             )
             .map(|row| row.is_some())
             .map_err(|error| Error::storage(format!("validate crawl task lease: {error}")))
+    }
+
+    /// Task counts by status for the frontier-depth gauges. One grouped scan of the run's tasks.
+    pub(crate) fn task_status_counts(&mut self, run_id: &str) -> Result<TaskStatusCounts, Error> {
+        let rows = self
+            .client
+            .query(
+                "SELECT status, count(*),
+                        count(*) FILTER (WHERE status = 'leased' AND lease_deadline <= clock_timestamp())
+                 FROM scout_crawl_tasks WHERE crawl_run_id = $1 GROUP BY status",
+                &[&run_id],
+            )
+            .map_err(|error| Error::storage(format!("count crawl tasks by status: {error}")))?;
+        let mut counts = TaskStatusCounts::default();
+        for row in rows {
+            let (total, expired): (i64, i64) = (row.get(1), row.get(2));
+            match TaskStatus::parse(row.get::<_, &str>(0))? {
+                TaskStatus::Pending => counts.pending = total,
+                TaskStatus::Leased => {
+                    counts.leased = total;
+                    counts.expired_leases = expired;
+                }
+                TaskStatus::Succeeded => counts.succeeded = total,
+                TaskStatus::Failed => counts.failed = total,
+            }
+        }
+        Ok(counts)
     }
 
     pub(crate) fn unfinished_task_count_excluding(
@@ -413,6 +457,17 @@ impl FrontierStore {
         usize::try_from(count)
             .map_err(|_| Error::storage("unfinished Source task count does not fit memory"))
     }
+}
+
+/// How many of a run's tasks are in each status; `expired_leases` is the part of `leased`
+/// whose deadline has passed and that no claim has reclaimed yet.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TaskStatusCounts {
+    pub(crate) pending: i64,
+    pub(crate) leased: i64,
+    pub(crate) succeeded: i64,
+    pub(crate) failed: i64,
+    pub(crate) expired_leases: i64,
 }
 
 fn claimed_task(row: postgres::Row) -> ClaimedTask {
