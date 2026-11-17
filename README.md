@@ -76,6 +76,23 @@ Modes are `keyword`, `semantic`, and `hybrid`. Results group matching passages b
 the page URL, title, heading, and snippet. Other endpoints: `GET /v1/healthz`, `GET /v1/readyz`,
 and `GET /v1/generation`.
 
+## Search quality
+
+CI fails a PR that makes ranking worse. The `search-quality` job crawls a 64-page fixture corpus
+(`data/eval/`), builds keyword, semantic and hybrid (RRF) indexes, scores 64 labelled queries with
+`scout evaluate`, and fails if any metric drops more than 0.02 below the committed baseline.
+
+| Mode | NDCG@10 | Recall@10 | MRR |
+| --- | ---: | ---: | ---: |
+| keyword | 0.8284 | 0.9531 | 0.8298 |
+| semantic | 0.9122 | 0.9922 | 0.9062 |
+| hybrid | 0.8974 | 0.9766 | 0.8971 |
+
+These numbers come from a small synthetic corpus with labels written alongside it, so they guard
+against regressions and say nothing about quality on real documentation. See
+[docs/search-quality-gate.md](docs/search-quality-gate.md) to run the gate locally
+(`scripts/ci/search-quality.sh`) or update the baseline on purpose.
+
 ## Local demo
 
 [`demo/`](demo/) runs the full flow — crawl, snapshot, keyword index build, activate and verify,
