@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Installing Lumen Queue</title>
+</head>
+<body>
+<main>
+<h1>Installing Lumen Queue</h1>
+<h2>Container image</h2>
+<p>The simplest way to run a broker is the container image. Mount a volume for the log directory so topics survive restarts, and publish port 7070 for clients.</p>
+<h2>Service manager</h2>
+<p>On a server, install the lumenctl binary and run the broker under systemd. The unit file restarts the broker on failure and limits open file descriptors.</p>
+<h2>Related pages</h2>
+<ul>
+<li><a href="getting-started.html">getting-started.html</a></li>
+<li><a href="configuration.html">configuration.html</a></li>
+</ul>
+</main>
+</body>
+</html>

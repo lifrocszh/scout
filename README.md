@@ -90,6 +90,46 @@ dependencies, and binds to loopback. Keyword search mode must be sent explicitly
 
 Smoke test: `python3 demo/smoke_test.py`
 
+## Run with Docker
+
+Needs Docker with Compose v2. One image runs every role; the subcommand picks it
+(`coordinator`, `worker`, `serve`, `crawl`, `index ...`).
+
+```bash
+cp .env.example .env                  # set POSTGRES_PASSWORD
+docker compose up --scale worker=3
+```
+
+The core stack starts Postgres, a static fixture site, a coordinator with three workers, a
+one-shot index build, and the search API. It crawls the fixture site (11 pages, plus a
+`robots.txt`-disallowed page it must skip and a page only the sitemap lists), builds and activates
+a keyword-only index, and then serves it. When it is ready:
+
+```bash
+curl http://127.0.0.1:8080/v1/readyz
+curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json' \
+  -d '{"query":"rebalance consumer group","mode":"keyword"}'
+```
+
+- **Keyword only.** `mode` must be `keyword`: the default `hybrid` fails on a keyword-only index.
+  `SCOUT_INDEX_MODE=hybrid docker compose up` builds embeddings too. The BGE Small model is not in
+  the image; it downloads on first use into the `scout-models` volume (`/data/models`) and is reused
+  by later builds and by `serve`. Hybrid needs more memory than the ~2 GB core budget, and CI does
+  not cover it.
+- **State.** `scout-data` (`/data`) holds the crawl spool, snapshots, index Generations and event
+  logs. `pgdata` holds the crawl frontier. `docker compose down -v` deletes all three volumes.
+  `docker compose down` keeps them, and the next `up` skips work that is already done.
+- **Network.** The search API binds `127.0.0.1` only and has no TLS or authentication. The
+  coordinator's gRPC port and Postgres are reachable only inside the Compose network.
+- **Other crawls.** Copy `docker/sources.fixture.toml`, point `SCOUT_SOURCES_CONFIG_FILE` at the
+  copy and set a new `SCOUT_CRAWL_RUN_ID` (see `.env.example`).
+- **Published image.** `SCOUT_IMAGE=ghcr.io/lifrocszh/scout:latest docker compose up --no-build`.
+  It is built from `main` (tags: commit SHA and `latest`) and from `v*` tags.
+- **Smoke test.** `scripts/ci/compose-smoke.sh 3` is what CI runs.
+
+`obs` (Prometheus, Grafana) and `data` (Kafka, lakehouse) Compose profiles are planned and not
+part of this stack yet.
+
 ## Distributed crawling
 
 For a local menu-driven workflow, run `scripts/distributed-local-ui.sh`. For direct local setup and
