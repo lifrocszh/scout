@@ -18,6 +18,7 @@ import json
 import pathlib
 import platform
 import secrets
+import statistics
 import subprocess
 import sys
 import threading
@@ -152,12 +153,66 @@ def cpu_cores(samples, start, end):
     return (last[1] - first[1]) / 1e6 / (last[0] - first[0])
 
 
+def frontier_stats(metric_samples, start, end):
+    """Tasks waiting (pending) and in flight (leased) in the frontier, as the coordinator sampled them."""
+    seen = {"pending": [], "leased": []}
+    for sample in metric_samples:
+        if start <= sample["t"] <= end:
+            for labels, value in sample["series"].get("scout_frontier_tasks", []):
+                if labels.get("status") in seen:
+                    seen[labels["status"]].append(value)
+    return {f"{status}_{kind}": fn(values) if values else None
+            for status, values in seen.items() for kind, fn in (("mean", statistics.fmean), ("min", min))}
+
+
+def rpc_timings(coordinator_stderr_rows, start, end):
+    """Per-RPC service time from the coordinator's SCOUT_DISTRIBUTED_METRICS lines, inside the window.
+
+    `occupancy` is the summed service time per second of window: a value near 1 for an operation that
+    runs under one lock means that lock is the throughput limit.
+    """
+    window = max(end - start, 1e-9)
+    by_operation = collections.defaultdict(lambda: collections.defaultdict(list))
+    for row in coordinator_stderr_rows:
+        if row.get("metric") == "rpc" and start < row["end_unix_ns"] / 1e9 <= end:
+            for key in ("service_ns", "server_total_ns", "core_lock_wait_ns", "db_pool_wait_ns", "blocking_queue_ns"):
+                by_operation[row["operation"]][key].append(row[key])
+    result = {}
+    for operation, parts in by_operation.items():
+        service = parts["service_ns"]
+        result[operation] = {
+            "calls": len(service), "calls_per_second": len(service) / window,
+            "occupancy": sum(service) / 1e9 / window,
+            "service": measurement.percentile(service), "server_total": measurement.percentile(parts["server_total_ns"]),
+            "core_lock_wait": measurement.percentile(parts["core_lock_wait_ns"]),
+            "db_pool_wait": measurement.percentile(parts["db_pool_wait_ns"]),
+            "blocking_queue": measurement.percentile(parts["blocking_queue_ns"])}
+    return result
+
+
+def pg_waits(samples, start, end):
+    """Average number of Postgres backends per state and wait event, and commits per second.
+
+    `samples` are (unix time, {"active:IO/WALSync": backends, ...}, commits so far).
+    """
+    inside = [(t, backends, commits) for t, backends, commits in samples if start <= t <= end]
+    if not inside:
+        return None
+    totals = collections.Counter()
+    for _, backends, _ in inside:
+        totals.update(backends)
+    commits = [c for _, _, c in inside if c is not None]
+    span = inside[-1][0] - inside[0][0]
+    return {"samples": len(inside), "backends_by_state_and_wait": {k: v / len(inside) for k, v in totals.most_common()},
+            "commits_per_second": (commits[-1] - commits[0]) / span if len(commits) > 1 and span > 0 else None}
+
+
 def nearest(samples, t):
     return min(samples, key=lambda sample: abs(sample["t"] - t)) if samples else None
 
 
 def summarize_run(workers, repetition, coordinator_rows, worker_rows, metric_samples, cpu_samples, fixture_stats,
-                  budget, node_cpus):
+                  budget, node_cpus, rpc_rows=None, pg_samples=None):
     window = crawl_window(coordinator_rows, workers)
     start, end = window["window_start_unix"], window["end_unix"]
     latencies = [seconds * 1e9 for t, seconds in task_latencies(worker_rows) if start < t <= end]
@@ -180,6 +235,11 @@ def summarize_run(workers, repetition, coordinator_rows, worker_rows, metric_sam
             "total_wait_seconds": wait[1], "connections": pool[0] if pool else None,
             "max_in_use_sampled": max(in_use) if in_use else None,
             "sample_gap_seconds": [round(scrape_before["t"] - start, 2), round(scrape_after["t"] - end, 2)]}
+    summary["frontier"] = frontier_stats(metric_samples, start, end)
+    if rpc_rows is not None:
+        summary["rpc_timings"] = rpc_timings(rpc_rows, start, end)
+    if pg_samples:
+        summary["postgres"] = pg_waits(pg_samples, start, end)
     cores = {role: cpu_cores(samples, start, end) for role, samples in cpu_samples.items()}
     worker_cores = [value for role, value in cores.items() if role.startswith("worker") and value is not None]
     summary["cpu_cores"] = {"coordinator": cores.get("coordinator"), "postgres": cores.get("postgres"),
@@ -239,7 +299,7 @@ class Cluster:
                 return int(line.split()[1])
         return int(out.strip()) // 1000 if out.strip().isdigit() else None
 
-    def values(self, workers, run_id, sources_path):
+    def values(self, workers, run_id, sources_path, diagnostic=False):
         a = self.args
         values = ["--set", f"image.repository={a.image_repo}", "--set", f"image.tag={a.image_tag}",
                   "--set", f"crawl.runId={run_id}", "--set-file", f"crawl.sources={sources_path}",
@@ -254,11 +314,14 @@ class Cluster:
             values += ["--set", f"coordinator.dbLanes={a.db_lanes}"]
         if a.completion_lanes:
             values += ["--set", f"coordinator.completionLanes={a.completion_lanes}"]
+        # Always set, so a diagnostic run does not leave its timing variable on the next run's coordinator.
+        env = [{"name": "SCOUT_DISTRIBUTED_METRICS", "value": "1"}] if diagnostic else []
+        values += ["--set-json", f"coordinator.extraEnv={json.dumps(env)}"]
         return values
 
-    def deploy(self, workers, run_id, sources_path):
-        self.helm("upgrade", "--install", self.release, str(CHART), "--create-namespace", *self.values(workers, run_id, sources_path),
-                  timeout=300)
+    def deploy(self, workers, run_id, sources_path, diagnostic=False):
+        self.helm("upgrade", "--install", self.release, str(CHART), "--create-namespace",
+                  *self.values(workers, run_id, sources_path, diagnostic), timeout=300)
 
     def crawl_finished(self):
         """The coordinator stops itself once the crawl completes and leaves this marker."""
@@ -301,12 +364,12 @@ class Cluster:
         raise TimeoutError(f"timed out after {timeout}s waiting for {what}")
 
 
-def sources_toml(args, host):
+def sources_toml(args, host, pages=None):
     text = f'''schema_version = "scout.sources.v1"
 contact_url = "https://github.com/lifrocszh/scout"
 user_agent = "ScoutBenchmark/0.1 (+https://github.com/lifrocszh/scout)"
 embedding_model = "BAAI/bge-small-en-v1.5"
-page_target = {args.pages}
+page_target = {pages or args.pages}
 max_frontier = {args.origins * args.pages_per_origin}
 max_total_attempts = {args.origins * args.pages_per_origin * 5}
 max_duration_seconds = 3000
@@ -328,17 +391,20 @@ path_prefixes = ["/p/"]
     return text
 
 
-def run_once(cluster, args, workers, repetition, output):
-    run_dir = output / f"w{workers}-r{repetition}"
+def run_once(cluster, args, workers, repetition, output, diagnostic=False):
+    """One crawl. A diagnostic run also times every coordinator RPC and samples Postgres wait events;
+    that costs throughput, so its pages per second are not the headline number."""
+    pages = args.diagnostic_pages if diagnostic else args.pages
+    run_dir = output / f"w{workers}-r{repetition}{'-diagnostic' if diagnostic else ''}"
     run_dir.mkdir(parents=True, exist_ok=True)
     run_id = "run-" + secrets.token_hex(32)
     sources = run_dir / "sources.toml"
-    sources.write_text(sources_toml(args, f"{cluster.release}-fixture"))
+    sources.write_text(sources_toml(args, f"{cluster.release}-fixture", pages))
     print(json.dumps({"event": "run.start", "workers": workers, "repetition": repetition, "run_id": run_id,
-                      "unix": time.time()}), flush=True)
+                      "diagnostic": diagnostic, "pages": pages, "unix": time.time()}), flush=True)
     release = cluster.release
     cluster.stop_workers()
-    cluster.deploy(workers, run_id, sources)
+    cluster.deploy(workers, run_id, sources, diagnostic)
     cluster.kubectl("scale", f"deploy/{release}-worker", f"--replicas={workers}")
     cluster.wait("the origin pod", lambda: cluster.pods("fixture"), 300)
     fixture = cluster.pods("fixture")[0]
@@ -349,7 +415,7 @@ def run_once(cluster, args, workers, repetition, output):
     postgres = f"{release}-postgres-0"
     node_cpus = int(cluster.kubectl("get", "nodes", "-o", "jsonpath={.items[0].status.capacity.cpu}"))
 
-    metric_samples, cpu_samples = [], collections.defaultdict(list)
+    metric_samples, cpu_samples, pg_samples = [], collections.defaultdict(list), []
     done = threading.Event()
 
     def sample_metrics():
@@ -379,7 +445,29 @@ def run_once(cluster, args, workers, repetition, output):
                     pass
             done.wait(1)
 
+    def sample_postgres():
+        query = ("SELECT state || ':' || coalesce(wait_event_type || '/' || wait_event, 'cpu') || '|' || count(*) "
+                 "FROM pg_stat_activity WHERE datname = 'scout' AND pid <> pg_backend_pid() "
+                 "AND state IN ('active', 'idle in transaction') GROUP BY 1")
+        commits = "SELECT 'commits|' || xact_commit FROM pg_stat_database WHERE datname = 'scout'"
+        while not done.is_set():
+            try:
+                out = cluster.kubectl("exec", postgres, "--", "psql", "-U", "scout", "-d", "scout", "-At", "-c", query, "-c", commits)
+                backends, count = {}, None
+                for line in out.splitlines():
+                    key, _, value = line.rpartition("|")
+                    if key == "commits":
+                        count = int(value)
+                    elif key:
+                        backends[key] = int(value)
+                pg_samples.append((time.time(), backends, count))
+            except (RuntimeError, subprocess.TimeoutExpired, ValueError):
+                pass
+            done.wait(.5)
+
     threads = [threading.Thread(target=sample_metrics), threading.Thread(target=sample_cpu)]
+    if diagnostic:
+        threads.append(threading.Thread(target=sample_postgres))
     for thread in threads:
         thread.start()
     try:
@@ -391,6 +479,12 @@ def run_once(cluster, args, workers, repetition, output):
         for thread in threads:
             thread.join()
 
+    rpc_rows = None
+    if diagnostic:
+        stderr = cluster.kubectl("logs", coordinator, "-c", "coordinator", "--tail=-1", timeout=600)
+        (run_dir / "coordinator-stderr.jsonl").write_text(stderr)
+        rpc_rows = measurement.json_lines(run_dir / "coordinator-stderr.jsonl")
+        measurement.save(run_dir / "postgres-samples.json", pg_samples)
     log = cluster.kubectl("exec", f"deploy/{release}-coordinator", "--", "cat", f"/data/logs/{run_id}.jsonl")
     (run_dir / "coordinator-events.jsonl").write_text(log)
     worker_log = cluster.kubectl("logs", "-l", "app.kubernetes.io/component=worker", "-c", "worker", "--prefix",
@@ -401,7 +495,7 @@ def run_once(cluster, args, workers, repetition, output):
     with (run_dir / "metrics-samples.jsonl").open("w") as handle:
         for sample in metric_samples:
             handle.write(json.dumps({"t": sample["t"], "series": {k: v for k, v in sample["series"].items()
-                                                                   if k.startswith("scout_db_pool")}}) + "\n")
+                                                                   if k.startswith(("scout_db_pool", "scout_frontier", "scout_task_"))}}) + "\n")
     measurement.save(run_dir / "cpu-samples.json", cpu_samples)
 
     coordinator_rows = measurement.json_lines(run_dir / "coordinator-events.jsonl")
@@ -416,8 +510,10 @@ def run_once(cluster, args, workers, repetition, output):
         if isinstance(row, dict) and str(row.get("event", "")).startswith("worker."):
             worker_rows.append(row)
     summary = summarize_run(workers, repetition, coordinator_rows, worker_rows, [
-        {"t": s["t"], "series": s["series"]} for s in metric_samples], cpu_samples, fixture_stats, args.pages, node_cpus)
+        {"t": s["t"], "series": s["series"]} for s in metric_samples], cpu_samples, fixture_stats, pages, node_cpus,
+        rpc_rows, pg_samples if diagnostic else None)
     summary["run_id"] = run_id
+    summary["diagnostic"] = diagnostic
     measurement.save(run_dir / "summary.json", summary)
     print(json.dumps({"event": "run.done", "workers": workers, "repetition": repetition,
                       "pages_per_second": summary["pages_per_second"], "warnings": summary["warnings"]}), flush=True)
@@ -466,6 +562,17 @@ def self_test():
     workers = [{"event": "worker.task_started", "timestamp": stamp(5), "data": {"worker_id": "a", "task_id": 1}},
                {"event": "worker.task_completed", "timestamp": stamp(5.25), "data": {"worker_id": "a", "task_id": 1}}]
     assert abs(task_latencies(workers)[0][1] - 0.25) < 1e-9
+    frontier = frontier_stats([{"t": 10, "series": {"scout_frontier_tasks": [({"status": "pending"}, 100.0), ({"status": "leased"}, 4.0)]}},
+                               {"t": 12, "series": {"scout_frontier_tasks": [({"status": "pending"}, 50.0), ({"status": "leased"}, 4.0)]}},
+                               {"t": 99, "series": {"scout_frontier_tasks": [({"status": "pending"}, 0.0)]}}], 9, 13)
+    assert frontier["pending_mean"] == 75 and frontier["pending_min"] == 50 and frontier["leased_mean"] == 4, frontier
+    rpc = [{"metric": "rpc", "operation": "complete_task", "end_unix_ns": int(t * 1e9), "service_ns": 2_000_000,
+            "server_total_ns": 3_000_000, "core_lock_wait_ns": 0, "db_pool_wait_ns": 0, "blocking_queue_ns": 0}
+           for t in (10.5, 11.0, 11.5, 50.0)]
+    timings = rpc_timings(rpc, 10, 12)["complete_task"]
+    assert timings["calls"] == 3 and abs(timings["occupancy"] - 0.003) < 1e-9, timings
+    waits = pg_waits([(10, {"active:IO/WALSync": 2}, 100), (11, {"active:IO/WALSync": 4, "active:cpu": 2}, 150)], 9, 12)
+    assert waits["backends_by_state_and_wait"]["active:IO/WALSync"] == 3 and waits["commits_per_second"] == 50, waits
     print("self-test ok")
 
 
@@ -486,6 +593,11 @@ def main():
     parser.add_argument("--image-repo", default="scout")
     parser.add_argument("--image-tag", default="kind")
     parser.add_argument("--run-timeout", type=int, default=1500, help="seconds one crawl may take")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="after the headline runs, repeat each worker count once with per-RPC timing and "
+                             "Postgres wait-event sampling, to say why throughput stops growing")
+    parser.add_argument("--diagnostic-pages", type=int, default=1000,
+                        help="page budget of a diagnostic run (its stderr must fit the kubelet log rotation)")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -498,13 +610,18 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     cluster = Cluster(args)
     summaries = []
-    results = {"environment": None, "runs": summaries}
+    diagnostics = []
+    results = {"environment": None, "runs": summaries, "diagnostics": diagnostics}
     for repetition in range(1, args.repetitions + 1):
         # Alternate the order so drift (a warming node, a growing database) does not favour one count.
         for workers in args.workers if repetition % 2 else reversed(args.workers):
             summaries.append(run_once(cluster, args, workers, repetition, output))
             if results["environment"] is None:
                 results["environment"] = environment(cluster, args)
+            measurement.save(output / "results.json", results)
+    if args.diagnostics:
+        for workers in args.workers:
+            diagnostics.append(run_once(cluster, args, workers, 1, output, diagnostic=True))
             measurement.save(output / "results.json", results)
     print("RESULTS-JSON-BEGIN")
     print(json.dumps(results, sort_keys=True))

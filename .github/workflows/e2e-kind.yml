@@ -36,6 +36,10 @@ on:
       pages:
         description: Page budget of every run
         default: "3000"
+      diagnostics:
+        description: Also run each worker count once with RPC timing and Postgres wait sampling
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -104,7 +108,8 @@ jobs:
             --output benchmark-results \
             --workers ${{ inputs.workers }} \
             --repetitions ${{ inputs.repetitions }} \
-            --pages ${{ inputs.pages }}
+            --pages ${{ inputs.pages }} \
+            ${{ inputs.diagnostics && '--diagnostics' || '' }}
       - name: Summary
         if: always()
         run: |

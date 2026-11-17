@@ -90,6 +90,9 @@ spec:
             - name: SCOUT_COMPLETION_LANES
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.coordinator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: grpc
               containerPort: 50051
