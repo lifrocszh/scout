@@ -1771,7 +1771,11 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
             || event_acknowledged(&mut run, consumer_id, snapshot_event_id),
             "snapshot event acknowledgement",
         );
-        assert!(process.0.try_wait().unwrap().is_some());
+        // The consumer exits after committing its acknowledgement, so allow it time to exit.
+        wait(
+            || process.0.try_wait().unwrap().is_some(),
+            "consumer exit after snapshot acknowledgement",
+        );
         assert!(process.0.wait().unwrap().success());
     }
 

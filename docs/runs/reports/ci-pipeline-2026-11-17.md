@@ -50,6 +50,10 @@ I ran this in a cloud container on PostgreSQL 16.15. Postgres 17 could not be in
   test asserted that the run stays `active`. That assertion predates `complete_run_if_quiescent`
   (de86d6b), which now completes a frontier-exhausted run. The test now waits for
   `completed`/`frontier_exhausted`.
+- `distributed_recovery::durable_events_follow_commit_race_crash_replay_and_snapshot_publication`
+  failed on the first CI run. Right after the snapshot ack became visible, it asserted that the
+  consumer had already exited. The consumer exits only after it commits that ack, so this is a race.
+  The test now waits for the exit (bounded by the 40 s `wait` helper), then still asserts success.
 
 ## Follow-ups
 
