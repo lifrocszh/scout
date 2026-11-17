@@ -38,6 +38,10 @@ spec:
       terminationGracePeriodSeconds: {{ add .Values.worker.drainSeconds 15 }}
       initContainers:
         {{- include "scout.waitFor" (dict "root" . "host" (include "scout.coordinatorHost" .) "port" 50051) | nindent 8 }}
+        {{- if .Values.fixture.enabled }}
+        # The fixture is part of the release: do not start fetching before it answers.
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.fixtureHost" .) "port" (ternary .Values.fixture.synthetic.basePort 8080 (eq .Values.fixture.mode "synthetic"))) | nindent 8 }}
+        {{- end }}
       containers:
         - name: worker
           image: {{ include "scout.image" . }}
