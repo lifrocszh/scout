@@ -45,12 +45,17 @@ I ran this in a cloud container on PostgreSQL 16.15. Postgres 17 could not be in
   needless deref). Boxed the large `ReadyPermit::Pending` variant. Removed an unreachable `"pending"`
   match pattern. Marked two unused items with `#[expect(dead_code)]` (`ScheduleAdjustment`,
   `discard_unstarted_run`). Allowed `too_many_arguments` and `type_complexity` crate-wide in `Cargo.toml`.
-- `frontier::tests::postgres_shared_request_policy_contract`: the spacing timer used to start after
-  reconnecting. Reconnect latency (~55 ms here) ate the 160 ms window, so the test failed every time.
-  The timer now starts at the first grant, and the test asserts at least 140 ms. The same test's
-  round-robin section also failed once in CI. Its blocker permit lived only 300 ms (200 ms timeout
-  plus 100 ms margin) and expired during two DB round-trips before the release. That section tests
-  fairness, not expiry, so it now uses a 5 s request timeout.
+- `frontier::tests::postgres_shared_request_policy_contract` used 100–300 ms permit, claim and
+  spacing windows. Its "still live" checks failed whenever a few DB round-trips on a busy runner took
+  longer than that, and in CI it failed at a different spot on each run.
+  - The limits, attempt-cap and round-robin sections test concurrency and fairness, not expiry. They
+    now use a 5 s request timeout.
+  - The spacing-restart section uses a 1 s spacing window, measured from the first grant, and asserts
+    at least 900 ms.
+  - The worker-death section does test expiry. It uses a 1 s lifetime and sleeps until a deadline
+    measured from each grant or claim, instead of using fixed sleeps.
+  - Checked under load: with 8 CPU-burning processes running, the old version failed 5 of 5 runs and
+    the new version passed 8 of 8. The full Postgres suite also passes under the same load.
 - `distributed_recovery::all_request_classes_obey_shared_policy_and_terminal_failures_continue`: this
   test asserted that the run stays `active`. That assertion predates `complete_run_if_quiescent`
   (de86d6b), which now completes a frontier-exhausted run. The test now waits for
