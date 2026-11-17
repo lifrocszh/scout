@@ -36,9 +36,11 @@ coordinator() {
   fi
   # The coordinator refuses non-private bind addresses, so 0.0.0.0 is out:
   # bind the container's own address on the Compose network. It has no
-  # authentication, so compose.yaml never publishes this port.
-  local ip
-  ip=$(hostname -i | awk '{print $1}')
+  # authentication, so compose.yaml never publishes this port. Kubernetes
+  # passes the pod IP (SCOUT_COORDINATOR_BIND_IP, from the downward API).
+  local ip=${SCOUT_COORDINATOR_BIND_IP:-}
+  [ -n "$ip" ] || ip=$(hostname -i | awk '{print $1}')
+  case $ip in *:*) ip="[$ip]" ;; esac # IPv6 needs brackets in host:port
   scout coordinator --config "$CONFIG" --data-dir "$DATA" --run-id "$RUN_ID" \
     --bind "$ip:$PORT" &
   local pid=$!

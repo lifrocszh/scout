@@ -10,6 +10,7 @@ mod evaluation;
 mod generation;
 mod http;
 mod observability;
+mod shutdown;
 mod storage;
 mod url;
 

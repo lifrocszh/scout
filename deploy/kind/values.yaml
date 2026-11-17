@@ -1,0 +1,10 @@
+# Values for the chart on kind (make kind-up). The image is built locally and loaded into the node.
+image:
+  repository: scout
+  tag: kind
+  pullPolicy: IfNotPresent
+
+serve:
+  service:
+    type: NodePort
+    nodePort: 30080

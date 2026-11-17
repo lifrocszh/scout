@@ -82,6 +82,7 @@ jobs:
       - run: python3 -B tests/local_monitor_test.py
       - run: python3 -B scripts/databricks/test_transport_state.py
       - run: python3 -B tests/search_quality_test.py
+      - run: python3 -B tests/scaling_benchmark_test.py
 
   features:
     runs-on: ubuntu-24.04
@@ -161,6 +162,20 @@ jobs:
         run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' "$SCOUT_IMAGE"
       - name: Compose smoke test
         run: scripts/ci/compose-smoke.sh 3
+
+  # The Helm chart (deploy/helm/scout): lint, render the main variants, and validate what they
+  # render against the Kubernetes schemas. The cluster tests are in e2e-kind.yml.
+  helm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install kubeconform
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+      - run: helm version --short
+      - run: make helm-lint
 
   # Manual only: macOS runners can queue for a long time, and this guards a small
   # cfg(target_os = "macos") branch in src/generation/embeddings.rs.

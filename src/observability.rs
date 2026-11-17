@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 mod exporter;
 pub(crate) mod metrics;
 
-pub(crate) use exporter::start_exporter;
+pub(crate) use exporter::{set_ready, start_exporter};
 
 const EVENT_SCHEMA: &str = "scout.operational-event.v1";
 
