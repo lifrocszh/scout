@@ -21,17 +21,17 @@ CHART   := deploy/helm/scout
 KUBECTL := kubectl --context kind-$(CLUSTER) -n $(NAMESPACE)
 HELM    := helm --kube-context kind-$(CLUSTER) -n $(NAMESPACE)
 
-.PHONY: kind-up kind-down kind-deploy kind-smoke kind-metrics-server helm-lint
+.PHONY: kind-up kind-down kind-deploy kind-smoke kind-diagnose kind-metrics-server helm-lint
 
 kind-up:
 	kind get clusters | grep -qx '$(CLUSTER)' || kind create cluster --config deploy/kind/cluster.yaml --name $(CLUSTER)
 	[ '$(BUILD_IMAGE)' = 0 ] || docker build -t $(IMAGE_REPO):$(IMAGE_TAG) .
 	kind load docker-image $(IMAGE_REPO):$(IMAGE_TAG) --name $(CLUSTER)
 	$(MAKE) --no-print-directory kind-deploy
-	$(KUBECTL) rollout status statefulset/$(RELEASE)-postgres --timeout=5m
-	$(KUBECTL) rollout status deploy/$(RELEASE)-coordinator --timeout=5m
+	$(KUBECTL) rollout status statefulset/$(RELEASE)-postgres --timeout=5m || { $(MAKE) --no-print-directory kind-diagnose; exit 1; }
+	$(KUBECTL) rollout status deploy/$(RELEASE)-coordinator --timeout=3m || { $(MAKE) --no-print-directory kind-diagnose; exit 1; }
 	# Ready once the crawl has finished and the index Job has activated a Generation.
-	$(KUBECTL) rollout status deploy/$(RELEASE)-serve --timeout=10m
+	$(KUBECTL) rollout status deploy/$(RELEASE)-serve --timeout=10m || { $(MAKE) --no-print-directory kind-diagnose; exit 1; }
 	@echo "scout is up: curl http://127.0.0.1:8080/v1/readyz"
 
 # Install or upgrade the release. The run ID defaults to the chart's; pass
@@ -44,6 +44,10 @@ kind-deploy:
 kind-smoke:
 	CLUSTER=$(CLUSTER) NAMESPACE=$(NAMESPACE) RELEASE=$(RELEASE) \
 		IMAGE_REPO=$(IMAGE_REPO) IMAGE_TAG=$(IMAGE_TAG) scripts/ci/kind-smoke.sh
+
+# Pod state, events and every container's logs, for when something does not come up.
+kind-diagnose:
+	CLUSTER=$(CLUSTER) NAMESPACE=$(NAMESPACE) scripts/ci/kind-diagnose.sh
 
 kind-down:
 	kind delete cluster --name $(CLUSTER)

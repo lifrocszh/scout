@@ -76,7 +76,7 @@ jobs:
         run: HPA=1 make kind-smoke
       - name: Cluster state
         if: failure()
-        run: kubectl get all,pvc,events -A
+        run: make kind-diagnose
 
   benchmark:
     if: github.event_name == 'workflow_dispatch' && inputs.benchmark
