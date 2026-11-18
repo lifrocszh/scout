@@ -226,13 +226,15 @@ def svg(results, rows):
         x, y = scale_x(left, row["workers"]), scale_y(left, row["pages_per_second"], top_a)
         out.append(f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="5" fill="var(--s1)"><title>{row["workers"]} workers: {row["pages_per_second"]:.1f} pages/s '
                    f'(min {row["min"]:.1f}, max {row["max"]:.1f}, {row["runs"]} runs)</title></circle>')
-    last = rows[-1]
-    if last["pages_per_second"]:
-        x, y = scale_x(left, last["workers"]), scale_y(left, last["pages_per_second"], top_a)
-        out.append(f'<text x="{x - 10:.1f}" y="{y - 12:.1f}" text-anchor="end" fill="var(--ink)" style="fill:var(--ink)">{last["pages_per_second"]:.1f} pages/s measured</text>')
-    first = rows[0]
-    if first["pages_per_second"]:
-        out.append(f'<text x="{scale_x(left, first["workers"]) + 10:.1f}" y="{scale_y(left, first["pages_per_second"], top_a) + 18:.1f}" style="fill:var(--ink)">{first["pages_per_second"]:.1f}</text>')
+    # Every point carries its value, below the point: the measured line stays under the ideal one.
+    for row in rows:
+        if row["pages_per_second"] is None:
+            continue
+        x, y = scale_x(left, row["workers"]), scale_y(left, row["pages_per_second"], top_a)
+        # The last label starts at its point and runs right, clear of the line that arrives from the left.
+        last = row is rows[-1]
+        out.append(f'<text x="{x - 8 if last else x:.1f}" y="{y + 22:.1f}" text-anchor="{"start" if last else "middle"}" '
+                   f'style="fill:var(--ink)">{row["pages_per_second"]:.1f}{" pages/s" if last else ""}</text>')
     out.append(f'<text class="m" x="{left["x0"]}" y="{height - 14}">mean of {rows[0]["runs"]} runs per point; the bar is the min-max range</text>')
 
     axes(right, top_b, step_b, "CPU cores used, by role", lambda v: f"{v:g}")

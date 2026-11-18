@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" role="img" aria-labelledby="t d" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="12">
+<title id="t">Scout crawl throughput against worker count, with the CPU each role used</title>
+<desc id="d">Measured pages per second for 1, 2, 4, 8 workers against linear scaling, and cores used by the coordinator, the workers, Postgres and the origin pod. The same numbers are in the report's tables.</desc>
+<style>:root{color-scheme:light dark;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;}@media (prefers-color-scheme:dark){:root{--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;}}text{fill:var(--ink2)}.t{fill:var(--ink);font-size:14px;font-weight:600}.m{fill:var(--muted)}.g{stroke:var(--grid);stroke-width:1}.a{stroke:var(--axis);stroke-width:1}.l{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.dot{stroke:var(--surface);stroke-width:2}</style>
+<rect width="980" height="440" fill="var(--surface)"/>
+<line class="a" x1="64" x2="450" y1="352.0" y2="352.0"/>
+<text class="m" x="56" y="356.0" text-anchor="end">0</text>
+<line class="g" x1="64" x2="450" y1="286.0" y2="286.0"/>
+<text class="m" x="56" y="290.0" text-anchor="end">20</text>
+<line class="g" x1="64" x2="450" y1="220.0" y2="220.0"/>
+<text class="m" x="56" y="224.0" text-anchor="end">40</text>
+<line class="g" x1="64" x2="450" y1="154.0" y2="154.0"/>
+<text class="m" x="56" y="158.0" text-anchor="end">60</text>
+<line class="g" x1="64" x2="450" y1="88.0" y2="88.0"/>
+<text class="m" x="56" y="92.0" text-anchor="end">80</text>
+<text class="m" x="86.7" y="372" text-anchor="middle">1</text>
+<text class="m" x="132.0" y="372" text-anchor="middle">2</text>
+<text class="m" x="222.7" y="372" text-anchor="middle">4</text>
+<text class="m" x="404.2" y="372" text-anchor="middle">8</text>
+<text class="m" x="257" y="392" text-anchor="middle">workers</text>
+<text class="t" x="64" y="32">Pages per second</text>
+<line class="l" stroke="var(--muted)" x1="86.7" y1="325.7" x2="404.2" y2="141.6"/>
+<text class="m" x="398.2" y="133.6" text-anchor="end">linear scaling</text>
+<line stroke="var(--s1)" stroke-width="1.5" x1="86.7" x2="86.7" y1="326.0" y2="325.3"/>
+<line stroke="var(--s1)" stroke-width="1.5" x1="132.0" x2="132.0" y1="302.4" y2="301.5"/>
+<line stroke="var(--s1)" stroke-width="1.5" x1="222.7" x2="222.7" y1="257.8" y2="255.6"/>
+<line stroke="var(--s1)" stroke-width="1.5" x1="404.2" x2="404.2" y1="189.0" y2="179.1"/>
+<polyline class="l" stroke="var(--s1)" points="86.7,325.7 132.0,302.1 222.7,257.0 404.2,182.7"/>
+<circle class="dot" cx="86.7" cy="325.7" r="5" fill="var(--s1)"><title>1 workers: 8.0 pages/s (min 7.9, max 8.1, 3 runs)</title></circle>
+<circle class="dot" cx="132.0" cy="302.1" r="5" fill="var(--s1)"><title>2 workers: 15.1 pages/s (min 15.0, max 15.3, 3 runs)</title></circle>
+<circle class="dot" cx="222.7" cy="257.0" r="5" fill="var(--s1)"><title>4 workers: 28.8 pages/s (min 28.5, max 29.2, 3 runs)</title></circle>
+<circle class="dot" cx="404.2" cy="182.7" r="5" fill="var(--s1)"><title>8 workers: 51.3 pages/s (min 49.4, max 52.4, 3 runs)</title></circle>
+<text x="86.7" y="347.7" text-anchor="middle" style="fill:var(--ink)">8.0</text>
+<text x="132.0" y="324.1" text-anchor="middle" style="fill:var(--ink)">15.1</text>
+<text x="222.7" y="279.0" text-anchor="middle" style="fill:var(--ink)">28.8</text>
+<text x="396.2" y="204.7" text-anchor="start" style="fill:var(--ink)">51.3 pages/s</text>
+<text class="m" x="64" y="426">mean of 3 runs per point; the bar is the min-max range</text>
+<line class="a" x1="570" x2="930" y1="352.0" y2="352.0"/>
+<text class="m" x="562" y="356.0" text-anchor="end">0</text>
+<line class="g" x1="570" x2="930" y1="286.0" y2="286.0"/>
+<text class="m" x="562" y="290.0" text-anchor="end">1</text>
+<line class="g" x1="570" x2="930" y1="220.0" y2="220.0"/>
+<text class="m" x="562" y="224.0" text-anchor="end">2</text>
+<line class="g" x1="570" x2="930" y1="154.0" y2="154.0"/>
+<text class="m" x="562" y="158.0" text-anchor="end">3</text>
+<line class="g" x1="570" x2="930" y1="88.0" y2="88.0"/>
+<text class="m" x="562" y="92.0" text-anchor="end">4</text>
+<text class="m" x="591.1" y="372" text-anchor="middle">1</text>
+<text class="m" x="633.5" y="372" text-anchor="middle">2</text>
+<text class="m" x="718.0" y="372" text-anchor="middle">4</text>
+<text class="m" x="887.2" y="372" text-anchor="middle">8</text>
+<text class="m" x="750" y="392" text-anchor="middle">workers</text>
+<text class="t" x="570" y="32">CPU cores used, by role</text>
+<polyline class="l" stroke="var(--s1)" points="591.1,345.2 633.5,341.9 718.0,335.9 887.2,326.7"/>
+<circle class="dot" cx="591.1" cy="345.2" r="4" fill="var(--s1)"><title>coordinator, 1 workers: 0.10 cores</title></circle>
+<circle class="dot" cx="633.5" cy="341.9" r="4" fill="var(--s1)"><title>coordinator, 2 workers: 0.15 cores</title></circle>
+<circle class="dot" cx="718.0" cy="335.9" r="4" fill="var(--s1)"><title>coordinator, 4 workers: 0.24 cores</title></circle>
+<circle class="dot" cx="887.2" cy="326.7" r="4" fill="var(--s1)"><title>coordinator, 8 workers: 0.38 cores</title></circle>
+<line x1="570" x2="588" y1="50" y2="50" stroke="var(--s1)" stroke-width="2" stroke-linecap="round"/>
+<text x="594" y="54">coordinator</text>
+<polyline class="l" stroke="var(--s2)" points="591.1,350.5 633.5,349.2 718.0,346.9 887.2,342.8"/>
+<circle class="dot" cx="591.1" cy="350.5" r="4" fill="var(--s2)"><title>workers (all), 1 workers: 0.02 cores</title></circle>
+<circle class="dot" cx="633.5" cy="349.2" r="4" fill="var(--s2)"><title>workers (all), 2 workers: 0.04 cores</title></circle>
+<circle class="dot" cx="718.0" cy="346.9" r="4" fill="var(--s2)"><title>workers (all), 4 workers: 0.08 cores</title></circle>
+<circle class="dot" cx="887.2" cy="342.8" r="4" fill="var(--s2)"><title>workers (all), 8 workers: 0.14 cores</title></circle>
+<line x1="720" x2="738" y1="50" y2="50" stroke="var(--s2)" stroke-width="2" stroke-linecap="round"/>
+<text x="744" y="54">workers (all)</text>
+<polyline class="l" stroke="var(--s3)" points="591.1,336.6 633.5,327.1 718.0,308.7 887.2,281.8"/>
+<circle class="dot" cx="591.1" cy="336.6" r="4" fill="var(--s3)"><title>postgres, 1 workers: 0.23 cores</title></circle>
+<circle class="dot" cx="633.5" cy="327.1" r="4" fill="var(--s3)"><title>postgres, 2 workers: 0.38 cores</title></circle>
+<circle class="dot" cx="718.0" cy="308.7" r="4" fill="var(--s3)"><title>postgres, 4 workers: 0.66 cores</title></circle>
+<circle class="dot" cx="887.2" cy="281.8" r="4" fill="var(--s3)"><title>postgres, 8 workers: 1.06 cores</title></circle>
+<line x1="570" x2="588" y1="68" y2="68" stroke="var(--s3)" stroke-width="2" stroke-linecap="round"/>
+<text x="594" y="72">postgres</text>
+<polyline class="l" stroke="var(--s4)" points="591.1,351.1 633.5,351.0 718.0,350.9 887.2,350.5"/>
+<circle class="dot" cx="591.1" cy="351.1" r="4" fill="var(--s4)"><title>origin pod, 1 workers: 0.01 cores</title></circle>
+<circle class="dot" cx="633.5" cy="351.0" r="4" fill="var(--s4)"><title>origin pod, 2 workers: 0.01 cores</title></circle>
+<circle class="dot" cx="718.0" cy="350.9" r="4" fill="var(--s4)"><title>origin pod, 4 workers: 0.02 cores</title></circle>
+<circle class="dot" cx="887.2" cy="350.5" r="4" fill="var(--s4)"><title>origin pod, 8 workers: 0.02 cores</title></circle>
+<line x1="720" x2="738" y1="68" y2="68" stroke="var(--s4)" stroke-width="2" stroke-linecap="round"/>
+<text x="744" y="72">origin pod</text>
+<line class="l" stroke="var(--muted)" x1="570" x2="930" y1="88.0" y2="88.0"/>
+<text class="m" x="930" y="103.0" text-anchor="end">node capacity: 4 vCPU</text>
+</svg>

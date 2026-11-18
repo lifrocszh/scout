@@ -32,4 +32,5 @@ __pycache__/
 !/docs/runs/reports/
 /docs/runs/reports/*
 !/docs/runs/reports/*.md
+!/docs/runs/reports/*.svg
 /docs/portfolio-roadmap.md
