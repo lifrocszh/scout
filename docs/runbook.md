@@ -1,8 +1,9 @@
 # Runbook: crawl failures
 
 What each failure looks like, how to confirm it, and what to do. Every scenario below is
-injected by the failure-injection suite (`scripts/chaos/run.sh`, issue #10), so the symptoms
-and recovery times are measured, not guessed. The design they rely on (leases, fencing,
+injected by the failure-injection suite (`scripts/chaos/run.sh`, issue #10): the counter
+changes, log events and recovery times below were observed in those runs. The dashboard panels
+are where those counters are plotted; the suite reads the metrics, not Grafana. The design they rely on (leases, fencing,
 idempotent results) is in [design.md](design.md).
 
 The short version: none of the failures below needs a manual step on Compose. Leases expire
@@ -106,11 +107,11 @@ When it wakes up it reports a result for a lease that has already expired or mov
 The coordinator process dies mid-crawl.
 
 - **Symptoms.** *Scrape targets up* loses the coordinator; every panel fed by it has a gap, and
-  its counters restart from zero. Each worker logs `scout crawl failed: storage_failed: ...
-  transport error` and exits non-zero as its next call fails; Compose restarts them and they wait
-  for the coordinator's port. The restarted coordinator logs `coordinator.resumed`. *Lease expirations* then counts the
-  leases the old workers held; a few `worker.task_stale` may appear from a worker whose call
-  reached the new coordinator with a lease it does not recognise.
+  its counters restart from zero. Workers log `scout crawl failed: storage_failed: ...
+  transport error` and exit non-zero as their next call fails; Compose restarts them and they wait
+  for the coordinator's port. The restarted coordinator logs `coordinator.resumed`. *Lease
+  expirations* then counts the leases the old workers held, and a few `worker.task_stale` appear
+  from workers whose call reached the new coordinator with a lease it does not recognise.
 - **Diagnosis.** `docker compose ps -a` shows the coordinator's restart; `SELECT status FROM
   scout_crawl_runs` stays `active`. If the coordinator does not come back, its log says why (a
   failed spool replay marks the run `failed`).
@@ -184,23 +185,26 @@ Recovery is the time from the fault (or its end, for faults with a length) until
 entry names: the dead or stalled worker's lease reclaimed by another worker, or the first new page
 accepted.
 
-| Failure | Recovery | Crawl, vs 29 s clean | Leases reclaimed | Stale results fenced |
-| --- | --- | --- | --- | --- |
-| Worker crash mid-lease | 3.8-4.3 s (lease expiry) | +0 s | 1 | 0 |
-| Stale worker | 3.6-3.7 s (lease expiry) | -2 s (one extra worker) | 1 | 1 |
-| Coordinator crash | 7.1-7.4 s | +7 s | 3 | 0-2 |
-| Postgres paused 10 s | 0.2-0.9 s after unpause | +11 s | 3 | 6 |
-| Latency 100 ms each way | none needed | | | |
-| Partition 10 s | | | | |
+| Failure | Recovery (CI) | Recovery (local) | Crawl (CI; clean: 29.8 s) | Leases reclaimed | Stale results fenced |
+| --- | --- | --- | --- | --- | --- |
+| Worker crash mid-lease | 4.2 s (lease reclaimed) | 3.8-4.3 s | 29.3 s | 1 | 0 |
+| Stale worker, 10 s stall | 3.7 s (lease reclaimed) | 3.6-3.7 s | 26.5 s (one extra worker) | 1 | 1 |
+| Coordinator crash | 8.4 s (first new page) | 7.1-7.4 s | 37.2 s | 3 | 5 |
+| Postgres paused 10 s | 0.2 s after unpause | 0.2-0.9 s | 39.8 s | 3 | 6 |
+| Latency 100 ms +-20 ms each way | none needed: no lease lost | not run | 97.4 s | 0 | 0 |
+| Partition 10 s | 0.8 s after heal | not run | 40.3 s | 3 | 0 |
 
-Local Docker runs, 2026-11-18 (two runs each). The numbers vary with timing: how many leases a
-fault catches depends on what was in flight. Run them yourself with `scripts/chaos/run.sh`; the
-[run report](runs/run-23-chaos-suite-2026-11-18.md) has the details.
+CI: the [Chaos workflow on PR #27](https://github.com/lifrocszh/scout/actions/runs/44253796650),
+GitHub `ubuntu-24.04` runner, 2026-11-18; all seven scenarios took 7 min 13 s after a 1.5 min
+image build. Local: Docker 29 on a Linux VM, two runs each; the network scenarios were not run
+locally. Lease-bound recoveries track the 4 s lease; the counts of reclaimed leases and fenced
+results depend on what was in flight when the fault hit, so expect them to vary between runs.
+The [run report](runs/reports/chaos-suite-2026-11-18.md) has the details.
 
 ## Running the suite
 
 ```bash
-scripts/chaos/run.sh            # all seven scenarios, ~8 min after the image is built
+scripts/chaos/run.sh            # all seven scenarios, ~7 min after the image is built
 scripts/chaos/run.sh fast       # baseline, worker-kill, stale-lease
 scripts/chaos/run.sh coordinator-kill postgres-pause
 ```

@@ -63,7 +63,7 @@ jobs:
           docker pull -q ghcr.io/shopify/toxiproxy:2.12.0
       - name: Failure injection
         env:
-          SCENARIOS: ${{ github.event_name == 'pull_request' && 'all' || inputs.scenarios || 'all' }} # TEMP: all on this PR to measure; revert to fast
+          SCENARIOS: ${{ github.event_name == 'pull_request' && 'fast' || inputs.scenarios || 'all' }}
         # Word splitting on purpose: SCENARIOS is a list.
         run: scripts/chaos/run.sh $SCENARIOS
       - name: Summary
