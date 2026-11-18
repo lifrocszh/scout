@@ -43,11 +43,14 @@ Left out of the picture:
   Grafana ([Observability](#observability)).
 - **Optional.** Postgres also holds an event outbox that `scout events consume` can deliver,
   at least once, to a Databricks Delta pipeline ([Phase 2](docs/phase2.md)).
+- **Local lakehouse.** Snapshots and outbox events land as Delta tables on the local filesystem,
+  with data-quality checks and lineage, and DuckDB queries them. It needs no server or cloud
+  account ([docs/lakehouse.md](docs/lakehouse.md)).
 - **Optional Kafka log.** `scout kafka relay` copies that outbox into Apache Kafka, and
   `scout kafka reduce` rebuilds the snapshot from Kafka alone and checks it against the live one
   ([Kafka ingestion log](#kafka-ingestion-log-optional), [ADR 0003](docs/adr/0003-kafka-ingestion-log.md)).
-  Postgres stays the authority; nothing waits for Kafka.
-- **Planned, not built.** A local lakehouse ([#14](https://github.com/lifrocszh/scout/issues/14)).
+  Postgres stays the authority; nothing waits for Kafka. The lakehouse does not read from Kafka
+  yet; its event sources are pluggable, so it could.
 
 Why it is built this way (leases and fencing, Postgres instead of a broker, delivery guarantees):
 [docs/design.md](docs/design.md). Components and the crawl flow:

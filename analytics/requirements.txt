@@ -1,0 +1,4 @@
+# Local lakehouse (analytics/lakehouse). Pinned so CI and local runs agree.
+deltalake==1.6.6
+duckdb==2.0.0
+pyarrow==26.0.1

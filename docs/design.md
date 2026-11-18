@@ -120,9 +120,15 @@ worker -> coordinator -> one Postgres tx (result + outbox event)      authority,
 
 ## Not built yet
 
-- **A local lakehouse.** Kafka now carries the log (section 4); local Delta/Iceberg tables
-  queried with DuckDB (#14), fed from it, are planned. The Databricks Delta pipeline
-  ([Phase 2](phase2.md)) still reads the Postgres outbox directly.
+- **The lakehouse reading from Kafka.** The [local lakehouse](lakehouse.md) (#14) loads outbox
+  events from `scout events consume` output and exported batches; the Databricks Delta pipeline
+  ([Phase 2](phase2.md)) also reads the outbox. Neither reads Kafka yet. The lakehouse's
+  transport-neutral `EventSource` makes it a small step: the `crawl-events` topic carries each
+  outbox payload byte for byte, so a Kafka source would yield those values with
+  `topic/partition/offset` as the reference, and its `(crawl_run_id, event_id)` deduplication
+  already absorbs the relay's at-least-once repeats.
+- **Dead letters in the lakehouse.** Dead-lettered tasks stay in Postgres (`scout dlq list`). The
+  lakehouse loads snapshots, near-duplicate reports and outbox events, but not dead letters yet.
 - **More from the Kafka log**: a multi-broker cluster with replication, TLS/SASL, consumer-group
   offsets for third-party consumers, and replay of scheduled (Source-scoped) runs in the reducer.
 - **More than one coordinator per run**, and a highly available Postgres. ADR 0002 explains the

@@ -1,0 +1,35 @@
+{
+  "schema_version": "scout.near-duplicates.v1",
+  "run_id": "run-485617ec8f214f77a0baf3c4fea27dfe054177b83090b964a8ab4146c395c8fb",
+  "snapshot_id": "snapshot-8b60f7a1079ab950b51c73679a13b2a62aa7c637eb9c5e1c5b1947d309e1a468",
+  "fingerprint": "simhash64-word3-shingles",
+  "max_hamming_distance": 6,
+  "page_count": 7,
+  "near_duplicate_page_count": 1,
+  "near_duplicate_rate": 0.14285714285714285,
+  "exact_duplicate_alias_count": 1,
+  "origins": [
+    {
+      "origin": "http://127.0.0.1:18111",
+      "page_count": 4,
+      "near_duplicate_page_count": 1,
+      "near_duplicate_rate": 0.25,
+      "exact_duplicate_alias_count": 0
+    },
+    {
+      "origin": "http://127.0.0.1:18112",
+      "page_count": 3,
+      "near_duplicate_page_count": 0,
+      "near_duplicate_rate": 0.0,
+      "exact_duplicate_alias_count": 1
+    }
+  ],
+  "pairs": [
+    {
+      "page_url": "http://127.0.0.1:18111/docs/configure.html",
+      "near_duplicate_of": "http://127.0.0.1:18111/docs/configure-legacy.html",
+      "hamming_distance": 4
+    }
+  ],
+  "pairs_truncated": false
+}
