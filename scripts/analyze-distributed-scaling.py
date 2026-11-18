@@ -97,6 +97,7 @@ def markdown(results, rows):
                    f"{fmt(row['pool_connections'], 0)} | {fmt(row['pool_max_in_use'], 0)} | "
                    f"{fmt(c['coordinator'], 2, ' cores')} | {fmt(c['postgres'], 2, ' cores')} | "
                    f"{fmt(c['workers_total'], 2, ' cores')} | {fmt(c['fixture'], 2, ' cores')} | {fmt(c['all_roles'], 2, ' cores')} |")
+    out.extend(diagnostics_markdown(results))
     flat = flattening(rows)
     if flat:
         out.append(f"\nThe curve flattens after {flat['after_workers']} workers: going to {flat['to_workers']} multiplies "
@@ -107,6 +108,40 @@ def markdown(results, rows):
         for warning in row["warnings"]:
             out.append(f"\n- warning at {row['workers']} workers: {warning}")
     return "\n".join(out)
+
+
+def diagnostics_markdown(results, top=6):
+    """Tables from the diagnostic runs: where the coordinator and Postgres spent the window."""
+    runs = sorted(results.get("diagnostics") or [], key=lambda run: run["workers"])
+    if not runs:
+        return []
+    out = ["\n#### Diagnostic runs (RPC timing on, so slower than the headline runs)\n",
+           "| workers | pages/s | frontier pending (mean / min) | frontier leased (mean) | Postgres commits/s | active backends (mean) | idle in transaction (mean) |",
+           "|--:|--:|--:|--:|--:|--:|--:|"]
+    for run in runs:
+        frontier, postgres = run.get("frontier") or {}, run.get("postgres") or {}
+        waits = postgres.get("backends_by_state_and_wait") or {}
+        active = sum(v for k, v in waits.items() if k.startswith("active:"))
+        idle = sum(v for k, v in waits.items() if k.startswith("idle in transaction:"))
+        out.append(f"| {run['workers']} | {fmt(run['pages_per_second'])} | {fmt(frontier.get('pending_mean'), 0)} / {fmt(frontier.get('pending_min'), 0)} | "
+                   f"{fmt(frontier.get('leased_mean'), 1)} | {fmt(postgres.get('commits_per_second'), 0)} | {fmt(active, 2)} | {fmt(idle, 2)} |")
+    for run in runs:
+        waits = (run.get("postgres") or {}).get("backends_by_state_and_wait") or {}
+        if waits:
+            ranked = ", ".join(f"`{k}` {v:.2f}" for k, v in list(waits.items())[:5])
+            out.append(f"\n{run['workers']} workers, Postgres backends by state and wait event (mean per sample): {ranked}")
+    for run in runs:
+        operations = run.get("rpc_timings") or {}
+        if not operations:
+            continue
+        out.append(f"\n{run['workers']} workers, coordinator RPCs by occupancy (service time per second of window; 1.0 is one core-equivalent):\n")
+        out.append("| RPC | calls/s | service p50 | service p95 | server total p95 | core-lock wait p95 | DB-pool wait p95 | occupancy |")
+        out.append("|--|--:|--:|--:|--:|--:|--:|--:|")
+        for name, op in sorted(operations.items(), key=lambda item: -item[1]["occupancy"])[:top]:
+            out.append(f"| {name} | {fmt(op['calls_per_second'])} | {fmt(op['service'].get('p50_ms'), 2, ' ms')} | {fmt(op['service'].get('p95_ms'), 2, ' ms')} | "
+                       f"{fmt(op['server_total'].get('p95_ms'), 2, ' ms')} | {fmt(op['core_lock_wait'].get('p95_ms'), 2, ' ms')} | "
+                       f"{fmt(op['db_pool_wait'].get('p95_ms'), 3, ' ms')} | {fmt(op['occupancy'], 2)} |")
+    return out
 
 
 # ---- chart ---------------------------------------------------------------------------------------
@@ -191,13 +226,15 @@ def svg(results, rows):
         x, y = scale_x(left, row["workers"]), scale_y(left, row["pages_per_second"], top_a)
         out.append(f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="5" fill="var(--s1)"><title>{row["workers"]} workers: {row["pages_per_second"]:.1f} pages/s '
                    f'(min {row["min"]:.1f}, max {row["max"]:.1f}, {row["runs"]} runs)</title></circle>')
-    last = rows[-1]
-    if last["pages_per_second"]:
-        x, y = scale_x(left, last["workers"]), scale_y(left, last["pages_per_second"], top_a)
-        out.append(f'<text x="{x - 10:.1f}" y="{y - 12:.1f}" text-anchor="end" fill="var(--ink)" style="fill:var(--ink)">{last["pages_per_second"]:.1f} pages/s measured</text>')
-    first = rows[0]
-    if first["pages_per_second"]:
-        out.append(f'<text x="{scale_x(left, first["workers"]) + 10:.1f}" y="{scale_y(left, first["pages_per_second"], top_a) + 18:.1f}" style="fill:var(--ink)">{first["pages_per_second"]:.1f}</text>')
+    # Every point carries its value, below the point: the measured line stays under the ideal one.
+    for row in rows:
+        if row["pages_per_second"] is None:
+            continue
+        x, y = scale_x(left, row["workers"]), scale_y(left, row["pages_per_second"], top_a)
+        # The last label starts at its point and runs right, clear of the line that arrives from the left.
+        last = row is rows[-1]
+        out.append(f'<text x="{x - 8 if last else x:.1f}" y="{y + 22:.1f}" text-anchor="{"start" if last else "middle"}" '
+                   f'style="fill:var(--ink)">{row["pages_per_second"]:.1f}{" pages/s" if last else ""}</text>')
     out.append(f'<text class="m" x="{left["x0"]}" y="{height - 14}">mean of {rows[0]["runs"]} runs per point; the bar is the min-max range</text>')
 
     axes(right, top_b, step_b, "CPU cores used, by role", lambda v: f"{v:g}")

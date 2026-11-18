@@ -89,7 +89,8 @@ kubectl -n scout scale deploy/scout-worker --replicas=8   # by hand: new workers
 Or let the HPA do it on CPU: `make kind-metrics-server`, then
 `helm upgrade ... --set worker.autoscaling.enabled=true`. Scaling in stops workers mid-task, which the
 drain above handles; the HPA waits two minutes before removing one. Measured throughput against worker
-count is in [`runs/reports/`](runs/reports/).
+count (8.0 pages/s with 1 worker, 51.3 with 8, on a 4-vCPU kind node) is in
+[`runs/reports/kubernetes-scaling-2026-11-18.md`](runs/reports/kubernetes-scaling-2026-11-18.md).
 
 ## Metrics
 

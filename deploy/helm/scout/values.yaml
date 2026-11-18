@@ -75,6 +75,9 @@ coordinator:
   metricsLingerSeconds: 0
   # How often the frontier-depth gauges are sampled from Postgres.
   metricsSampleSeconds: 5
+  # Extra environment variables, e.g. [{name: SCOUT_DISTRIBUTED_METRICS, value: "1"}] for per-RPC
+  # timings on stderr (used by the scaling benchmark's diagnostic runs).
+  extraEnv: []
 
 worker:
   replicas: 3

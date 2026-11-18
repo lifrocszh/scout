@@ -35,7 +35,17 @@ on:
         default: "3"
       pages:
         description: Page budget of every run
-        default: "2000"
+        default: "3000"
+      diagnostics:
+        description: Also run each worker count once with RPC timing and Postgres wait sampling
+        type: boolean
+        default: true
+      db_lanes:
+        description: SCOUT_COORDINATOR_DB_LANES for the coordinator (empty keeps the default, 4)
+        default: ""
+      completion_lanes:
+        description: SCOUT_COMPLETION_LANES for the coordinator (empty keeps the default, 4)
+        default: ""
 
 permissions:
   contents: read
@@ -104,7 +114,10 @@ jobs:
             --output benchmark-results \
             --workers ${{ inputs.workers }} \
             --repetitions ${{ inputs.repetitions }} \
-            --pages ${{ inputs.pages }}
+            --pages ${{ inputs.pages }} \
+            --db-lanes "${{ inputs.db_lanes }}" \
+            --completion-lanes "${{ inputs.completion_lanes }}" \
+            ${{ inputs.diagnostics && '--diagnostics' || '' }}
       - name: Summary
         if: always()
         run: |

@@ -160,6 +160,12 @@ the search API on Kubernetes. `make kind-up` builds the image, creates a local
 it. Scale the crawl with `kubectl -n scout scale deploy/scout-worker --replicas=8` (or the HPA). See
 [docs/kubernetes.md](docs/kubernetes.md) for the design, probes, graceful shutdown and CI.
 
+Crawl throughput on that cluster (one 4-vCPU kind node, 3 runs per point) went from 8.0 pages/s with one
+worker to 51.3 with eight, 6.4x; the [report](docs/runs/reports/kubernetes-scaling-2026-11-18.md) has the
+latency, DB-pool and CPU numbers and what limits the curve.
+
+[![Pages per second against workers, and CPU by role](docs/runs/reports/kubernetes-scaling-2026-11-18.svg)](docs/runs/reports/kubernetes-scaling-2026-11-18.md)
+
 ## Observability
 
 The coordinator, workers and `serve` expose Prometheus metrics at `/metrics`. The endpoint is off
