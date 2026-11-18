@@ -11,45 +11,41 @@ snapshot and activated separately.
 ## How it fits together
 
 ```mermaid
-flowchart LR
-    sites(["Allowlisted sites<br/>robots.txt, sitemaps"])
+flowchart TB
+    sites(["Allowlisted sites"])
+    workers["Workers<br/>fetch + extract"]
+    coord["Coordinator<br/>one per crawl run"]
+    pg[("PostgreSQL<br/>frontier + leases")]
+    spool[("Capture spool")]
+    snap["Corpus snapshot"]
+    gen["Index Generation<br/>Tantivy + USearch"]
+    serve["scout serve<br/>POST /v1/search"]
 
-    subgraph crawl["Crawl: coordinator-led, gRPC"]
-        workers["Workers, scale out<br/>fetch + extract"]
-        coord["Coordinator<br/>one per crawl run"]
-        pg[("PostgreSQL<br/>frontier, leases + fencing,<br/>request policy, event outbox")]
-        workers <-->|"claim, permit, result"| coord
-        coord <-->|"SQL, SKIP LOCKED"| pg
-    end
-
-    subgraph build["Build: immutable artifacts"]
-        spool[("Capture spool")]
-        snap["Corpus snapshot"]
-        gen["Index Generation<br/>Tantivy BM25 + USearch vectors<br/>fastembed BGE Small embeddings"]
-        spool -->|materialize| snap -->|"index build"| gen
-    end
-
-    serve["scout serve<br/>POST /v1/search<br/>keyword, semantic, hybrid (RRF)"]
-
-    workers -->|HTTP| sites
-    coord --> spool
-    gen -->|"activate, atomic"| serve
-
-    pg -.->|"outbox events, at-least-once"| dbx["Databricks Delta<br/>optional"]
-    crawl -.->|"planned, issue 13"| kafka["Kafka log<br/>planned"]
-    kafka -.->|"planned, issue 14"| lake["Local lakehouse<br/>planned"]
-
-    obs["Prometheus + Grafana<br/>obs profile"]
-    coord -.->|metrics| obs
-    workers -.->|metrics| obs
-    serve -.->|metrics| obs
+    sites -->|pages| workers
+    workers <-->|gRPC| coord
+    coord <-->|SQL| pg
+    coord -->|captures| spool
+    spool -->|materialize| snap
+    snap -->|index build| gen
+    gen -->|activate| serve
 ```
 
-Solid lines run today. Dashed lines are optional or planned. Postgres hands each crawl task to a
-worker as a lease that it fences, so a stalled worker cannot overwrite its replacement. A finished
-crawl becomes an immutable snapshot, a snapshot becomes an index Generation, and `serve` switches
-to a new Generation atomically. The same image runs every role, under Docker Compose
-([Quickstart](#quickstart)) or the Helm chart on Kubernetes ([docs/kubernetes.md](docs/kubernetes.md)).
+Postgres hands each crawl task to a worker as a lease that it fences, so a stalled worker cannot
+overwrite its replacement. A finished crawl becomes an immutable snapshot, a snapshot becomes an
+index Generation (BM25 keyword plus BGE Small vectors, searched as keyword, semantic or hybrid RRF),
+and `serve` switches to a new Generation atomically. The same image runs every role, under Docker
+Compose ([Quickstart](#quickstart)) or the Helm chart on Kubernetes
+([docs/kubernetes.md](docs/kubernetes.md)).
+
+Left out of the picture:
+
+- **Metrics.** The coordinator, workers and `serve` all expose `/metrics` for Prometheus and
+  Grafana ([Observability](#observability)).
+- **Optional.** Postgres also holds an event outbox that `scout events consume` can deliver,
+  at least once, to a Databricks Delta pipeline ([Phase 2](docs/phase2.md)).
+- **Planned, not built.** Kafka as a replay log ([#13](https://github.com/lifrocszh/scout/issues/13))
+  and a local lakehouse ([#14](https://github.com/lifrocszh/scout/issues/14)).
+
 Why it is built this way (leases and fencing, Postgres instead of a broker, delivery guarantees):
 [docs/design.md](docs/design.md). Components and the crawl flow:
 [ADR 0002](docs/adr/0002-coordinator-led-distributed-crawling.md).
