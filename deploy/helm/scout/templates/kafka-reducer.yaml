@@ -1,0 +1,104 @@
+{{- if and .Values.kafka.enabled .Values.kafka.reducer.enabled }}
+{{- /* Rebuilds the run's snapshot from Kafka alone into its own volume and checks it against the
+       live snapshot (docker/stack.sh kafka-reduce), then parks. A mismatch exits non-zero, so the
+       pod restarts and shows up as failing. Needs neither Postgres nor the coordinator's volume. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "scout.fullname" . }}-kafka-replica
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.kafka.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.kafka.reducer.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout.fullname" . }}-kafka-reducer
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "kafka-reducer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: kafka-reducer
+      annotations:
+        scout/run-id: {{ .Values.crawl.runId | quote }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.podAnnotations }}
+        {{- include "scout.scrapeAnnotations" (dict "port" 9105) | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.kafkaHost" .) "port" 9092) | nindent 8 }}
+      containers:
+        - name: kafka-reducer
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- include "scout.runThenPark" "kafka-reduce" | nindent 12 }}
+          env:
+            - name: SCOUT_CRAWL_RUN_ID
+              value: {{ .Values.crawl.runId | quote }}
+            - name: SCOUT_KAFKA_BOOTSTRAP
+              value: {{ include "scout.kafkaHost" . }}:9092
+            - name: SCOUT_KAFKA_RECORD_DELAY_MS
+              value: {{ .Values.kafka.reducer.recordDelayMs | quote }}
+            - name: SCOUT_METRICS_BIND
+              value: 0.0.0.0:9105
+          ports:
+            - name: metrics
+              containerPort: 9105
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.kafka.reducer.resources | nindent 12 }}
+          volumeMounts:
+            - name: replica
+              mountPath: /data
+            - name: config
+              mountPath: /etc/scout
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: replica
+          persistentVolumeClaim:
+            claimName: {{ include "scout.fullname" . }}-kafka-replica
+        - name: config
+          configMap:
+            name: {{ include "scout.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

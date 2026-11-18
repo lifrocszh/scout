@@ -120,3 +120,10 @@ The immutable record that identifies an Index Generation, its Corpus snapshot an
 
 **Generation catalog**:
 The immutable Page/Passage identity and metadata record shared by both retrieval indexes. Each indexed Passage has one catalog record, and catalog/index count or identity mismatches invalidate the Generation.
+
+**Ingestion log**:
+The optional Kafka copy of one Crawl run's accepted captures (with bodies) and outbox events, written by the relay from the Postgres outbox. It is downstream of the authority: replaying it rebuilds a replica Corpus snapshot that must equal the live one, but it never decides whether a result is accepted.
+_Avoid_: Queue, broker (for the frontier, which stays in Postgres)
+
+**Snapshot parity**:
+The replica Corpus snapshot rebuilt from the Ingestion log has the same snapshot ID, Page count and Alias count as the live snapshot of the same Crawl run.

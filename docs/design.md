@@ -1,6 +1,6 @@
 # Design notes: leases, the Postgres frontier, and delivery guarantees
 
-Three trade-offs behind the crawl pipeline. The picture is in the
+Four trade-offs behind the crawl pipeline. The picture is in the
 [README](../README.md#how-it-fits-together); what each component owns and the crawl flow are in
 [ADR 0002](adr/0002-coordinator-led-distributed-crawling.md). This page covers why it is built
 this way, what it costs, and what is not built yet.
@@ -59,9 +59,9 @@ so some decisions of one run serialize by design. The
 
 A broker wins where Postgres does not: many independent consumers replaying a long history,
 fan-out at high message rates, or claim rates beyond one database. That is the case for a log
-next to the frontier, not instead of it. [Issue #13](https://github.com/lifrocszh/scout/issues/13)
-plans Kafka for replay and fan-out and requires an ADR to justify it first; the direct-to-Postgres
-path stays the default until the two produce identical snapshots.
+next to the frontier, not instead of it, and that is how the optional Kafka log is built
+([section 4](#4-kafka-behind-the-outbox-not-in-front-of-postgres),
+[ADR 0003](adr/0003-kafka-ingestion-log.md)).
 
 ## 3. At-least-once delivery, idempotent effects
 
@@ -84,11 +84,46 @@ the same visible result with failure cases we can test.
    is built from one snapshot. Activation publishes a Generation only after validation, so
    `serve` answers from one complete Generation at a time.
 
+## 4. Kafka behind the outbox, not in front of Postgres
+
+The optional ingestion log (Compose `kafka` profile, chart `kafka.enabled`) is a copy of the
+outbox, never the place a result is decided:
+
+```
+worker -> coordinator -> one Postgres tx (result + outbox event)      authority, fenced
+                              -> scout kafka relay -> Kafka            replayable copy
+                                                   -> scout kafka reduce -> replica snapshot
+```
+
+- **Why a relay and not workers producing to Kafka.** A result is a fact only after the
+  coordinator accepts it under the current lease epoch (section 1), in the same transaction as its
+  outbox event (section 3). Workers writing to Kafka would put fenced-off and duplicate-lease
+  results into the log, make every consumer re-check fencing against Postgres, give workers broker
+  credentials, and turn "accepted" into a dual write. The relay reads only what committed.
+- **Ordered, at-least-once relay.** It sends the oldest unacknowledged outbox events first and
+  retries the head event rather than skipping it (unlike `scout events consume`), so a run's
+  `crawl_completed` never overtakes one of its captures. It acknowledges the outbox checkpoint
+  only after Kafka acknowledged the write; a crash in between sends the event again.
+- **Idempotent reducer, offsets stored with its effects.** `scout kafka reduce` writes the body
+  (content-addressed), inserts the capture into its own spool (a repeat is a no-op), then records
+  the event ID and next offset in one SQLite transaction. A crash replays at most the records after
+  the last recorded offset; a duplicate from the relay is skipped by `event_id`.
+- **Parity is checked, not assumed.** The reducer seals a snapshot with the same materializer once
+  the run's `crawl_completed` and every capture before it are applied, and compares it with the
+  live `corpus_snapshot_published` event: the snapshot ID is a digest over the config and every
+  Page, Alias and Passage record, so equal IDs mean equal content.
+  [`tests/kafka_log.rs`](../tests/kafka_log.rs) crashes the relay and the reducer once each and
+  still gets the live snapshot from Kafka alone, with the site switched off.
+- **Lag, not backpressure on the crawl.** A slow reducer grows `scout_kafka_consumer_lag_records`;
+  an unavailable broker grows `scout_kafka_relay_pending_events`. Neither slows the crawl or
+  enlarges worker memory, because nothing upstream waits for Kafka.
+
 ## Not built yet
 
-- **Kafka and a local lakehouse.** Today's log is the Postgres outbox, and the downstream
-  consumer is the optional Databricks Delta pipeline ([Phase 2](phase2.md)). Kafka under the
-  Compose `data` profile (#13) and local Delta/Iceberg tables queried with DuckDB (#14) are
-  planned.
+- **A local lakehouse.** Kafka now carries the log (section 4); local Delta/Iceberg tables
+  queried with DuckDB (#14), fed from it, are planned. The Databricks Delta pipeline
+  ([Phase 2](phase2.md)) still reads the Postgres outbox directly.
+- **More from the Kafka log**: a multi-broker cluster with replication, TLS/SASL, consumer-group
+  offsets for third-party consumers, and replay of scheduled (Source-scoped) runs in the reducer.
 - **More than one coordinator per run**, and a highly available Postgres. ADR 0002 explains the
   first; [Kubernetes](kubernetes.md) explains why the chart runs a single Postgres.

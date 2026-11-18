@@ -19,7 +19,14 @@
 #         Grafana: http://127.0.0.1:3000 (dashboard "Scout overview").
 #         Prometheus: http://127.0.0.1:9090. The fixture crawl ends in seconds, so
 #         keep the processes up for a last scrape with SCOUT_METRICS_LINGER_SECS=10.
-#   data  (planned) Apache Kafka and lakehouse tooling for the durable event log (#13, #14)
+#   kafka Apache Kafka (KRaft, one node), the outbox relay and a reducer that rebuilds the
+#         snapshot from Kafka alone and checks it against the live one (ADR 0003, #13):
+#           docker compose --profile kafka up --scale worker=3
+#         Optional: the core stack never waits for it. `docker compose logs kafka-reducer` ends
+#         with a JSON summary; "parity": true means the replay matched. Slow the reducer down
+#         with SCOUT_KAFKA_RECORD_DELAY_MS=500 to watch its lag in Grafana (with --profile obs).
+#         Kafka listens on 127.0.0.1:${KAFKA_PORT:-9094} for host tools.
+#   data  Every data-plane service; today the kafka services above.
 #
 # The coordinator, workers and serve always serve /metrics on a port inside the
 # Compose network (SCOUT_METRICS_BIND). Nothing publishes those ports, so the
@@ -138,7 +145,10 @@ services:
     command: ["index"]
     environment:
       SCOUT_INDEX_MODE: ${SCOUT_INDEX_MODE:-keyword-only}
-      <<: *crawl-run-id
+      # With the database, materializing also publishes the sealed snapshot to the outbox as the
+      # run's last event (corpus_snapshot_published), which outbox consumers such as the kafka
+      # profile's relay and reducer wait for.
+      <<: [*scout-env, *crawl-run-id]
     volumes:
       - scout-data:/data
       - scout-models:/data/models
@@ -220,6 +230,87 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # ---- kafka profile: docker compose --profile kafka up ----------------------------------------
+  # Kafka is downstream of Postgres, never in front of it: the coordinator accepts results and
+  # writes the outbox exactly as without this profile.
+
+  kafka:
+    profiles: [kafka, data]
+    image: apache/kafka:4.1.2
+    environment:
+      # One combined broker and controller in KRaft mode (no ZooKeeper).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,HOST://127.0.0.1:${KAFKA_PORT:-9094}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # The relay creates its topics; a typo must not create a stray one.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # 21 MiB: a 16 MiB body (the distributed cap) plus its headers fits one record.
+      KAFKA_MESSAGE_MAX_BYTES: 22020096
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9094}:9094"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+    restart: unless-stopped
+
+  # Copies the run's outbox into Kafka as the crawl goes, and exits once the snapshot the
+  # `index` service publishes is in Kafka too. Reads bodies from the coordinator's volume.
+  kafka-relay:
+    <<: *scout
+    profiles: [kafka, data]
+    entrypoint: ["/bin/bash", "/opt/scout/stack.sh"]
+    command: ["kafka-relay"]
+    environment:
+      <<: [*scout-env, *crawl-run-id]
+      SCOUT_KAFKA_BOOTSTRAP: kafka:9092
+      SCOUT_METRICS_BIND: 0.0.0.0:9104
+      SCOUT_METRICS_LINGER_SECS: ${SCOUT_METRICS_LINGER_SECS:-0}
+    volumes:
+      - scout-data:/data:ro
+      - ./docker/stack.sh:/opt/scout/stack.sh:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    restart: on-failure:10
+
+  # Rebuilds the snapshot from Kafka alone (no Postgres, no coordinator volume, no fetches) into
+  # its own volume, then exits 0 if it equals the live snapshot and 1 if it does not.
+  kafka-reducer:
+    <<: *scout
+    profiles: [kafka, data]
+    entrypoint: ["/bin/bash", "/opt/scout/stack.sh"]
+    command: ["kafka-reduce"]
+    environment:
+      <<: *crawl-run-id
+      SCOUT_KAFKA_BOOTSTRAP: kafka:9092
+      SCOUT_KAFKA_RECORD_DELAY_MS: ${SCOUT_KAFKA_RECORD_DELAY_MS:-0}
+      SCOUT_METRICS_BIND: 0.0.0.0:9105
+      SCOUT_METRICS_LINGER_SECS: ${SCOUT_METRICS_LINGER_SECS:-0}
+    volumes:
+      # Its own /data (the image's directory, so the volume is owned by the scout user).
+      - kafka-replica:/data
+      - ./docker/stack.sh:/opt/scout/stack.sh:ro
+      - ${SCOUT_SOURCES_CONFIG_FILE:-./docker/sources.fixture.toml}:/etc/scout/sources.toml:ro
+    depends_on:
+      kafka: {condition: service_healthy}
+    restart: on-failure:10
+
 volumes:
   pgdata:
   # Crawl spool, corpus snapshots, index Generations and event logs.
@@ -230,3 +321,6 @@ volumes:
   scout-models:
   # Prometheus time series (obs profile), kept for 3 days.
   prometheus-data:
+  # Kafka's log (kafka profile), and the reducer's replica: spool, bodies, snapshot, offsets.
+  kafka-data:
+  kafka-replica:

@@ -43,8 +43,11 @@ Left out of the picture:
   Grafana ([Observability](#observability)).
 - **Optional.** Postgres also holds an event outbox that `scout events consume` can deliver,
   at least once, to a Databricks Delta pipeline ([Phase 2](docs/phase2.md)).
-- **Planned, not built.** Kafka as a replay log ([#13](https://github.com/lifrocszh/scout/issues/13))
-  and a local lakehouse ([#14](https://github.com/lifrocszh/scout/issues/14)).
+- **Optional Kafka log.** `scout kafka relay` copies that outbox into Apache Kafka, and
+  `scout kafka reduce` rebuilds the snapshot from Kafka alone and checks it against the live one
+  ([Kafka ingestion log](#kafka-ingestion-log-optional), [ADR 0003](docs/adr/0003-kafka-ingestion-log.md)).
+  Postgres stays the authority; nothing waits for Kafka.
+- **Planned, not built.** A local lakehouse ([#14](https://github.com/lifrocszh/scout/issues/14)).
 
 Why it is built this way (leases and fencing, Postgres instead of a broker, delivery guarantees):
 [docs/design.md](docs/design.md). Components and the crawl flow:
@@ -212,7 +215,34 @@ a keyword-only index, and then serves it.
   network (Toxiproxy) mid-crawl, and checks that the snapshot still matches a clean run. The
   [runbook](docs/runbook.md) maps each failure to its symptoms, diagnosis and measured recovery time.
 
-The `data` profile (Kafka, lakehouse) is planned and not part of this stack yet.
+### Kafka ingestion log (optional)
+
+The `kafka` profile adds Apache Kafka (official `apache/kafka` image, KRaft mode, one node), the
+outbox relay and a reducer. The core stack does not change and never waits for them. The `data`
+profile (every data-plane service) includes the same three.
+
+```bash
+docker compose --profile kafka up -d --scale worker=3
+docker compose logs kafka-reducer | tail -n 1   # JSON summary: "parity": true, replica == live snapshot
+```
+
+- **Relay** (`scout kafka relay --follow`): reads the run's outbox in order and writes each
+  accepted capture (body plus metadata) to `scout.crawl-results`, keyed by URL, and every outbox
+  event to `scout.crawl-events`, keyed by run. It acknowledges an event only after Kafka did, and
+  exits once the published snapshot is in Kafka. It needs Postgres and the coordinator's volume.
+- **Reducer** (`scout kafka reduce --follow`): rebuilds the capture spool and the snapshot from
+  Kafka alone (no Postgres, no fetches) into the `kafka-replica` volume. It exits 0 when the
+  snapshot equals the live one, 1 when it does not. Offsets are stored with its output, so a
+  restart resumes; a fresh `--data-dir` replays from offset 0.
+- **Backpressure.** `SCOUT_KAFKA_RECORD_DELAY_MS=700 docker compose --profile kafka --profile obs up`
+  slows the reducer down; the "Kafka ingestion log" row in Grafana shows its lag rising and
+  draining while the crawl finishes at full speed.
+- **Guarantees.** At least once on both hops, idempotent on `event_id`; see
+  [design notes](docs/design.md#4-kafka-behind-the-outbox-not-in-front-of-postgres). CI crashes
+  the relay and the reducer mid-delivery (`tests/kafka_log.rs`) and runs this profile end to end
+  (`scripts/ci/compose-kafka-checks.sh`).
+- **Pruning.** To keep `scout events prune` from deleting events the relay has not sent, register
+  it as a required consumer: `scout events consumer-register --consumer-id kafka-relay --required`.
 
 ## Run on Kubernetes
 
@@ -268,7 +298,8 @@ crawl, so a short crawl still gets a last scrape. The smoke test sets it.
 
 The dashboard (`deploy/grafana/dashboards/scout.json`) shows throughput, frontier depth by status,
 lease expirations and renewals, fencing rejections, crawl quality (dead letters, throttling,
-adaptive backoff, near-duplicate rate per origin), DB pool wait and search latency. Grafana loads
+adaptive backoff, near-duplicate rate per origin), DB pool wait, search latency and, with the
+`kafka` profile, relay lag, consumer lag per partition and replay parity. Grafana loads
 it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start. Prometheus
 (Apache-2.0) and Grafana OSS (AGPL-3.0) run as unmodified upstream images, pinned in `compose.yaml`.
 
@@ -293,6 +324,11 @@ it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start
 | `scout_search_requests_total{mode,outcome}` | counter | serve | Searches: `ok`, `error` |
 | `scout_http_requests_total{route,status}` | counter | serve | Responses per route (unknown paths count as `other`) |
 | `scout_corpus_pages{origin}`, `scout_corpus_near_duplicate_pages{origin}`, `scout_corpus_exact_duplicate_aliases{origin}` | gauge | serve | Duplicate counts of the active Generation's Corpus, from its `near-duplicates.json` (set when a search first loads the Generation) |
+| `scout_kafka_relay_pending_events` | gauge | kafka-relay | Outbox events of the run not yet written to Kafka (relay lag) |
+| `scout_kafka_relayed_records_total{topic}`, `scout_kafka_relay_failures_total` | counter | kafka-relay | Records written per topic; failed attempts that will be retried |
+| `scout_kafka_consumer_lag_records{topic,partition}` | gauge | kafka-reducer | High watermark minus the reducer's next offset |
+| `scout_kafka_consumed_records_total{topic,outcome}` | counter | kafka-reducer | Records read: `applied`, `duplicate` (skipped by event ID), `other_run` |
+| `scout_kafka_snapshot_parity` | gauge | kafka-reducer | 1 when the replayed snapshot equals the live one, 0 when not |
 | `scout_build_info{role,version}` | gauge | all | Always 1 |
 
 Labels are bounded: origins come from the configured Sources, and a family holds at most 512
@@ -305,6 +341,8 @@ series (more fold into `overflow`). URLs and task IDs are never labels.
 | `SCOUT_METRICS_SAMPLE_SECS` | `5` (Compose: `2`) | Coordinator: how often to sample frontier depth |
 | `SCOUT_WORKER_DRAIN_SECS` | `20` | Worker: seconds an in-flight task may run after SIGTERM/SIGINT before its lease is released |
 | `SCOUT_WORKER_IDLE_WHEN_DONE` | unset | Worker: when `1`/`true`, wait to be stopped after the crawl ends instead of exiting |
+| `SCOUT_KAFKA_BOOTSTRAP` | unset | `scout kafka relay` and `reduce`: Kafka brokers (`host:port,...`); `--bootstrap` overrides it |
+| `SCOUT_FAULT_KAFKA_ABORT` | unset | Kafka relay/reducer, tests only: `relay-after-produce:<n>` or `reduce-after-apply:<n>` aborts the process the n-th time it gets there (`tests/kafka_log.rs`) |
 | `SCOUT_FAULT_STALL_FIRST_LEASE_SECS` | unset | Worker, tests only: hold the first result this long without renewing its lease, so fencing must reject it (`scripts/chaos`) |
 
 With `/metrics` on, the coordinator opens one extra Postgres connection, outside its pool, and

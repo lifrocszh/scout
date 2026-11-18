@@ -1,0 +1,99 @@
+{{- if .Values.kafka.enabled }}
+{{- /* Copies the run's outbox into Kafka (docker/stack.sh kafka-relay), then parks. It reads page
+       bodies from the coordinator's data volume, so on a ReadWriteOnce volume it runs on the
+       coordinator's node, like the index Job. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout.fullname" . }}-kafka-relay
+  labels:
+    {{- include "scout.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One relay per run: two would only send every event twice.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "scout.selector" (dict "root" . "component" "kafka-relay") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout.labels" . | nindent 8 }}
+        app.kubernetes.io/component: kafka-relay
+      annotations:
+        scout/run-id: {{ .Values.crawl.runId | quote }}
+        {{- if .Values.metrics.podAnnotations }}
+        {{- include "scout.scrapeAnnotations" (dict "port" 9104) | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      securityContext:
+        {{- include "scout.podSecurityContext" . | nindent 8 }}
+      {{- if eq .Values.persistence.accessMode "ReadWriteOnce" }}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "scout.selector" (dict "root" . "component" "coordinator") | nindent 18 }}
+      {{- end }}
+      initContainers:
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.postgresHost" .) "port" 5432) | nindent 8 }}
+        {{- include "scout.waitFor" (dict "root" . "host" (include "scout.kafkaHost" .) "port" 9092) | nindent 8 }}
+      containers:
+        - name: kafka-relay
+          image: {{ include "scout.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- include "scout.runThenPark" "kafka-relay" | nindent 12 }}
+          env:
+            {{- include "scout.databaseEnv" . | nindent 12 }}
+            - name: SCOUT_CRAWL_RUN_ID
+              value: {{ .Values.crawl.runId | quote }}
+            - name: SCOUT_KAFKA_BOOTSTRAP
+              value: {{ include "scout.kafkaHost" . }}:9092
+            - name: SCOUT_METRICS_BIND
+              value: 0.0.0.0:9104
+          ports:
+            - name: metrics
+              containerPort: 9104
+          securityContext:
+            {{- include "scout.containerSecurityContext" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.kafka.relay.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: config
+              mountPath: /etc/scout
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "scout.fullname" . }}-data
+        - name: config
+          configMap:
+            name: {{ include "scout.fullname" . }}-config
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

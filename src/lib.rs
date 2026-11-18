@@ -9,6 +9,7 @@ mod distributed;
 mod evaluation;
 mod generation;
 mod http;
+mod kafka;
 mod observability;
 mod shutdown;
 mod storage;

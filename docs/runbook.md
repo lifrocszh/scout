@@ -181,6 +181,30 @@ Workers cannot reach the coordinator at all.
 - **The run is `failed`.** The coordinator marks it so when stored captures fail verification on
   restart. It cannot resume; crawl again with a new run ID.
 
+## Kafka ingestion log (optional)
+
+Only with the Compose `kafka` profile or the chart's `kafka.enabled=true`
+([ADR 0003](adr/0003-kafka-ingestion-log.md)). The crawl never waits for Kafka, so none of these
+stops a crawl; they only delay the replica.
+
+- **Relay lag grows** (`scout_kafka_relay_pending_events` rising): Kafka is down or unreachable,
+  or a body file is missing. `scout_kafka_relay_failures_total` counts the retries, the relay log
+  names the event, and `last_error` in `scout_crawl_event_checkpoints` (consumer `kafka-relay`)
+  holds the message. The relay retries the same event with backoff (up to 30 s) and resumes on its
+  own once the broker is back; events are never skipped, so order is kept.
+- **Consumer lag grows** (`scout_kafka_consumer_lag_records` rising): the reducer is slow or
+  stopped. A restart resumes from its recorded offsets. To rebuild from scratch, give it an empty
+  `--data-dir` (Compose: `docker compose rm -sf kafka-reducer && docker volume rm scout_kafka-replica`).
+- **The reducer exits 1, "differs from the live snapshot"** (`scout_kafka_snapshot_parity` 0):
+  the log and the live snapshot disagree. Compare `replica_snapshot_id` and `live_snapshot_id` in
+  its JSON summary, then diff `corpora/<id>/pages.jsonl` of both. Treat it as a bug: the live
+  snapshot, built from Postgres, is the authority.
+- **"Sources config digest differs from the run's"**: the reducer was given another
+  `sources.toml` than the crawl used; pass the run's.
+- **A crash mid-delivery** needs nothing: the relay sends the unacknowledged event again and the
+  reducer skips it by `event_id`; the reducer replays records after its last recorded offset, and
+  re-applying one changes nothing (`tests/kafka_log.rs` crashes both and checks the replica).
+
 ## Measured recovery
 
 Recovery is the time from the fault (or its end, for faults with a length) until the behaviour the

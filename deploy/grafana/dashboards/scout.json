@@ -1503,6 +1503,251 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "id": 31,
+      "type": "row",
+      "title": "Kafka ingestion log (optional: Compose kafka profile, chart kafka.enabled)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 68,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Relay lag (outbox events not in Kafka)",
+      "description": "Outbox events of the run that `scout kafka relay` has not written to Kafka yet. Grows when Kafka is down or the relay is stopped; the crawl itself does not wait for it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "scout-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "scout-prometheus"
+          },
+          "expr": "sum(scout_kafka_relay_pending_events)",
+          "legendFormat": "pending events",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Consumer lag by partition",
+      "description": "Records between the reducer's next offset and each partition's high watermark. A slow reducer (`--record-delay-ms`) grows this while the crawl runs at full speed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "scout-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 69,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "scout-prometheus"
+          },
+          "expr": "sum by (topic, partition) (scout_kafka_consumer_lag_records)",
+          "legendFormat": "{{topic}}/{{partition}}",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Log records / sec",
+      "description": "Records written by the relay and read by the reducer, by outcome. Duplicates are records delivered again after a crash; the reducer skips them by event ID.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "scout-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 69,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "scout-prometheus"
+          },
+          "expr": "sum by (topic) (rate(scout_kafka_relayed_records_total[1m]))",
+          "legendFormat": "relayed {{topic}}",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "scout-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(scout_kafka_consumed_records_total[1m]))",
+          "legendFormat": "consumed {{outcome}}",
+          "refId": "B",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "Replay snapshot parity",
+      "description": "1 when the snapshot the reducer rebuilt from Kafka equals the live snapshot (same snapshot ID and counts), 0 when it differs. Empty until both exist.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "scout-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 69,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "scout-prometheus"
+          },
+          "expr": "min(scout_kafka_snapshot_parity)",
+          "legendFormat": "parity",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value_and_name"
+      }
     }
   ]
 }

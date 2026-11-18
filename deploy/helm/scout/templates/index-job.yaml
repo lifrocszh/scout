@@ -50,6 +50,11 @@ spec:
               until tail -n 1 "$log" 2>/dev/null | grep -q '"event":"crawl.concurrency"'; do sleep 2; done
               exec bash /etc/scout/stack.sh index
           env:
+            {{- if .Values.kafka.enabled }}
+            # Publishes the sealed snapshot to the outbox (the run's last event), which the Kafka
+            # relay and reducer wait for. Without Kafka the Job needs no database credentials.
+            {{- include "scout.databaseEnv" . | nindent 12 }}
+            {{- end }}
             - name: SCOUT_CRAWL_RUN_ID
               value: {{ .Values.crawl.runId | quote }}
             - name: SCOUT_INDEX_MODE

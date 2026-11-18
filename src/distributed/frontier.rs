@@ -331,6 +331,7 @@ pub(crate) mod analytics_prune;
 mod crawl_behaviour_tests;
 pub(crate) mod dead_letters;
 pub(crate) mod events;
+pub(crate) mod outbox_relay;
 mod request_policy;
 mod results;
 mod robots;

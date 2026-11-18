@@ -119,10 +119,13 @@ pub(crate) enum Operation {
         reason: String,
     },
     DeadLetters(dlq::DeadLetterCommand),
+    Kafka(kafka::KafkaCommand),
 }
 
 mod dlq;
+mod kafka;
 pub(crate) use dlq::DeadLetterCommand;
+pub(crate) use kafka::KafkaCommand;
 
 use crate::generation::BuildMode;
 use std::ffi::{OsStr, OsString};
@@ -138,7 +141,7 @@ where
     let mut args = args.into_iter().skip(1);
     let command = args
         .next()
-        .ok_or("expected crawl, coordinator, events, index, or recrawl command")?;
+        .ok_or("expected crawl, coordinator, events, index, kafka, or recrawl command")?;
     if command.to_str() == Some("dlq") {
         let (command, data_dir, json_errors) = dlq::parse(args)?;
         return Ok(Cli {
@@ -146,6 +149,15 @@ where
             data_dir: data_dir.unwrap_or_else(|| PathBuf::from("data")),
             json_errors,
             metrics_bind: None,
+        });
+    }
+    if command.to_str() == Some("kafka") {
+        let parsed = kafka::parse(args)?;
+        return Ok(Cli {
+            operation: Operation::Kafka(parsed.command),
+            data_dir: parsed.data_dir.unwrap_or_else(|| PathBuf::from("data")),
+            json_errors: parsed.json_errors,
+            metrics_bind: parsed.metrics_bind,
         });
     }
     let index_command = if command.to_str() == Some("index") {
@@ -524,6 +536,7 @@ where
                 println!(
                     "scout events consumer-register --consumer-id <id> [--required] [--replay-days <1..3650>]\nscout events consumer-retire --consumer-id <id>\nscout events acknowledge --receipt-file <databricks-receipt.json>\nscout events archive --batch-id <batch-id> --data-dir <dir>\nscout events preflight --run-id <crawl-run-id> --consumer-id <id> --data-dir <dir>\nscout events prune (--run-id <crawl-run-id>|--batch-id <batch-id>) [--max-events <1..128>] [--execute] --data-dir <dir>"
                 );
+                println!("{}", kafka::USAGE);
                 return Err(String::new());
             }
             Some(value) => return Err(format!("unknown argument {value}")),

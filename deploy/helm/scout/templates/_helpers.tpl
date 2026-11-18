@@ -25,6 +25,7 @@ app.kubernetes.io/component: {{ .component }}
 {{/* In-cluster names other components dial. */}}
 {{- define "scout.postgresHost" -}}{{ include "scout.fullname" . }}-postgres{{- end }}
 {{- define "scout.coordinatorHost" -}}{{ include "scout.fullname" . }}-coordinator{{- end }}
+{{- define "scout.kafkaHost" -}}{{ include "scout.fullname" . }}-kafka{{- end }}
 {{- define "scout.fixtureHost" -}}{{ include "scout.fullname" . }}-fixture{{- end }}
 {{- define "scout.postgresSecret" -}}
 {{- default (printf "%s-postgres" (include "scout.fullname" .)) .Values.postgres.existingSecret -}}
@@ -79,4 +80,16 @@ capabilities:
   resources:
     requests: {cpu: 10m, memory: 16Mi}
     limits: {memory: 64Mi}
+{{- end }}
+
+{{/* Run a stack.sh role, then park instead of exiting, so a Deployment does not restart a role
+     that finished its work: pass the role name. A failure exits non-zero and is restarted. */}}
+{{- define "scout.runThenPark" -}}
+- bash
+- -c
+- |
+  bash /etc/scout/stack.sh {{ . }} || exit $?
+  echo "{{ . }}: finished; parked" >&2
+  trap 'exit 0' TERM INT
+  while :; do sleep 3600 & wait $!; done
 {{- end }}
