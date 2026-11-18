@@ -1,0 +1,13 @@
+{
+  "schema_version": "scout.databricks-crawl-event-batch.v1",
+  "batch_id": "batch-d24e7b48242e266c086933f0990d0555608dc959285483a26e9b27136dc963ba",
+  "crawl_run_id": "run-3ac88a6205719a4be660925315b5d33f92163737740477d91c9da158b9b59e4e",
+  "consumer_id": "lake-batches",
+  "records_file": "records.jsonl",
+  "records_sha256": "48de7bee221b2c5ca3378aa4fe5e7017b28983186b010d74ff6522e7c82e8279",
+  "records_bytes": 5712,
+  "record_count": 4,
+  "quarantine_count": 0,
+  "max_records": 4,
+  "max_batch_bytes": 67108864
+}

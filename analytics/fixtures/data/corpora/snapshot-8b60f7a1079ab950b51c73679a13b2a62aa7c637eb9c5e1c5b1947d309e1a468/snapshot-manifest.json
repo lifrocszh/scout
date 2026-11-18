@@ -1,0 +1,16 @@
+{
+  "schema_version": "scout.corpus-snapshot.v1",
+  "snapshot_id": "snapshot-8b60f7a1079ab950b51c73679a13b2a62aa7c637eb9c5e1c5b1947d309e1a468",
+  "status": "complete",
+  "run_id": "run-485617ec8f214f77a0baf3c4fea27dfe054177b83090b964a8ab4146c395c8fb",
+  "crawl_manifest_sha256": "296b87212eb98c6542a44c77520129a883ca60d71a5ce83ac631b8a379c86fe3",
+  "source_config_sha256": "e9608ad4d622b7227e712c39e57bac99761d8b04a58dfe5648b7127afc1eb09c",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "created_at_utc": "2026-11-18T14:32:39.057Z",
+  "page_count": 7,
+  "alias_count": 1,
+  "pages_jsonl_sha256": "61b3fca31903c5763756bcbf26eab1388033002c020a6bbd074c58d833a4e149",
+  "aliases_jsonl_sha256": "d8fcfba59f27b257673d791af34c1fd6f5a5941b03d30f85da59493db01b7b00",
+  "passage_count": 9,
+  "passages_jsonl_sha256": "b0f36a51098eec857c296ec2865005a9fc2a9446b05b67dc4c6e5a8337d3ceb8"
+}

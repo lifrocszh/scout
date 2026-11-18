@@ -86,9 +86,12 @@ the same visible result with failure cases we can test.
 
 ## Not built yet
 
-- **Kafka and a local lakehouse.** Today's log is the Postgres outbox, and the downstream
-  consumer is the optional Databricks Delta pipeline ([Phase 2](phase2.md)). Kafka under the
-  Compose `data` profile (#13) and local Delta/Iceberg tables queried with DuckDB (#14) are
-  planned.
+- **Kafka.** Today's log is the Postgres outbox. Its consumers are the optional Databricks Delta
+  pipeline ([Phase 2](phase2.md)) and the [local lakehouse](lakehouse.md) (#14): local Delta
+  tables queried with DuckDB. Kafka under the Compose `data` profile (#13) is planned. The
+  lakehouse reads events through a transport-neutral `EventSource`, so a Kafka source can be
+  added to it without changing the tables.
+- **Dead letters in the lakehouse.** Dead-lettered tasks stay in Postgres (`scout dlq list`). The
+  lakehouse loads snapshots, near-duplicate reports and outbox events, but not dead letters yet.
 - **More than one coordinator per run**, and a highly available Postgres. ADR 0002 explains the
   first; [Kubernetes](kubernetes.md) explains why the chart runs a single Postgres.
