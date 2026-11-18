@@ -1,8 +1,9 @@
 name: Kubernetes (kind)
 
 # Runs the Helm chart on a kind cluster: install, crawl the fixture site in-cluster, index, search,
-# `helm test`, scale workers 1 -> 8, check the HPA (scripts/ci/kind-smoke.sh). The scaling
-# benchmark (docs/runs/reports/) runs on manual dispatch only.
+# `helm test`, scale workers 1 -> 8, delete a worker pod mid-crawl and check that no page is lost,
+# check the HPA (scripts/ci/kind-smoke.sh). The scaling benchmark (docs/runs/reports/) runs on manual
+# dispatch only.
 #   pull request  when it touches the chart, the image build or this workflow
 #   nightly       against main
 #   dispatch      also runs the benchmark unless switched off
