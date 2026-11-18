@@ -1,0 +1,64 @@
+# Override for the failure-injection suite (scripts/chaos/run.sh). Layered on
+# top of compose.yaml:
+#
+#   docker compose -f compose.yaml -f scripts/chaos/compose.chaos.yaml ...
+#
+# Changes from the default stack:
+#   - The crawl runs against `chaos-fixture`: synthetic origins (the same
+#     generator as the Kubernetes benchmark) with slow pages, so the crawl lasts
+#     long enough for a fault to land in the middle of it.
+#   - Short request timeout (2 s), so a lease is 4 s and renewed every ~1.3 s:
+#     lease expiry and reclaim happen within a few seconds.
+#   - Workers reach the coordinator through Toxiproxy, which the runner drives
+#     over its HTTP API on 127.0.0.1:${TOXIPROXY_PORT:-8474} for latency and
+#     partitions.
+#   - The coordinator keeps serving /metrics for a while after the crawl, so the
+#     runner can read its final fencing counters.
+
+services:
+  chaos-fixture:
+    image: python:3.13-slim
+    command: [python3, -u, /opt/fixture/origins.py]
+    environment:
+      ORIGINS: "4" # sources.chaos.toml lists these four origins
+      BASE_PORT: "9000"
+      PAGES: ${CHAOS_PAGES_PER_ORIGIN:-40}
+      LATENCY_MS: ${CHAOS_PAGE_LATENCY_MS:-400}
+    volumes:
+      - ./deploy/helm/scout/files/origins.py:/opt/fixture/origins.py:ro
+    user: "65534:65534"
+    read_only: true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 9000), 2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # Toxiproxy (MIT licence). One proxy, "coordinator": toxiproxy:50051 -> coordinator:50051.
+  toxiproxy:
+    # TOXIPROXY_IMAGE: for a registry mirror or a locally built image.
+    image: ${TOXIPROXY_IMAGE:-ghcr.io/shopify/toxiproxy:2.12.0}
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy/proxies.json"]
+    volumes:
+      - ./scripts/chaos/toxiproxy.json:/etc/toxiproxy/proxies.json:ro
+    ports:
+      - "127.0.0.1:${TOXIPROXY_PORT:-8474}:8474"
+
+  coordinator:
+    environment:
+      SCOUT_METRICS_LINGER_SECS: ${SCOUT_METRICS_LINGER_SECS:-60}
+    volumes:
+      - ./scripts/chaos/sources.chaos.toml:/etc/scout/sources.toml:ro
+    depends_on:
+      chaos-fixture: {condition: service_healthy}
+
+  worker:
+    environment:
+      SCOUT_COORDINATOR_HOST: toxiproxy
+    depends_on:
+      toxiproxy: {condition: service_started}
+      chaos-fixture: {condition: service_healthy}
+
+  index:
+    volumes:
+      - ./scripts/chaos/sources.chaos.toml:/etc/scout/sources.toml:ro

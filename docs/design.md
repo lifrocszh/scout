@@ -29,7 +29,10 @@ Cost: a stalled worker's work is thrown away, and a page can be fetched twice (e
 needs a request permit, so politeness limits hold). Multi-host deployments still need
 synchronized clocks, because workers check the permit and lease deadlines they are handed
 (ADR 0002, Consequences). The contract is exercised by the `postgres_*` tests in
-`src/distributed/frontier.rs`, which `scripts/ci/postgres-tests.sh` runs in CI.
+`src/distributed/frontier.rs`, which `scripts/ci/postgres-tests.sh` runs in CI, and end to end by
+the failure-injection suite (`scripts/chaos/run.sh`): killed and stalled workers, a killed
+coordinator, a paused Postgres and a partitioned network, each checked against a clean run. What
+each failure looks like in operation is in the [runbook](runbook.md).
 
 ## 2. Postgres `SKIP LOCKED` instead of a broker for the frontier
 

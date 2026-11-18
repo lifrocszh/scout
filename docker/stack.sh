@@ -23,6 +23,9 @@ CONFIG=${SCOUT_SOURCES_CONFIG:-/etc/scout/sources.toml}
 PROFILE=${SCOUT_INDEX_PROFILE:-/etc/scout/index-profile.toml}
 RUN_ID=${SCOUT_CRAWL_RUN_ID:?SCOUT_CRAWL_RUN_ID must be run- plus 64 hex characters}
 PORT=${SCOUT_COORDINATOR_PORT:-50051}
+# Where workers reach the coordinator. The chaos suite points it at a Toxiproxy
+# in front of the coordinator (scripts/chaos/compose.chaos.yaml).
+COORDINATOR_HOST=${SCOUT_COORDINATOR_HOST:-coordinator}
 EVENT_LOG="$DATA/logs/$RUN_ID.jsonl"
 
 log() { printf 'stack: %s\n' "$*" >&2; }
@@ -61,14 +64,14 @@ worker() {
   # compose.yaml cannot wait for a healthy coordinator: on a restart the crawl
   # is already complete, so the coordinator exits 0 before it ever turns
   # healthy. Wait for its port instead, and leave quietly if the crawl is done.
-  until (exec 3<>"/dev/tcp/coordinator/$PORT") 2>/dev/null; do
+  until (exec 3<>"/dev/tcp/$COORDINATOR_HOST/$PORT") 2>/dev/null; do
     if crawl_completed; then
       log "crawl $RUN_ID already completed; no work for this worker"
       return 0
     fi
     sleep 1
   done
-  exec scout worker --coordinator "http://coordinator:$PORT" --data-dir /tmp/scout-worker
+  exec scout worker --coordinator "http://$COORDINATOR_HOST:$PORT" --data-dir /tmp/scout-worker
 }
 
 index() {

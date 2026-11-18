@@ -207,6 +207,10 @@ a keyword-only index, and then serves it.
   built from `main` (tags: commit SHA and `latest`) and from `v*` tags.
 - **Smoke test.** `scripts/ci/compose-smoke.sh 3` is what CI runs. It starts the `obs` profile too
   and checks the metrics (see [Observability](#observability)).
+- **Failures.** The coordinator and workers restart on failure and pick the crawl up where it was.
+  `scripts/chaos/run.sh` kills workers and the coordinator, pauses Postgres and cuts or slows the
+  network (Toxiproxy) mid-crawl, and checks that the snapshot still matches a clean run. The
+  [runbook](docs/runbook.md) maps each failure to its symptoms, diagnosis and measured recovery time.
 
 The `data` profile (Kafka, lakehouse) is planned and not part of this stack yet.
 
@@ -301,6 +305,7 @@ series (more fold into `overflow`). URLs and task IDs are never labels.
 | `SCOUT_METRICS_SAMPLE_SECS` | `5` (Compose: `2`) | Coordinator: how often to sample frontier depth |
 | `SCOUT_WORKER_DRAIN_SECS` | `20` | Worker: seconds an in-flight task may run after SIGTERM/SIGINT before its lease is released |
 | `SCOUT_WORKER_IDLE_WHEN_DONE` | unset | Worker: when `1`/`true`, wait to be stopped after the crawl ends instead of exiting |
+| `SCOUT_FAULT_STALL_FIRST_LEASE_SECS` | unset | Worker, tests only: hold the first result this long without renewing its lease, so fencing must reject it (`scripts/chaos`) |
 
 With `/metrics` on, the coordinator opens one extra Postgres connection, outside its pool, and
 runs one grouped count over the run's tasks every sample interval for the frontier gauges. Scrapes

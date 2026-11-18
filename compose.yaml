@@ -99,6 +99,10 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       fixture: {condition: service_healthy}
+    # A crashed coordinator restarts and resumes the same run from Postgres and
+    # the capture spool; workers restart too and rejoin. Exit 0 (crawl done)
+    # is final. See docs/runbook.md.
+    restart: on-failure:10
     healthcheck:
       # The container resolves its own service name; this checks the gRPC port.
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/coordinator/50051"]
@@ -122,6 +126,7 @@ services:
       # is already done. Not healthy-gated: see stack.sh worker.
       - scout-data:/data:ro
       - ./docker/stack.sh:/opt/scout/stack.sh:ro
+    restart: on-failure:10
     depends_on:
       coordinator: {condition: service_started}
 

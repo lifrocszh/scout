@@ -1,0 +1,82 @@
+name: Chaos
+
+# Failure-injection suite on the Compose stack (scripts/chaos/run.sh, docs/runbook.md). Every
+# scenario crawls 160 synthetic pages, injects one fault, and checks that the stack recovers with
+# no manual step: every page captured once, the snapshot equal to a clean run, fenced stale
+# writes, and the recovery time.
+#   pull request  the fast set (baseline, worker-kill, stale-lease; ~3 min) when it touches the
+#                 crawl pipeline, the stack or the suite
+#   nightly       every scenario, against main
+#   dispatch      any scenarios (default: all)
+on:
+  pull_request:
+    paths:
+      - src/distributed/**
+      - src/shutdown.rs
+      - migrations/**
+      - docker/**
+      - compose.yaml
+      - Dockerfile
+      - deploy/helm/scout/files/origins.py
+      - scripts/chaos/**
+      - .github/workflows/chaos.yml
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Scenarios to run (space separated), or fast / all
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SCOUT_IMAGE: scout:ci
+      CHAOS_OUT: chaos-results
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.SCOUT_IMAGE }}
+          cache-from: type=gha,scope=scout-image
+          # Only main writes the cache, so PR runs cannot evict it.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=scout-image' || '' }}
+      - name: Pull service images
+        run: |
+          docker pull -q postgres:17
+          docker pull -q busybox:1.37
+          docker pull -q python:3.13-slim
+          docker pull -q ghcr.io/shopify/toxiproxy:2.12.0
+      - name: Failure injection
+        env:
+          SCENARIOS: ${{ github.event_name == 'pull_request' && 'fast' || inputs.scenarios || 'all' }}
+        # Word splitting on purpose: SCENARIOS is a list.
+        run: scripts/chaos/run.sh $SCENARIOS
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$CHAOS_OUT/summary.md" ]; then
+            { echo "### Failure injection"; echo; cat "$CHAOS_OUT/summary.md"; } >>"$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-results
+          path: ${{ env.CHAOS_OUT }}
+          if-no-files-found: ignore
+          retention-days: 14
