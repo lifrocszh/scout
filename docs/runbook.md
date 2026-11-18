@@ -170,9 +170,11 @@ Workers cannot reach the coordinator at all.
 
 ## When recovery does not happen
 
-- **A task is `failed`.** Each lease lost to a fault used one attempt (`max_attempts`, default 4).
-  Repeated faults on the same task exhaust it; `last_error` says why. The run still completes
-  without that page.
+- **A task is dead-lettered.** Each lease lost to a fault used one attempt (`max_attempts`,
+  default 4). Repeated faults on the same task exhaust it: it becomes `failed` with
+  `dead_lettered_at` set, and `last_error` says why. The run still completes without that page.
+  After fixing the cause, `scout dlq list --run-id <run>` shows them and
+  `scout dlq requeue --run-id <run> --all` puts them back (not exercised by the suite).
 - **A container stays down.** `restart: on-failure:10` gives up after ten failed starts in a row;
   `docker compose logs <service>` has the reason. A clean exit (0) is never restarted: that is the
   crawl finishing.
