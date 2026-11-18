@@ -2000,8 +2000,11 @@ mod tests {
             .unwrap()
             .unwrap();
         thread::sleep(Duration::from_millis(75));
+        // Only the first claim is meant to lapse. The replacement needs a lease that outlives the
+        // several database round trips before its result is accepted; with `short_timing` it
+        // expired on a slow runner and its own acceptance came back Stale.
         let current = stale_store
-            .claim_one(&stale_run_id, "worker-new", short_timing)
+            .claim_one(&stale_run_id, "worker-new", timing)
             .unwrap()
             .unwrap();
         assert_eq!(current.lease_epoch, expired.lease_epoch + 1);
