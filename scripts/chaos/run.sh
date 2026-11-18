@@ -179,7 +179,7 @@ on_exit() {
   if [ "$status" -ne 0 ] && [ -n "$dir" ]; then
     dc ps -a >&2 || true
     dc logs --no-color --timestamps >"$dir/compose.log" 2>&1 || true
-    docker logs scout-chaos-stale-worker >"$dir/stale-worker.log" 2>&1 || true
+    docker logs --timestamps scout-chaos-stale-worker >"$dir/stale-worker.log" 2>&1 || rm -f "$dir/stale-worker.log"
     echo "chaos: logs in $dir/compose.log" >&2
   fi
   teardown
@@ -455,6 +455,8 @@ run_scenario() {
       stale_results: $stale, lease_expirations: $exp, renewals_rejected: $rr,
       worker_restarts: $wr, coordinator_restarts: $cr, snapshot_fingerprint: $fp,
       frontier: $frontier, details: $checks}' >>"$results"
+  dc logs --no-color --timestamps >"$dir/compose.log" 2>&1 || true
+  docker logs --timestamps scout-chaos-stale-worker >"$dir/stale-worker.log" 2>&1 || rm -f "$dir/stale-worker.log"
   log "PASS (crawl ${crawl_secs}s, recovery ${recovery/null/-}s, stale $stale, lease expirations $expirations)"
   teardown
   scenario=
