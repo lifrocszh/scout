@@ -310,6 +310,13 @@ impl Run {
             address,
         }
     }
+    /// PostgreSQL `application_name` for a helper process, unique to this run. The
+    /// `pg_stat_activity` barriers below look backends up by name and that view is
+    /// cluster-wide, so a fixed name would also match a consumer orphaned by an earlier,
+    /// killed run and make them wait forever for a disconnect that never comes.
+    fn application_name(&self, label: &str) -> String {
+        format!("{label}-{}", &self.id["run-".len()..][..8])
+    }
     fn coordinator(&self, label: &str) -> Process {
         let child = Command::new(env!("CARGO_BIN_EXE_scout"))
             .args([
@@ -1239,7 +1246,11 @@ fn sitemap_last_attempt_worker_death_records_terminal_discovery_failure() {
 }
 
 fn spawn_event_consumer(run: &Run, consumer_id: &str, label: &str) -> Process {
-    let database_url = format!("{} application_name={label}", run.database_url);
+    let database_url = format!(
+        "{} application_name={}",
+        run.database_url,
+        run.application_name(label)
+    );
     Process(
         Command::new(env!("CARGO_BIN_EXE_scout"))
             .args([
@@ -1402,6 +1413,16 @@ fn event_acknowledged(run: &mut Run, consumer_id: &str, event_id: &str) -> bool 
         .get(0)
 }
 
+/// Wait for a consumer's acknowledgement to commit. `events consume` writes and flushes an
+/// event to stdout *before* it acknowledges it (at-least-once: a crash in between replays),
+/// so seeing the event in the consumer's output does not mean the checkpoint row exists yet.
+fn wait_for_acknowledgement(run: &mut Run, consumer_id: &str, event_id: &str) {
+    wait(
+        || event_acknowledged(run, consumer_id, event_id),
+        &format!("{consumer_id} acknowledgement of {event_id}"),
+    );
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL database"]
 fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
@@ -1493,6 +1514,8 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
     hold_ack_gate_lock(&mut before_gate_lock, "ticket05-before-ack");
     hold_ack_gate_lock(&mut after_gate_lock, "ticket05-after-ack");
 
+    let before_application = run.application_name("t05-before-initial");
+    let after_application = run.application_name("t05-after-initial");
     let mut live = spawn_event_consumer(&run, "ticket05-live", "t05-live-initial");
     let mut before = spawn_event_consumer(&run, "ticket05-before-ack", "t05-before-initial");
     let mut after = spawn_event_consumer(&run, "ticket05-after-ack", "t05-after-initial");
@@ -1538,11 +1561,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
         run.count("scout_crawl_events", "event_type='capture_committed'"),
         1
     );
-    assert!(event_acknowledged(
-        &mut run,
-        "ticket05-live",
-        &early_event_id
-    ));
+    wait_for_acknowledgement(&mut run, "ticket05-live", &early_event_id);
     let status: String = run
         .database
         .query_one(
@@ -1556,7 +1575,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
     wait_for_consumer_event(&run, &mut before, "t05-before-initial", &early_event_id);
     wait_for_database_lock(
         &mut run.database,
-        "t05-before-initial",
+        &before_application,
         "scout_crawl_event_checkpoints",
     );
     assert!(!event_acknowledged(
@@ -1567,7 +1586,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
     before.0.kill().unwrap();
     let _ = before.0.wait().unwrap();
     let before_ack_backend_pid =
-        terminate_blocked_ack_backend(&mut run.database, "t05-before-initial");
+        terminate_blocked_ack_backend(&mut run.database, &before_application);
     before_gate_lock.batch_execute("ROLLBACK").unwrap();
     assert!(!event_acknowledged(
         &mut run,
@@ -1576,16 +1595,12 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
     ));
 
     wait_for_consumer_event(&run, &mut after, "t05-after-initial", &early_event_id);
-    assert!(event_acknowledged(
-        &mut run,
-        "ticket05-after-ack",
-        &early_event_id
-    ));
+    wait_for_acknowledgement(&mut run, "ticket05-after-ack", &early_event_id);
     wait_for_consumer_event(&run, &mut live, "t05-live-initial", &delayed_event_id);
     wait_for_consumer_event(&run, &mut after, "t05-after-initial", &delayed_event_id);
     wait_for_database_lock(
         &mut run.database,
-        "t05-after-initial",
+        &after_application,
         "scout_crawl_event_checkpoints",
     );
     assert!(event_acknowledged(
@@ -1601,7 +1616,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
     after.0.kill().unwrap();
     let _ = after.0.wait().unwrap();
     let after_ack_backend_pid =
-        terminate_blocked_ack_backend(&mut run.database, "t05-after-initial");
+        terminate_blocked_ack_backend(&mut run.database, &after_application);
     after_gate_lock.batch_execute("ROLLBACK").unwrap();
     assert!(!event_acknowledged(
         &mut run,
@@ -1632,17 +1647,15 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
             .iter()
             .any(|event| event["data"]["event_id"] == early_event_id)
     );
-    let restart_output = consumer_events(&run, "t05-before-restart");
-    assert!(
-        restart_output
-            .iter()
-            .any(|event| event["data"]["event_id"] == delayed_event_id)
+    // Don't lean on replay order to imply `before_restart` already delivered and acknowledged
+    // the delayed event; wait for both explicitly.
+    wait_for_consumer_event(
+        &run,
+        &mut before_restart,
+        "t05-before-restart",
+        &delayed_event_id,
     );
-    assert!(event_acknowledged(
-        &mut run,
-        "ticket05-before-ack",
-        &delayed_event_id
-    ));
+    wait_for_acknowledgement(&mut run, "ticket05-before-ack", &delayed_event_id);
 
     let early_db_row = run
         .database
@@ -1701,12 +1714,10 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
         (&mut before_restart, "t05-before-restart"),
         (&mut after_restart, "t05-after-restart"),
     ] {
+        // Followers poll, so they may not have delivered `crawl_completed` the instant the
+        // coordinator exits; wait for it, then check they stayed alive for the snapshot.
+        wait_for_consumer_event_type(&run, process, label, "crawl_completed");
         assert!(process.0.try_wait().unwrap().is_none());
-        assert!(
-            consumer_events(&run, label)
-                .iter()
-                .any(|event| event["event_type"] == "crawl_completed")
-        );
     }
     assert_eq!(
         run.count(
@@ -1769,10 +1780,7 @@ fn durable_events_follow_commit_race_crash_replay_and_snapshot_publication() {
             .find(|event| event["event_type"] == "corpus_snapshot_published")
             .expect("snapshot event output");
         let snapshot_event_id = snapshot_line["data"]["event_id"].as_str().unwrap();
-        wait(
-            || event_acknowledged(&mut run, consumer_id, snapshot_event_id),
-            "snapshot event acknowledgement",
-        );
+        wait_for_acknowledgement(&mut run, consumer_id, snapshot_event_id);
         // The consumer exits after committing its acknowledgement, so allow it time to exit.
         wait(
             || process.0.try_wait().unwrap().is_some(),
