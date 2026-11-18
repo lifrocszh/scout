@@ -1,0 +1,8 @@
+[
+  {
+    "name": "coordinator",
+    "listen": "0.0.0.0:50051",
+    "upstream": "coordinator:50051",
+    "enabled": true
+  }
+]

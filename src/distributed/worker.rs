@@ -26,6 +26,11 @@ const MAX_DRAIN_SECS: u64 = 3600;
 /// When set (`1`/`true`), a worker that finds the crawl finished idles until it is stopped instead
 /// of exiting 0, so a Deployment does not restart it in a loop.
 const IDLE_ENV: &str = "SCOUT_WORKER_IDLE_WHEN_DONE";
+/// Fault injection for the chaos suite (scripts/chaos): when set to N seconds, the worker holds the
+/// result of the first task it claims for N seconds without renewing the lease, then reports it.
+/// With N longer than the lease, the report arrives after the lease expired and lease fencing must
+/// reject it. Never set it outside a test.
+const STALL_ENV: &str = "SCOUT_FAULT_STALL_FIRST_LEASE_SECS";
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -75,6 +80,8 @@ struct WorkerContext {
     drain: Duration,
     /// Set once the coordinator reports the crawl target reached and has no more work.
     crawl_finished: Arc<AtomicBool>,
+    /// The fault-injection stall ([`STALL_ENV`]); taken by the first task that finishes.
+    stall_once: Arc<Mutex<Option<Duration>>>,
 }
 
 struct TaskReport {
@@ -113,6 +120,7 @@ fn worker_main(
         .map_err(|status| Error::invalid(status.message().to_owned()))?;
     let concurrency = benchmark_concurrency()?;
     let drain = drain_timeout()?;
+    let stall = env_seconds(STALL_ENV)?;
     let idle_when_done = env_flag(IDLE_ENV);
     if concurrency > 1 && max_tasks.is_some() {
         return Err(Error::invalid(
@@ -184,6 +192,7 @@ fn worker_main(
             events: events.clone(),
             drain,
             crawl_finished: Arc::new(AtomicBool::new(false)),
+            stall_once: Arc::new(Mutex::new(stall)),
         };
         emit_shared(
             &events,
@@ -263,16 +272,22 @@ fn env_flag(name: &str) -> bool {
 }
 
 fn drain_timeout() -> Result<Duration, Error> {
-    let Some(value) = std::env::var(DRAIN_ENV)
-        .ok()
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(Duration::from_secs(DEFAULT_DRAIN_SECS));
-    };
+    Ok(env_seconds(DRAIN_ENV)?.unwrap_or(Duration::from_secs(DEFAULT_DRAIN_SECS)))
+}
+
+/// A whole number of seconds from 0 to [`MAX_DRAIN_SECS`] in `name`; `None` when unset or empty.
+fn env_seconds(name: &str) -> Result<Option<Duration>, Error> {
+    match std::env::var(name).ok().filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => parse_seconds(name, &value).map(Some),
+    }
+}
+
+fn parse_seconds(name: &str, value: &str) -> Result<Duration, Error> {
     match value.parse::<u64>() {
         Ok(seconds) if seconds <= MAX_DRAIN_SECS => Ok(Duration::from_secs(seconds)),
         _ => Err(Error::invalid(format!(
-            "{DRAIN_ENV} must be a whole number of seconds from 0 to {MAX_DRAIN_SECS}"
+            "{name} must be a whole number of seconds from 0 to {MAX_DRAIN_SECS}"
         ))),
     }
 }
@@ -392,6 +407,19 @@ async fn worker_loop(
                 break 'work;
             }
         };
+        let stall = ctx.stall_once.lock().expect("stall lock").take();
+        if let Some(stall) = stall {
+            emit_shared(
+                &ctx.events,
+                "worker.fault_stall",
+                "success",
+                serde_json::json!({"worker_id": ctx.worker_id, "task_id": lease.task_id, "lease_epoch": lease.lease_epoch, "stall_secs": stall.as_secs()}),
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(stall) => {}
+                _ = shutdown.changed() => break,
+            }
+        }
         match report {
             Ok(report) => {
                 let mut lease = lease;
@@ -1174,6 +1202,18 @@ mod benchmark_tests {
         }
         for invalid in ["0", "33", "-1", "threads", ""] {
             assert!(super::parse_benchmark_concurrency(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn fault_and_drain_seconds_are_bounded() {
+        assert_eq!(
+            super::parse_seconds("X", "12").unwrap(),
+            std::time::Duration::from_secs(12)
+        );
+        assert_eq!(super::parse_seconds("X", "0").unwrap().as_secs(), 0);
+        for invalid in ["3601", "-1", "1.5", "soon"] {
+            assert!(super::parse_seconds("X", invalid).is_err());
         }
     }
 }
