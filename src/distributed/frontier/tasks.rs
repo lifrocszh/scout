@@ -331,6 +331,9 @@ impl FrontierStore {
                          WHEN task_attempt_count >= max_task_attempts THEN retry_at
                          ELSE clock_timestamp() + ($4::BIGINT * interval '1 millisecond')
                      END,
+                     dead_lettered_at = CASE
+                         WHEN task_attempt_count >= max_task_attempts THEN clock_timestamp()
+                     END,
                      lease_owner = NULL,
                      lease_deadline = NULL,
                      last_error = $5,

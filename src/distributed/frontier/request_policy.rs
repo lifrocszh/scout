@@ -495,6 +495,9 @@ impl FrontierStore {
         let selected_origin: String = candidate.get(2);
         let selected_origin_limit: i32 = candidate.get(3);
         let origin_spacing_ms: i64 = candidate.get(4);
+        let origin_spacing_ms = origin_spacing_ms.saturating_add(
+            super::throttle::origin_backoff_ms(&mut tx, run_id, &selected_origin)?,
+        );
         let active_origin: i64 = tx
             .query_one(
                 "SELECT count(*) FROM scout_crawl_request_permits
@@ -749,13 +752,26 @@ impl FrontierStore {
         Ok(changed == 1)
     }
 
-    /// Report request result after response body handling; permits remain active until this call.
+    #[cfg(test)]
     pub(crate) fn release_request_permit(
         &mut self,
         run_id: &str,
         worker_id: &str,
         permit_id: i64,
         outcome: &str,
+    ) -> Result<bool, Error> {
+        self.report_request_outcome(run_id, worker_id, permit_id, outcome, None)
+    }
+
+    /// Report request result after response body handling; permits remain active until this call.
+    /// The outcome (and any `Retry-After`) also feeds the origin's adaptive pacing, once.
+    pub(crate) fn report_request_outcome(
+        &mut self,
+        run_id: &str,
+        worker_id: &str,
+        permit_id: i64,
+        outcome: &str,
+        retry_after_ms: Option<u64>,
     ) -> Result<bool, Error> {
         validate_request_identity(outcome, "request outcome")?;
         let _measurement =
@@ -778,16 +794,19 @@ impl FrontierStore {
             &[&run_id],
         )
         .map_err(|error| Error::storage(format!("reclaim expired request permits: {error}")))?;
-        let changed = tx
-            .execute(
+        let released = tx
+            .query_opt(
                 "UPDATE scout_crawl_request_permits
                  SET status = 'completed', finished_at = clock_timestamp(), outcome = $4
                  WHERE crawl_run_id = $1 AND worker_id = $2 AND permit_id = $3
-                   AND status = 'active' AND expires_at > clock_timestamp()",
+                   AND status = 'active' AND expires_at > clock_timestamp()
+                 RETURNING origin",
                 &[&run_id, &worker_id, &permit_id, &outcome],
             )
             .map_err(|error| Error::storage(format!("release request permit: {error}")))?;
-        if changed == 1 {
+        if let Some(row) = released {
+            let origin: String = row.get(0);
+            super::throttle::record_outcome(&mut tx, run_id, &origin, outcome, retry_after_ms)?;
             tx.commit()
                 .map_err(|error| Error::storage(format!("commit request release: {error}")))?;
             return Ok(true);

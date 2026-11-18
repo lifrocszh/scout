@@ -5,6 +5,7 @@ mod model;
 mod robots;
 mod run;
 pub(crate) mod spool;
+pub(crate) mod throttle;
 
 pub(crate) const EXTRACTION_SCHEMA: &str = "scout.extraction.v1";
 pub(crate) const PASSAGE_SCHEMA: &str = "scout.passage.v1";

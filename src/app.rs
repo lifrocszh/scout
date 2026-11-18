@@ -10,7 +10,7 @@ use super::{
     observability::{Events, emit_shared},
     storage::new_run_id,
 };
-use crate::cli::{Cli, Operation};
+use crate::cli::{Cli, DeadLetterCommand, Operation};
 use crate::distributed::events::CrawlEvent;
 use crate::distributed::frontier::FrontierStore;
 use crate::distributed::recrawl_policy::{RecrawlPolicyStore, SourcePolicyConfig};
@@ -59,6 +59,7 @@ where
         Operation::Serve { .. } => return run_serve(&cli),
         Operation::Evaluate { .. } => return run_evaluate(&cli),
         Operation::Benchmark { .. } => return run_benchmark(&cli),
+        Operation::DeadLetters(command) => return run_dead_letters(&cli, command),
         Operation::Crawl { .. } => {}
     }
     let run_id = new_run_id();
@@ -89,6 +90,7 @@ where
         | Operation::RecrawlImport { .. }
         | Operation::RecrawlPending
         | Operation::RecrawlReview { .. } => unreachable!("recrawl operation returned above"),
+        Operation::DeadLetters(_) => unreachable!("dead-letter operation returned above"),
         Operation::IndexBuild { .. }
         | Operation::IndexActivate { .. }
         | Operation::IndexRecover
@@ -477,6 +479,39 @@ fn export_events(cli: &Cli) -> Result<(), Error> {
                     return Ok(());
                 }
             }
+        }
+    }
+}
+
+fn run_dead_letters(cli: &Cli, command: &DeadLetterCommand) -> i32 {
+    let result = (|| -> Result<Value, Error> {
+        let database_url = std::env::var("SCOUT_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| Error::invalid("SCOUT_DATABASE_URL must be set for dlq commands"))?;
+        let mut frontier = FrontierStore::connect(&database_url)?;
+        frontier.apply_migrations()?;
+        let output = match command {
+            DeadLetterCommand::List { run_id, limit } => {
+                serde_json::to_value(frontier.list_dead_letters(run_id, *limit)?)
+            }
+            DeadLetterCommand::Requeue { run_id, selection } => {
+                serde_json::to_value(frontier.requeue_dead_letters(run_id, selection)?)
+            }
+        };
+        output.map_err(|error| Error::storage(format!("serialize dead letters: {error}")))
+    })();
+    match result {
+        Ok(output) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".into())
+            );
+            0
+        }
+        Err(error) => {
+            report_error(cli, &error);
+            error.exit_code
         }
     }
 }

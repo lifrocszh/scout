@@ -118,7 +118,11 @@ pub(crate) enum Operation {
         actor: String,
         reason: String,
     },
+    DeadLetters(dlq::DeadLetterCommand),
 }
+
+mod dlq;
+pub(crate) use dlq::DeadLetterCommand;
 
 use crate::generation::BuildMode;
 use std::ffi::{OsStr, OsString};
@@ -135,6 +139,15 @@ where
     let command = args
         .next()
         .ok_or("expected crawl, coordinator, events, index, or recrawl command")?;
+    if command.to_str() == Some("dlq") {
+        let (command, data_dir, json_errors) = dlq::parse(args)?;
+        return Ok(Cli {
+            operation: Operation::DeadLetters(command),
+            data_dir: data_dir.unwrap_or_else(|| PathBuf::from("data")),
+            json_errors,
+            metrics_bind: None,
+        });
+    }
     let index_command = if command.to_str() == Some("index") {
         Some(
             args.next()

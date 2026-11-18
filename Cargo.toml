@@ -23,6 +23,7 @@ tonic-prost = "0.14.2"
 prost = "0.14.1"
 toml = "0.8.23"
 usearch = "2.26.2"
+httpdate = "1.0.3"
 fastembed = { version = "7.0.1", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
 url = "2.5.8"

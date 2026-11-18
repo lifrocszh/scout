@@ -196,6 +196,15 @@ impl ServingState {
         }
 
         let generation = Arc::new(IndexGeneration::at(&self.data_dir).open_active()?);
+        if let Err(error) = crate::corpus::near_dup::publish_snapshot_gauges(
+            &self.data_dir,
+            &generation.info().corpus_snapshot_id,
+        ) {
+            eprintln!(
+                "scout serve: Corpus duplicate gauges unavailable: {}",
+                error.message
+            );
+        }
         let info = generation.info();
         *cached = Some(CachedGeneration {
             generation_id: info.generation_id,

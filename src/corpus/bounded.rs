@@ -1,3 +1,4 @@
+use super::near_dup::NearDuplicateDetector;
 use super::*;
 use crate::crawl::extract::extract;
 use crate::crawl::spool::{CaptureSpool, CaptureStub};
@@ -174,6 +175,7 @@ pub(crate) fn materialize_spooled(
 
     let mut first_page = true;
     let mut page_count = 0usize;
+    let mut near_duplicates = NearDuplicateDetector::default();
     let mut representatives = connection
         .prepare(
             "SELECT payload_json, selection_key
@@ -217,6 +219,7 @@ pub(crate) fn materialize_spooled(
             body_file: capture.body_file.clone(),
         };
         validate_page(&record)?;
+        near_duplicates.observe_page(&record.normalized_final_url, &record.content)?;
         let record_json = encode_record(&record, "Page")?;
         connection
             .execute(
@@ -291,6 +294,7 @@ pub(crate) fn materialize_spooled(
 
     let aliases_jsonl_sha256 = write_aliases(&connection, &aliases_path)?;
     let alias_count = count(&connection, "SELECT COUNT(*) FROM output_aliases")?;
+    observe_aliases(&connection, &mut near_duplicates)?;
     if alias_count != expected_alias_count {
         return Err(Error::invalid(
             "bounded Alias count does not match selection index",
@@ -376,6 +380,10 @@ pub(crate) fn materialize_spooled(
         passages_jsonl_sha256,
     };
     write_json(&staging.join("snapshot-manifest.json"), &snapshot_manifest)?;
+    // Diagnostic only: outside the snapshot identity, so it never changes what is indexed.
+    near_duplicates
+        .finish(run_id, &snapshot_id)
+        .write(crawl_dir)?;
     let final_dir = corpora.join(&snapshot_id);
     if final_dir.exists() {
         return Err(Error::storage(format!(
@@ -1185,6 +1193,28 @@ fn validate_passage(page: &PageRecord, passage: &PassageRecord) -> Result<(), Er
         return Err(Error::invalid(
             "Corpus Passage identity or reference mismatch",
         ));
+    }
+    Ok(())
+}
+
+fn observe_aliases(
+    connection: &Connection,
+    near_duplicates: &mut NearDuplicateDetector,
+) -> Result<(), Error> {
+    let mut statement = connection
+        .prepare("SELECT alias_url FROM output_aliases ORDER BY source_id, alias_url")
+        .map_err(|error| Error::storage(format!("query Alias URLs: {error}")))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| Error::storage(format!("read Alias URLs: {error}")))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| Error::storage(format!("read Alias URL: {error}")))?
+    {
+        let alias_url: String = row
+            .get(0)
+            .map_err(|error| Error::storage(format!("read Alias URL: {error}")))?;
+        near_duplicates.observe_alias(&alias_url)?;
     }
     Ok(())
 }

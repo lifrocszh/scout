@@ -71,7 +71,8 @@ wait_for_at_least "keyword searches timed" 3 "sum(max_over_time(scout_search_dur
 # Rare events do not happen in a clean crawl, but their series must exist at zero so
 # that the first one shows up in rate().
 for series in scout_lease_expirations_total scout_stale_results_total scout_lease_renewals_total \
-  scout_task_failures_total scout_frontier_expired_leases scout_db_pool_connections; do
+  scout_task_failures_total scout_frontier_expired_leases scout_db_pool_connections \
+  scout_frontier_dead_letter_requeues; do
   wait_for_at_least "$series is exposed" 1 "count(last_over_time($series[$window]))"
 done
 
@@ -82,6 +83,10 @@ exposition=$(docker compose exec -T serve bash -c \
 grep -q '^# TYPE scout_search_duration_seconds histogram' <<<"$exposition" || fail "serve /metrics has no search latency histogram"
 grep -q 'Content-Type: text/plain; version=0.0.4' <<<"$exposition" || fail "serve /metrics has the wrong content type"
 pass "serve /metrics exposes the search latency histogram"
+# The served Corpus's duplicate counts come from the reduce step's near-duplicates.json.
+grep -q '^scout_corpus_pages{origin="http://fixture:8080"} [1-9]' <<<"$exposition" ||
+  fail "serve /metrics has no Corpus page count for the fixture origin"
+pass "serve /metrics exposes the Corpus duplicate gauges"
 
 for _ in $(seq 1 30); do
   curl -fsS "$grafana/api/health" 2>/dev/null | jq -e '.database == "ok"' >/dev/null && break
