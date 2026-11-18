@@ -8,7 +8,7 @@ busybox, Python; no Terraform, no Bitnami charts, no KEDA).
 
 ```bash
 make kind-up      # cluster + image + chart; returns when http://127.0.0.1:8080/v1/readyz is ready
-make kind-smoke   # helm test, searches, scale workers 1 -> 8 mid-crawl
+make kind-smoke   # helm test, searches, scale workers 1 -> 8 mid-crawl, delete a worker mid-crawl
 make kind-down
 ```
 
@@ -106,4 +106,6 @@ up for a last scrape).
 `ci.yml` lints and schema-validates the chart on every pull request (`make helm-lint`).
 `.github/workflows/e2e-kind.yml` creates a kind cluster, installs the chart and runs
 `scripts/ci/kind-smoke.sh` on pull requests that touch `deploy/`, `docker/`, the Dockerfile or the
-workflow, and nightly; run manually it also runs the scaling benchmark and uploads its results.
+workflow, and nightly; run manually it also runs the scaling benchmark and uploads its results. The smoke
+test also deletes a worker pod in the middle of a crawl and checks that nothing is lost
+([runbook](runbook.md#worker-pod-deleted-mid-crawl)).

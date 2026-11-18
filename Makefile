@@ -2,7 +2,8 @@
 #
 #   make kind-up      create the cluster, build and load the image, install the chart, wait until
 #                     the search API is ready (http://127.0.0.1:8080/v1/readyz)
-#   make kind-smoke   check the running release: helm test, searches, scaling workers up
+#   make kind-smoke   check the running release: helm test, searches, scaling workers up, a worker
+#                     deleted mid-crawl
 #   make kind-down    delete the cluster
 #   make helm-lint    lint the chart and validate what it renders (kubeconform, if installed)
 #

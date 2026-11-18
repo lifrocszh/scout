@@ -218,5 +218,46 @@ and per scenario the compose logs, coordinator metrics and snapshot pages). CI r
 on pull requests that touch the crawl pipeline or the stack, and every scenario nightly
 (`.github/workflows/chaos.yml`).
 
-On Kubernetes the same recoveries rely on the Deployment restarting pods; the suite does not run
-there.
+## Kubernetes
+
+The Compose suite does not run on Kubernetes, where a Deployment replaces a pod instead of a restart
+policy restarting a container. One failure is injected there, by phase 3 of the kind smoke test
+(`scripts/ci/kind-smoke.sh`, `make kind-smoke`; CI runs it as `.github/workflows/e2e-kind.yml` on
+pull requests that touch the chart or the script, and nightly). Coordinator and Postgres pod failures,
+node loss and `SIGKILL` of a worker are not injected on kind.
+
+### Worker pod deleted mid-crawl
+
+`kubectl delete pod`, a node drain, a rolling update or a scale-in stops a worker that holds a lease.
+Unlike a crash, the kubelet sends SIGTERM first, and the worker is expected to leave cleanly.
+
+- **Symptoms.** The pod goes unready and Terminating; the Deployment starts a replacement that is Ready
+  after its init containers and a first heartbeat. The worker logs `worker.stopped`
+  and exits 0. A task still running after `worker.drainSeconds` (default 20 s) is handed back first:
+  `worker.task_released`, and another worker claims it at once (a task that finishes inside the window
+  is simply completed). *Lease expirations* does not move and no `worker.task_stale` appears.
+- **Diagnosis.** `kubectl -n scout get pods -l app.kubernetes.io/component=worker`. In the frontier, a
+  handed-back task has `last_error = 'worker stopped before the task finished'` and `lease_epoch` 2 or
+  more (a task that was only abandoned has neither: it waits for its lease to expire):
+  ```bash
+  kubectl -n scout exec pod/scout-postgres-0 -- psql -U scout -d scout -c \
+    "SELECT task_id, status, lease_owner, lease_epoch, last_error FROM scout_crawl_tasks
+     WHERE crawl_run_id = '<run-id>' AND lease_epoch > 1 ORDER BY task_id"
+  ```
+  The logs of a deleted pod go with it: follow them first (`kubectl logs -f <pod>`) or read them from
+  your log collector. A pod that stays Terminating for the whole `terminationGracePeriodSeconds`
+  (`drainSeconds` + 15) and has no `worker.stopped` did not handle SIGTERM and was killed; its lease is
+  reclaimed only when it expires (60 s with the default request timeout).
+- **Action.** None. Each hand-back uses one of the task's attempts (`max_attempts`, default 4), so
+  repeated deletions of the pod holding the same task can dead-letter it; see
+  [When recovery does not happen](#when-recovery-does-not-happen).
+- **Smoke test asserts.** Three workers crawl 64 synthetic pages (3 s each). After 12 pages a worker
+  that holds a lease is deleted with `drainSeconds=0`, so its task is always handed back rather than
+  finished (the finish-inside-the-window case is `tests/worker_drain.rs`). If that worker held nothing at
+  the instant of SIGTERM, another is deleted, up to three in all. Then: the deleted pod logged
+  `worker.task_released` and `worker.stopped`; the coordinator recorded the release; the Deployment
+  brought back three Ready workers, a new one for each deleted; the run completed with every task
+  succeeded once (none failed or dead-lettered, one accepted result per task from the epoch that holds
+  it); each handed-back task was accepted from a different worker at a higher epoch; and the snapshot
+  holds exactly the fixture's 64 pages, each once. Waits poll observable state (pages succeeded, lease
+  holder, Ready pods), with generous limits; there are no fixed sleeps.
