@@ -5,8 +5,8 @@ use super::super::extract::extract;
 use super::super::spool::CaptureSpool;
 use super::helpers::{owner_for, schedule_key};
 use super::request::{
-    RequestAttempt, RequestCoordinator, RequestResponse, retry_delay, retry_delay_without_response,
-    retryable_status,
+    RequestAttempt, RequestCoordinator, RequestResponse, retry_after_ms, retry_delay,
+    retry_delay_without_response, retryable_status,
 };
 use super::{Config, FetchOutcome};
 use crate::error::Error;
@@ -200,6 +200,11 @@ impl<'a> CrawlWorker<'a> {
             match result {
                 Ok(response) => {
                     let status_code = response.status().as_u16();
+                    self.coordinator.observe_response(
+                        &origin,
+                        status_code,
+                        retry_after_ms(&response),
+                    );
                     let response = RequestResponse {
                         response: Some(response),
                         _permit: Some(permit),

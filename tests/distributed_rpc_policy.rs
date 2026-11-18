@@ -142,6 +142,7 @@ fn release_active(
                     worker_id: worker,
                     permit_id,
                     outcome: "success".into(),
+                    retry_after_ms: 0,
                 }),
             )
             .await

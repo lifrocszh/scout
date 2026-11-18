@@ -217,6 +217,7 @@ fn release(
                 worker_id: lease.lease_owner.clone(),
                 permit_id: id,
                 outcome: "success".into(),
+                retry_after_ms: 0,
             }),
         )
         .unwrap()

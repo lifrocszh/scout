@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 mod bounded;
+pub(crate) mod near_dup;
 pub(crate) use bounded::{
     IncompleteSpoolRun, SpoolMaterialization, materialize_spooled,
     seal_existing_materialized_spool, write_incomplete_spooled,

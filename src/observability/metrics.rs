@@ -59,8 +59,11 @@ static COORDINATOR_FAMILIES: &[&dyn Family] = &[
     &LEASE_EXPIRATIONS,
     &STALE_RESULTS,
     &ORIGIN_REQUESTS,
+    &ORIGIN_THROTTLE_RESPONSES,
+    &ORIGIN_BACKOFF_MS,
     &FRONTIER_TASKS,
     &FRONTIER_EXPIRED_LEASES,
+    &FRONTIER_DEAD_LETTER_REQUEUES,
     &DB_POOL_WAIT,
     &DB_POOL_CONNECTIONS,
     &DB_POOL_IN_USE,
@@ -71,6 +74,9 @@ static SERVE_FAMILIES: &[&dyn Family] = &[
     &HTTP_REQUESTS,
     &SEARCH_REQUESTS,
     &SEARCH_DURATION,
+    &CORPUS_PAGES,
+    &CORPUS_NEAR_DUPLICATE_PAGES,
+    &CORPUS_EXACT_DUPLICATE_ALIASES,
 ];
 
 /// Coordinator RPCs that validate a lease, so each can report a fencing rejection.
@@ -183,6 +189,17 @@ pub(crate) static ORIGIN_REQUESTS: Counter = Counter::new(
     &["origin", "kind"],
 );
 
+pub(crate) static ORIGIN_THROTTLE_RESPONSES: Counter = Counter::new(
+    "scout_origin_throttle_responses_total",
+    "Responses that slowed an origin down (HTTP 429 or 503), by Source origin.",
+    &["origin"],
+);
+pub(crate) static ORIGIN_BACKOFF_MS: Gauge = Gauge::new(
+    "scout_origin_backoff_milliseconds",
+    "Adaptive extra start spacing per origin: doubles on 429/503, decays on healthy responses.",
+    &["origin"],
+);
+
 // ---- Coordinator: frontier and database -------------------------------------------------------
 
 pub(crate) static FRONTIER_TASKS: Gauge = Gauge::new(
@@ -193,6 +210,11 @@ pub(crate) static FRONTIER_TASKS: Gauge = Gauge::new(
 pub(crate) static FRONTIER_EXPIRED_LEASES: Gauge = Gauge::new(
     "scout_frontier_expired_leases",
     "Leased tasks whose deadline has passed and that no claim has reclaimed yet.",
+    &[],
+);
+pub(crate) static FRONTIER_DEAD_LETTER_REQUEUES: Gauge = Gauge::new(
+    "scout_frontier_dead_letter_requeues",
+    "Dead-letter tasks moved back to pending with `scout dlq requeue`, summed over the run. The dead-letter queue itself is scout_frontier_tasks{status=\"failed\"}.",
     &[],
 );
 pub(crate) static DB_POOL_WAIT: Histogram = Histogram::new(
@@ -338,6 +360,22 @@ impl Counter {
     }
 }
 
+pub(crate) static CORPUS_PAGES: Gauge = Gauge::new(
+    "scout_corpus_pages",
+    "Pages in the active Generation's Corpus snapshot, by origin (from its near-duplicate report).",
+    &["origin"],
+);
+pub(crate) static CORPUS_NEAR_DUPLICATE_PAGES: Gauge = Gauge::new(
+    "scout_corpus_near_duplicate_pages",
+    "Pages of the active Corpus whose SimHash is near an earlier Page of the same origin.",
+    &["origin"],
+);
+pub(crate) static CORPUS_EXACT_DUPLICATE_ALIASES: Gauge = Gauge::new(
+    "scout_corpus_exact_duplicate_aliases",
+    "URLs of the active Corpus folded into a Page with identical extracted content, by origin.",
+    &["origin"],
+);
+
 impl Family for Counter {
     fn render(&self, out: &mut String) {
         header(out, self.name, self.help, "counter");
@@ -389,6 +427,11 @@ impl Gauge {
     pub(crate) fn get(&self, values: &[&str]) -> f64 {
         let key: Vec<String> = values.iter().map(|value| (*value).to_owned()).collect();
         lock(&self.series).get(&key).copied().unwrap_or(0.0)
+    }
+
+    /// Drop every series, for gauges that describe one replaceable thing (the active Corpus).
+    pub(crate) fn clear(&self) {
+        lock(&self.series).clear();
     }
 }
 

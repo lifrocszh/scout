@@ -263,7 +263,8 @@ Grafana still draws the history; instant queries do not see them, so use `max_ov
 crawl, so a short crawl still gets a last scrape. The smoke test sets it.
 
 The dashboard (`deploy/grafana/dashboards/scout.json`) shows throughput, frontier depth by status,
-lease expirations and renewals, fencing rejections, DB pool wait and search latency. Grafana loads
+lease expirations and renewals, fencing rejections, crawl quality (dead letters, throttling,
+adaptive backoff, near-duplicate rate per origin), DB pool wait and search latency. Grafana loads
 it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start. Prometheus
 (Apache-2.0) and Grafana OSS (AGPL-3.0) run as unmodified upstream images, pinned in `compose.yaml`.
 
@@ -279,11 +280,15 @@ it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start
 | `scout_origin_requests_total{origin,kind}` | counter | coordinator | Request permits granted per Source origin (`page`, `robots`, `sitemap`) |
 | `scout_frontier_tasks{status}` | gauge | coordinator | Tasks by status, sampled from Postgres |
 | `scout_frontier_expired_leases` | gauge | coordinator | Leased tasks past their deadline, not yet reclaimed |
+| `scout_frontier_dead_letter_requeues` | gauge | coordinator | Dead letters moved back to `pending` by `scout dlq requeue` (the queue itself is `scout_frontier_tasks{status="failed"}`) |
+| `scout_origin_throttle_responses_total{origin}` | counter | coordinator | 429/503 responses that slowed an origin down |
+| `scout_origin_backoff_milliseconds{origin}` | gauge | coordinator | Adaptive extra start spacing per origin |
 | `scout_db_pool_wait_seconds` | histogram | coordinator | Wait for a free Postgres connection |
 | `scout_db_pool_connections`, `scout_db_pool_connections_in_use` | gauge | coordinator | General pool size and use |
 | `scout_search_duration_seconds{mode}` | histogram | serve | Search time per mode |
 | `scout_search_requests_total{mode,outcome}` | counter | serve | Searches: `ok`, `error` |
 | `scout_http_requests_total{route,status}` | counter | serve | Responses per route (unknown paths count as `other`) |
+| `scout_corpus_pages{origin}`, `scout_corpus_near_duplicate_pages{origin}`, `scout_corpus_exact_duplicate_aliases{origin}` | gauge | serve | Duplicate counts of the active Generation's Corpus, from its `near-duplicates.json` (set when a search first loads the Generation) |
 | `scout_build_info{role,version}` | gauge | all | Always 1 |
 
 Labels are bounded: origins come from the configured Sources, and a family holds at most 512
@@ -309,6 +314,18 @@ coordinator to a trusted private interface and restrict worker access.
 The same sources TOML drives `scout crawl` locally and `scout coordinator` with `scout worker`
 for distributed crawls. The `distributed-local` scripts start coordinator and workers on one
 machine.
+
+Crawl-quality behaviour ([details](docs/crawl-behaviour.md)):
+
+- **Near-duplicates.** Materializing a Corpus writes `crawls/<run>/near-duplicates.json`: SimHash
+  near-duplicate and exact-duplicate counts per origin. Near-duplicate Pages are reported, not
+  removed.
+- **Dead letters.** A task that uses up its attempts becomes a dead letter. Inspect and requeue
+  them with `scout dlq list --run-id <run>` and `scout dlq requeue --run-id <run> (--all | --task-id <id>...)`
+  (needs `SCOUT_DATABASE_URL`; only an active run can be requeued).
+- **Adaptive rate limits.** A 429 or 503 doubles an origin's extra start spacing (1 s to 60 s)
+  and holds it for that long or for `Retry-After` (capped at 5 min); each healthy response takes
+  an eighth off. Both `scout crawl` and the coordinator apply it.
 
 ## Reproduce the numbers
 
