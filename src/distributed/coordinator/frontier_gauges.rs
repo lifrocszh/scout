@@ -66,6 +66,18 @@ fn sample_forever(database_url: &str, run_id: &str, interval: Duration) {
                 metrics::FRONTIER_TASKS.set(&["succeeded"], counts.succeeded as f64);
                 metrics::FRONTIER_TASKS.set(&["failed"], counts.failed as f64);
                 metrics::FRONTIER_EXPIRED_LEASES.set(&[], counts.expired_leases as f64);
+                match connected.dead_letter_requeue_count(run_id) {
+                    Ok(requeues) => {
+                        metrics::FRONTIER_DEAD_LETTER_REQUEUES.set(&[], requeues as f64)
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "scout metrics: dead-letter sampler query failed: {}",
+                            error.message
+                        );
+                        store = None;
+                    }
+                }
             }
             Err(error) => {
                 // Reconnect next round: the connection may be gone, and stale gauges are worse

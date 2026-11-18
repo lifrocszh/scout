@@ -180,8 +180,10 @@ impl Fixture {
                                 "Location: /destination\r\n",
                                 String::new(),
                             ),
+                            // A retryable failure that does not signal overload: a 503 or 429
+                            // would also slow the whole origin down (tests/crawl_behaviour.rs).
                             "/retry" => (
-                                "503 Service Unavailable",
+                                "500 Internal Server Error",
                                 "text/plain",
                                 "",
                                 "temporary failure".into(),

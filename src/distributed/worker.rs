@@ -3,6 +3,7 @@ use super::protocol::{check_protocol, safe_event_url, validate_identity};
 use super::{MAX_BODY_TRANSFER_BYTES, MAX_RPC_MESSAGE_BYTES, PROTOCOL_VERSION};
 use crate::app::report_error;
 use crate::cli::{Cli, Operation};
+use crate::crawl::throttle;
 use crate::crawl::{
     RobotsPolicy, extract_sitemap_locations, is_sitemap_index, normalize_sitemap_url, parse_robots,
 };
@@ -968,12 +969,13 @@ async fn request(
             "http_error"
         });
         measurement.finish(&outcome, body.len());
-        release_permit(ctx, permit_id, &outcome).await?;
+        let retry_after_ms = retry_after
+            .as_deref()
+            .and_then(|value| throttle::parse_retry_after(value, std::time::SystemTime::now()));
+        report_permit(ctx, permit_id, &outcome, retry_after_ms).await?;
         if retryable_status_code(status) && attempt < ctx.config.max_attempts {
-            let delay = retry_after
-                .as_deref()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .map(|seconds| seconds.saturating_mul(1000))
+            let delay = retry_after_ms
+                .map(|delay| delay.min(throttle::MAX_RETRY_AFTER_MS))
                 .unwrap_or_else(|| retry_delay_ms(attempt, &ctx.config));
             tokio::time::sleep(Duration::from_millis(delay)).await;
             continue;
@@ -1010,6 +1012,17 @@ async fn read_limited(mut response: reqwest::Response, limit: usize) -> Result<V
 }
 
 async fn release_permit(ctx: &WorkerContext, permit_id: i64, outcome: &str) -> Result<(), Error> {
+    report_permit(ctx, permit_id, outcome, None).await
+}
+
+/// Release a permit with the request outcome; a throttling response also reports its
+/// parsed `Retry-After`, which the coordinator uses to pace the origin.
+async fn report_permit(
+    ctx: &WorkerContext,
+    permit_id: i64,
+    outcome: &str,
+    retry_after_ms: Option<u64>,
+) -> Result<(), Error> {
     let response = ctx
         .rpc
         .clone()
@@ -1019,6 +1032,7 @@ async fn release_permit(ctx: &WorkerContext, permit_id: i64, outcome: &str) -> R
             worker_id: ctx.worker_id.clone(),
             permit_id,
             outcome: outcome.to_owned(),
+            retry_after_ms: retry_after_ms.unwrap_or(0),
         })
         .await
         .map_err(|error| Error::storage(format!("release request permit: {error}")))?

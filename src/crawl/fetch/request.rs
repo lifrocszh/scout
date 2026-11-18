@@ -1,7 +1,9 @@
 use super::super::Config;
 use super::super::robots::RobotsPolicy;
+use super::super::throttle;
 use crate::error::Error;
 use crate::observability::Events;
+use crate::observability::metrics;
 use crate::storage::read_bounded;
 use reqwest::header::RETRY_AFTER;
 use serde_json::json;
@@ -26,6 +28,8 @@ struct RequestState {
     active_by_origin: HashMap<String, usize>,
     max_active_requests: usize,
     max_active_by_origin: HashMap<String, usize>,
+    /// Adaptive extra start spacing per origin (see `crawl::throttle`).
+    backoff_ms_by_origin: HashMap<String, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -155,6 +159,9 @@ impl RequestCoordinator {
         };
         let mut state = self.state.lock().expect("request coordinator lock");
         loop {
+            let backoff =
+                Duration::from_millis(state.backoff_ms_by_origin.get(origin).copied().unwrap_or(0));
+            let origin_spacing = origin_spacing + backoff;
             if state.total_attempts >= self.max_total_attempts {
                 return Err(Error::safety("request attempt limit exceeded"));
             }
@@ -271,6 +278,8 @@ impl RequestCoordinator {
             .copied()
             .unwrap_or(origin_spacing);
         let mut state = self.state.lock().expect("request coordinator lock");
+        let origin_spacing = origin_spacing
+            + Duration::from_millis(state.backoff_ms_by_origin.get(origin).copied().unwrap_or(0));
         state
             .next_start_by_key
             .entry(key.to_owned())
@@ -279,6 +288,51 @@ impl RequestCoordinator {
             .next_start_by_origin
             .entry(origin.to_owned())
             .and_modify(|next| *next = (*next).max(Instant::now() + origin_spacing));
+    }
+
+    /// Feed one response into the origin's adaptive pacing. A throttling response also
+    /// holds the origin's next start for the new backoff or `Retry-After`, whichever is longer.
+    pub(super) fn observe_response(&self, origin: &str, status: u16, retry_after_ms: Option<u64>) {
+        let signal = throttle::classify(status);
+        if signal == throttle::Signal::Neutral {
+            return;
+        }
+        let mut state = self.state.lock().expect("request coordinator lock");
+        let current = state.backoff_ms_by_origin.get(origin).copied().unwrap_or(0);
+        let next = throttle::next_backoff(current, signal);
+        if next == 0 {
+            state.backoff_ms_by_origin.remove(origin);
+        } else {
+            state.backoff_ms_by_origin.insert(origin.to_owned(), next);
+        }
+        if signal == throttle::Signal::Throttled {
+            let hold = Duration::from_millis(throttle::hold_after_throttle(next, retry_after_ms));
+            let until = Instant::now() + hold;
+            state
+                .next_start_by_origin
+                .entry(origin.to_owned())
+                .and_modify(|next_start| *next_start = (*next_start).max(until))
+                .or_insert(until);
+            metrics::ORIGIN_THROTTLE_RESPONSES.inc(&[origin]);
+        }
+        metrics::ORIGIN_BACKOFF_MS.set(&[origin], next as f64);
+    }
+
+    #[cfg(test)]
+    fn backoff_ms(&self, origin: &str) -> u64 {
+        let state = self.state.lock().expect("request coordinator lock");
+        state.backoff_ms_by_origin.get(origin).copied().unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn hold_remaining(&self, origin: &str) -> Duration {
+        let state = self.state.lock().expect("request coordinator lock");
+        state
+            .next_start_by_origin
+            .get(origin)
+            .map_or(Duration::ZERO, |next| {
+                next.saturating_duration_since(Instant::now())
+            })
     }
 
     pub(super) fn stats(&self) -> (usize, HashMap<String, usize>) {
@@ -427,9 +481,17 @@ pub(super) fn retry_delay(
         .headers()
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds.saturating_mul(1000))
+        .and_then(|value| throttle::parse_retry_after(value, std::time::SystemTime::now()))
+        .map(|delay| delay.min(throttle::MAX_RETRY_AFTER_MS))
         .unwrap_or_else(|| retry_delay_without_response(attempt, config))
+}
+
+pub(super) fn retry_after_ms(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| throttle::parse_retry_after(value, std::time::SystemTime::now()))
 }
 
 pub(super) fn retry_delay_without_response(attempt: usize, config: &Config) -> u64 {
@@ -457,6 +519,39 @@ mod tests {
         config.origin_concurrency = 1;
         config.min_start_spacing_ms = 0;
         config
+    }
+
+    #[test]
+    fn local_throttled_origin_backs_off_holds_and_recovers_slowly() {
+        let config = config();
+        let slow = config.sources[0].allowed_origins[0].clone();
+        let other = config.sources[1].allowed_origins[0].clone();
+        let coordinator = Arc::new(RequestCoordinator::new(&config));
+        coordinator.observe_response(&slow, 200, None);
+        assert_eq!(coordinator.backoff_ms(&slow), 0);
+
+        coordinator.observe_response(&slow, 429, None);
+        assert_eq!(coordinator.backoff_ms(&slow), throttle::MIN_BACKOFF_MS);
+        assert!(coordinator.hold_remaining(&slow) > Duration::from_millis(500));
+        coordinator.observe_response(&slow, 503, Some(60_000));
+        assert_eq!(coordinator.backoff_ms(&slow), 2 * throttle::MIN_BACKOFF_MS);
+        assert!(coordinator.hold_remaining(&slow) > Duration::from_secs(30));
+        // Another origin is neither slowed nor held.
+        assert_eq!(coordinator.backoff_ms(&other), 0);
+        assert_eq!(coordinator.hold_remaining(&other), Duration::ZERO);
+        drop(coordinator.start_request(&other, &other).unwrap());
+
+        coordinator.observe_response(&slow, 500, None);
+        assert_eq!(coordinator.backoff_ms(&slow), 2 * throttle::MIN_BACKOFF_MS);
+        coordinator.observe_response(&slow, 200, None);
+        assert_eq!(
+            coordinator.backoff_ms(&slow),
+            throttle::backoff_after_healthy(2 * throttle::MIN_BACKOFF_MS)
+        );
+        for _ in 0..40 {
+            coordinator.observe_response(&slow, 404, None);
+        }
+        assert_eq!(coordinator.backoff_ms(&slow), 0);
     }
 
     #[test]

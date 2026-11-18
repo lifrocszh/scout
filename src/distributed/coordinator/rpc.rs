@@ -317,11 +317,12 @@ impl Coordinator for CoordinatorRpc {
                     return Err(Status::failed_precondition("crawl run ID mismatch"));
                 }
                 let success = frontier
-                    .release_request_permit(
+                    .report_request_outcome(
                         &request.crawl_run_id,
                         &request.worker_id,
                         request.permit_id,
                         &request.outcome,
+                        (request.retry_after_ms > 0).then_some(request.retry_after_ms),
                     )
                     .map_err(to_status)?;
                 Ok(proto::BoolResponse {

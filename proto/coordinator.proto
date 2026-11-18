@@ -136,6 +136,8 @@ message ReleaseRequestPermitRequest {
   string worker_id = 3;
   int64 permit_id = 4;
   string outcome = 5;
+  // Parsed Retry-After of a 429/503 response, in milliseconds; 0 when absent.
+  uint64 retry_after_ms = 6;
 }
 
 message BoolResponse {

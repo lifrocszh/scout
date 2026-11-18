@@ -13,8 +13,9 @@ const MIGRATION_V7: &str = include_str!("../../migrations/0007_durable_crawl_eve
 const MIGRATION_V8: &str = include_str!("../../migrations/0008_approved_recrawl_policy.sql");
 const MIGRATION_V9: &str = include_str!("../../migrations/0009_analytics_retention.sql");
 const MIGRATION_V10: &str = include_str!("../../migrations/0010_analytics_history_integrity.sql");
+const MIGRATION_V11: &str = include_str!("../../migrations/0011_crawl_behaviour.sql");
 const MIGRATION_LOCK: i64 = 0x5343_4f55_545f_4652;
-const REQUEST_MIGRATION: [(i32, &str, &str); 10] = [
+const REQUEST_MIGRATION: [(i32, &str, &str); 11] = [
     (1, "durable-crawl-frontier", MIGRATION_V1),
     (2, "shared-request-policy", MIGRATION_V2),
     (3, "fair-frontier-schedule", MIGRATION_V3),
@@ -25,6 +26,7 @@ const REQUEST_MIGRATION: [(i32, &str, &str); 10] = [
     (8, "approved-recrawl-policy", MIGRATION_V8),
     (9, "analytics-retention", MIGRATION_V9),
     (10, "analytics-history-integrity", MIGRATION_V10),
+    (11, "crawl-behaviour", MIGRATION_V11),
 ];
 
 const CLAIM_ONE_TASK: &str = r#"
@@ -42,6 +44,7 @@ WITH scheduler AS MATERIALIZED (
 ), exhausted AS (
     UPDATE scout_crawl_tasks
     SET status = 'failed',
+        dead_lettered_at = clock_timestamp(),
         lease_owner = NULL,
         lease_deadline = NULL,
         last_error = COALESCE(last_error, 'lease expired after final task attempt'),
@@ -324,6 +327,9 @@ pub(crate) fn task_lease_is_live_locked(
 
 pub(crate) mod analytics;
 pub(crate) mod analytics_prune;
+#[cfg(test)]
+mod crawl_behaviour_tests;
+pub(crate) mod dead_letters;
 pub(crate) mod events;
 mod request_policy;
 mod results;
@@ -332,6 +338,7 @@ mod robots;
 mod sitemap_tests;
 mod sitemaps;
 mod tasks;
+mod throttle;
 
 impl FrontierStore {
     pub(crate) fn connect(database_url: &str) -> Result<Self, Error> {
