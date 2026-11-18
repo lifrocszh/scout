@@ -7,6 +7,11 @@
 #   make kind-down    delete the cluster
 #   make helm-lint    lint the chart and validate what it renders (kubeconform, if installed)
 #
+# Local lakehouse (docs/lakehouse.md). Needs `python3 -m pip install -r analytics/requirements.txt`.
+#
+#   make lakehouse-demo   fixture crawl -> Delta tables -> data-quality checks -> DuckDB queries
+#   make lakehouse-test   the lakehouse tests
+#
 # Variables: CLUSTER, NAMESPACE, RELEASE, IMAGE_REPO, IMAGE_TAG, BUILD_IMAGE=0 (use an image that
 # is already built), HELM_ARGS (extra `helm upgrade --install` flags).
 
@@ -22,7 +27,8 @@ CHART   := deploy/helm/scout
 KUBECTL := kubectl --context kind-$(CLUSTER) -n $(NAMESPACE)
 HELM    := helm --kube-context kind-$(CLUSTER) -n $(NAMESPACE)
 
-.PHONY: kind-up kind-down kind-deploy kind-smoke kind-diagnose kind-metrics-server helm-lint
+.PHONY: kind-up kind-down kind-deploy kind-smoke kind-diagnose kind-metrics-server helm-lint \
+	lakehouse-demo lakehouse-test
 
 kind-up:
 	kind get clusters | grep -qx '$(CLUSTER)' || kind create cluster --config deploy/kind/cluster.yaml --name $(CLUSTER)
@@ -68,3 +74,9 @@ helm-lint:
 			helm template $(RELEASE) $(CHART) $$flags | kubeconform -strict -summary -kubernetes-version 1.32.0; \
 		done; \
 	else echo "kubeconform not installed: skipping schema validation"; fi
+
+lakehouse-demo:
+	python3 -B -m analytics.lakehouse demo
+
+lakehouse-test:
+	python3 -B analytics/tests/test_lakehouse.py
