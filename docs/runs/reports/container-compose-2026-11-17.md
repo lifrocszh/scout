@@ -74,7 +74,8 @@ Restart behaviour checked by hand: fresh `up`, a second `up` on the running stac
 - **Hybrid mode and the model download.** `huggingface.co` is blocked by this sandbox's egress policy.
   The `/data/models` location was confirmed from the code (`build` and `serve` both read
   `<data-dir>/models`), not by running a download.
-- **GHCR publish.** It runs only on `main` and `v*` tags, so the first real run is after merge.
+- **GHCR publish.** It runs only on `main` and `v*` tags, so the first real run is after merge. The
+  publish workflow's YAML parses and mirrors the CI build step, but it has not run.
 - **Memory of short-lived containers.** Sampling is about once a second, so the `index` step
   (about 1 s) is not in the table. Its writer memory is capped by the profile at 16 MB.
 - The 74 MiB figure is for the 11-page fixture. A real crawl grows with the corpus; the 2 GB budget
@@ -82,7 +83,29 @@ Restart behaviour checked by hand: fresh `up`, a second `up` on the running stac
 
 ## CI results
 
-Filled in after the first run on the pull request.
+First run on the pull request (commit `f32a9a8`, run 44124740752, all green). Job wall time includes
+runner start-up; no cache existed yet.
+
+| Job | Time |
+| --- | --- |
+| `lint` | 34 s |
+| `features` | 25 s |
+| `python` | 15 s |
+| `test` | 1 m 12 s |
+| `test-postgres` | 3 m 14 s |
+| `compose-smoke` | 8 m 11 s (image build 7 m 24 s, cold; smoke test 29 s) |
+| `features-macos` | skipped (manual only) |
+
+- The smoke test on the runner passed with 3 of 3 workers joining (3 / 5 / 5 tasks) and a sum of
+  per-container peak memory of 68 MiB. `up` took 15 s there because Compose also pulled
+  `postgres:17` and `busybox`.
+- `compose-smoke` is cold on every PR run until `main` has written the GHA layer cache: only `main`
+  writes it (`cache-to` is empty on PRs), and `image.yml` writes the same `scout-image` scope. After
+  the first push to `main`, the 5 minute dependency layer should come from cache; this was not
+  measured here.
+- The image size is printed by the job's "Image size" step. The 192 MB above is from the local build.
+- CI shows a warning that `docker/build-push-action@v6` and `docker/setup-buildx-action@v3` target
+  Node 20 and are forced onto Node 24. They work; bump the action majors when convenient.
 
 ## Deferred
 
