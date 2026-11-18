@@ -1,10 +1,88 @@
 # Scout
 
+[![CI](https://github.com/lifrocszh/scout/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lifrocszh/scout/actions/workflows/ci.yml)
+[![Kubernetes (kind)](https://github.com/lifrocszh/scout/actions/workflows/e2e-kind.yml/badge.svg?branch=main)](https://github.com/lifrocszh/scout/actions/workflows/e2e-kind.yml)
+[![Image](https://github.com/lifrocszh/scout/actions/workflows/image.yml/badge.svg?branch=main)](https://github.com/lifrocszh/scout/actions/workflows/image.yml)
+
 Scout crawls allowlisted technical documentation and serves keyword, semantic, or hybrid search
 results through an HTTP API. Crawls produce immutable snapshots; search indexes are built from a
 snapshot and activated separately.
 
-## Quick start
+## How it fits together
+
+```mermaid
+flowchart LR
+    sites(["Allowlisted sites<br/>robots.txt, sitemaps"])
+
+    subgraph crawl["Crawl: coordinator-led, gRPC"]
+        workers["Workers, scale out<br/>fetch + extract"]
+        coord["Coordinator<br/>one per crawl run"]
+        pg[("PostgreSQL<br/>frontier, leases + fencing,<br/>request policy, event outbox")]
+        workers <-->|"claim, permit, result"| coord
+        coord <-->|"SQL, SKIP LOCKED"| pg
+    end
+
+    subgraph build["Build: immutable artifacts"]
+        spool[("Capture spool")]
+        snap["Corpus snapshot"]
+        gen["Index Generation<br/>Tantivy BM25 + USearch vectors<br/>fastembed BGE Small embeddings"]
+        spool -->|materialize| snap -->|"index build"| gen
+    end
+
+    serve["scout serve<br/>POST /v1/search<br/>keyword, semantic, hybrid (RRF)"]
+
+    workers -->|HTTP| sites
+    coord --> spool
+    gen -->|"activate, atomic"| serve
+
+    pg -.->|"outbox events, at-least-once"| dbx["Databricks Delta<br/>optional"]
+    crawl -.->|"planned, issue 13"| kafka["Kafka log<br/>planned"]
+    kafka -.->|"planned, issue 14"| lake["Local lakehouse<br/>planned"]
+
+    obs["Prometheus + Grafana<br/>obs profile"]
+    coord -.->|metrics| obs
+    workers -.->|metrics| obs
+    serve -.->|metrics| obs
+```
+
+Solid lines run today. Dashed lines are optional or planned. Postgres hands each crawl task to a
+worker as a lease that it fences, so a stalled worker cannot overwrite its replacement. A finished
+crawl becomes an immutable snapshot, a snapshot becomes an index Generation, and `serve` switches
+to a new Generation atomically. The same image runs every role, under Docker Compose
+([Quickstart](#quickstart)) or the Helm chart on Kubernetes ([docs/kubernetes.md](docs/kubernetes.md)).
+Why it is built this way (leases and fencing, Postgres instead of a broker, delivery guarantees):
+[docs/design.md](docs/design.md). Components and the crawl flow:
+[ADR 0002](docs/adr/0002-coordinator-led-distributed-crawling.md).
+
+## Quickstart
+
+Needs Docker with Compose v2. No Rust toolchain.
+
+```bash
+git clone https://github.com/lifrocszh/scout.git && cd scout
+cp .env.example .env                    # the example password is fine for a local run
+docker compose up -d --scale worker=3   # crawl, index and serve the bundled fixture site
+```
+
+The first run builds the image from the `Dockerfile`: about 5 minutes on 4 cores. Compose first
+tries to pull `scout:local` and prints a harmless "pull access denied" or "failed to resolve" line
+before it builds. Once the image exists, the stack takes about 15 seconds to crawl the fixture
+site, build a keyword-only index and start serving. To skip the build, use the published `linux/amd64` image:
+`SCOUT_IMAGE=ghcr.io/lifrocszh/scout:latest docker compose up -d --no-build --scale worker=3`.
+
+Then search. `"mode":"keyword"` is required: the default `hybrid` fails on a keyword-only index.
+
+```bash
+curl http://127.0.0.1:8080/v1/readyz
+curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json' \
+  -d '{"query":"rebalance consumer group","mode":"keyword"}'
+```
+
+The first hit is the "Tutorial: scaling consumers" page. `docker compose down -v` stops the stack
+and deletes its volumes. [Run with Docker](#run-with-docker) covers hybrid search, state, ports and
+other crawls.
+
+## Build and run from source
 
 Requires Rust/Cargo. Crawling needs network access. Semantic and hybrid indexing downloads and
 caches the BGE Small embedding model on first use.
@@ -109,28 +187,13 @@ Smoke test: `python3 demo/smoke_test.py`
 
 ## Run with Docker
 
-Needs Docker with Compose v2. One image runs every role; the subcommand picks it
-(`coordinator`, `worker`, `serve`, `crawl`, `index ...`).
-
-```bash
-cp .env.example .env                  # set POSTGRES_PASSWORD
-docker compose up --scale worker=3
-```
-
-The first `up` builds the image from the `Dockerfile`, which takes several minutes with a cold
-cache. Compose first tries to pull `scout:local` and prints a harmless "failed to resolve" line
-before it builds.
+The [Quickstart](#quickstart) starts this stack. One image runs every role; the subcommand picks it
+(`coordinator`, `worker`, `serve`, `crawl`, `index ...`). Leave out `-d` to follow the logs.
 
 The core stack starts Postgres, a static fixture site, a coordinator with three workers, a
 one-shot index build, and the search API. It crawls the fixture site (11 pages, plus a
 `robots.txt`-disallowed page it must skip and a page only the sitemap lists), builds and activates
-a keyword-only index, and then serves it. When it is ready:
-
-```bash
-curl http://127.0.0.1:8080/v1/readyz
-curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json' \
-  -d '{"query":"rebalance consumer group","mode":"keyword"}'
-```
+a keyword-only index, and then serves it.
 
 - **Keyword only.** `mode` must be `keyword`: the default `hybrid` fails on a keyword-only index.
   `SCOUT_INDEX_MODE=hybrid docker compose up` builds embeddings too. The BGE Small model is not in
@@ -144,8 +207,8 @@ curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json'
   coordinator's gRPC port and Postgres are reachable only inside the Compose network.
 - **Other crawls.** Copy `docker/sources.fixture.toml`, point `SCOUT_SOURCES_CONFIG_FILE` at the
   copy and set a new `SCOUT_CRAWL_RUN_ID` (see `.env.example`).
-- **Published image.** `SCOUT_IMAGE=ghcr.io/lifrocszh/scout:latest docker compose up --no-build`.
-  It is built from `main` (tags: commit SHA and `latest`) and from `v*` tags.
+- **Published image.** The Quickstart shows the command. The image is `linux/amd64` only and is
+  built from `main` (tags: commit SHA and `latest`) and from `v*` tags.
 - **Smoke test.** `scripts/ci/compose-smoke.sh 3` is what CI runs. It starts the `obs` profile too
   and checks the metrics (see [Observability](#observability)).
 
@@ -251,9 +314,29 @@ The same sources TOML drives `scout crawl` locally and `scout coordinator` with 
 for distributed crawls. The `distributed-local` scripts start coordinator and workers on one
 machine.
 
+## Reproduce the numbers
+
+```bash
+# Search quality: the CI gate, 64 labelled queries over keyword, semantic and hybrid indexes.
+cargo build --locked && scripts/ci/search-quality.sh
+
+# Crawl scaling, 1 to 8 workers on kind (about an hour; needs Docker, kind, kubectl and helm).
+kind create cluster --config deploy/kind/cluster.yaml
+docker build -t scout:kind . && kind load docker-image scout:kind --name scout
+python3 scripts/benchmark-distributed-kubernetes.py --output benchmark-results \
+  --workers 1 2 4 8 --repetitions 3 --pages 3000 --diagnostics
+python3 scripts/analyze-distributed-scaling.py benchmark-results/results.json --markdown --svg chart.svg
+```
+
+CI runs the first on every pull request (`search-quality` job). The second runs from the
+Kubernetes (kind) workflow on manual dispatch. See [docs/search-quality-gate.md](docs/search-quality-gate.md)
+and the [scaling report](docs/runs/reports/kubernetes-scaling-2026-11-18.md#reproduce).
+
 ## Development
 
 Run the test suite with `cargo test --offline`.
 
 The HTTP server has no TLS or authentication. Bind it to a trusted interface or put it behind a
 trusted proxy.
+
+Scout is released under the [MIT License](LICENSE).

@@ -67,11 +67,11 @@ Supporting multiple coordinators would require explicit worker registration and 
 
 ## Implementation anchors
 
-- [Coordinator startup and gRPC server](../src/distributed/coordinator.rs)
-- [Coordinator RPCs](../src/distributed/coordinator/rpc.rs)
-- [Scheduling dispatcher and held RPCs](../src/distributed/coordinator/scheduling.rs)
-- [Bounded result intake](../src/distributed/coordinator/results.rs)
-- [Worker registration, claims, and task loop](../src/distributed/worker.rs)
-- [Durable frontier and request policy](../src/distributed/frontier.rs)
-- [Protocol definition](../proto/coordinator.proto)
+- [Coordinator startup and gRPC server](../../src/distributed/coordinator.rs)
+- [Coordinator RPCs](../../src/distributed/coordinator/rpc.rs)
+- [Scheduling dispatcher and held RPCs](../../src/distributed/coordinator/scheduling.rs)
+- [Bounded result intake](../../src/distributed/coordinator/results.rs)
+- [Worker registration, claims, and task loop](../../src/distributed/worker.rs)
+- [Durable frontier and request policy](../../src/distributed/frontier.rs)
+- [Protocol definition](../../proto/coordinator.proto)
 - [Coordination notes](../docs/coordination.md)
