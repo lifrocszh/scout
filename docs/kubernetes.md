@@ -20,12 +20,15 @@ image build.
 | Workload | Kind | Notes |
 | --- | --- | --- |
 | `scout-postgres` | StatefulSet (1) + headless Service | Official `postgres:17` image, PVC for the data |
-| `scout-coordinator` | Deployment (1, `Recreate`) + ClusterIP Service `:50051` | gRPC for the workers; the only pod with database credentials |
+| `scout-coordinator` | Deployment (1, `Recreate`) + ClusterIP Service `:50051` | gRPC for the workers; the only pod with database credentials (with `kafka.enabled=true`, the Kafka relay and the index Job get them too) |
 | `scout-worker` | Deployment (3) + PodDisruptionBudget, optional HPA | Stateless; scale with `kubectl scale` |
 | `scout-index-<hash>` | Job | Waits for the crawl, then materializes it, builds a keyword-only Generation, activates and verifies it |
 | `scout-serve` | Deployment (1) + Service `:8080` | The search API; ready once a Generation is active, and picks up new ones live |
 | `scout-fixture` | Deployment (1) + Service | The site the default crawl fetches; `fixture.enabled=false` drops it |
 | `scout-config` | ConfigMap | `sources.toml`, the index profile and the wrapper scripts |
+| `scout-kafka` | StatefulSet (1) + headless Service `:9092` | Only with `kafka.enabled=true`: official `apache/kafka` image, KRaft, PVC for the log |
+| `scout-kafka-relay` | Deployment (1, `Recreate`) | Only with `kafka.enabled=true`: copies the run's outbox into Kafka, then parks; on the coordinator's node (it reads bodies from the data PVC) |
+| `scout-kafka-reducer` | Deployment (1) + PVC | Only with `kafka.enabled=true`: rebuilds the snapshot from Kafka alone and checks it against the live one, then parks |
 
 Both the coordinator and `serve` have no authentication or TLS and the Services are ClusterIP: put
 an authenticating ingress in front of `serve`, and never expose the coordinator.
@@ -92,11 +95,24 @@ drain above handles; the HPA waits two minutes before removing one. Measured thr
 count (8.0 pages/s with 1 worker, 51.3 with 8, on a 4-vCPU kind node) is in
 [`runs/reports/kubernetes-scaling-2026-11-18.md`](runs/reports/kubernetes-scaling-2026-11-18.md).
 
+## Kafka ingestion log
+
+Off by default. `--set kafka.enabled=true` adds a single-node Kafka (KRaft, no ZooKeeper), the
+outbox relay and the reducer ([ADR 0003](adr/0003-kafka-ingestion-log.md)); nothing else in the
+chart changes or waits for them. The relay runs `docker/stack.sh kafka-relay` and parks once the
+run's published snapshot is in Kafka. The reducer runs `docker/stack.sh kafka-reduce` on its own
+PVC and parks once its replayed snapshot equals the live one; a mismatch exits non-zero, so the
+pod restarts and shows as failing. `kafka.reducer.recordDelayMs` slows it down on purpose to watch
+its lag in Grafana. The broker has one replica and no TLS or authentication, so keep it on the
+cluster network. The chart's kind smoke test does not enable it; `make helm-lint` renders and
+schema-validates it, and the Compose `kafka` profile runs the same roles end to end in CI.
+
 ## Metrics
 
 Pods carry `prometheus.io/scrape` annotations, and
 [`deploy/prometheus/prometheus-k8s.yml`](../deploy/prometheus/prometheus-k8s.yml) turns them into
-scrape jobs named `scout-coordinator`, `scout-worker` and `scout-serve` with plain Kubernetes service
+scrape jobs named `scout-coordinator`, `scout-worker` and `scout-serve` (plus `scout-kafka-relay`
+and `scout-kafka-reducer` with `kafka.enabled=true`) with plain Kubernetes service
 discovery, so the Grafana dashboard in `deploy/grafana` works unchanged and no Prometheus Operator is
 needed. A finished coordinator stops serving `/metrics` (`coordinator.metricsLingerSeconds` keeps it
 up for a last scrape).

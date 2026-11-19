@@ -70,9 +70,10 @@ prints them as JSON, and a loader for that output would be another small source.
 
 Event sources implement one method: `EventSource.records()` yields `CrawlEventRecord`s. Each record
 holds the serialized `CrawlEvent` (`{"event_type": ..., "data": {...}}`, the exact payload of
-`src/distributed/events.rs`), a transport name and a reference (file:line, batch:line). A Kafka
-source would yield the topic's message values as payloads, with
-`topic/partition/offset` as the reference. Loading, the quality rules and the tables stay the same.
+`src/distributed/events.rs`), a transport name and a reference (file:line, batch:line). The
+optional Kafka log ([ADR 0003](adr/0003-kafka-ingestion-log.md)) writes every outbox event byte for
+byte to the `scout.crawl-events` topic, keyed by run, so a Kafka source would yield that topic's
+message values as payloads, with `topic/partition/offset` as the reference. Loading, the quality rules and the tables stay the same.
 Delivery may be at least once. Events deduplicate on `(crawl_run_id, event_id)` across all
 transports. The same event with a different payload fails `event.identity`.
 

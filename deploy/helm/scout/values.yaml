@@ -137,6 +137,34 @@ fixture:
     requests: {cpu: 50m, memory: 32Mi}
     limits: {memory: 256Mi}
 
+# Optional Kafka ingestion log (ADR 0003, docs/kubernetes.md#kafka-ingestion-log): Apache Kafka in
+# KRaft mode (one node), the outbox relay, and a reducer that rebuilds the snapshot from Kafka alone
+# and checks it against the live one. Off by default; nothing else in the chart depends on it.
+kafka:
+  enabled: false
+  image: apache/kafka:4.1.2
+  storage: 2Gi
+  storageClass: ""
+  # How long Kafka keeps records: the replay window.
+  retentionHours: 168
+  # Partitions per topic, used when the relay creates the topics.
+  partitions: 3
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 1Gi}
+  relay:
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {memory: 256Mi}
+  reducer:
+    enabled: true
+    # Extra milliseconds per applied result: a deliberately slow consumer, to watch lag build up.
+    recordDelayMs: 0
+    storage: 1Gi
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 512Mi}
+
 # Scrape hints on the pods; deploy/prometheus/prometheus-k8s.yml turns them into scrape jobs.
 # No Prometheus Operator needed.
 metrics:

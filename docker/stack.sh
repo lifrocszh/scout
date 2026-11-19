@@ -14,6 +14,10 @@
 #                          SCOUT_INDEX_MODE says otherwise), activate and
 #                          verify it. A no-op when a Generation is already
 #                          active, so `docker compose up` is safe to repeat.
+#   stack.sh kafka-relay   Optional (Compose `kafka` profile, chart kafka.enabled): copy the run's
+#                          outbox into Kafka until its snapshot is published (ADR 0003).
+#   stack.sh kafka-reduce  Optional: rebuild the run's snapshot from Kafka alone into its own
+#                          data directory and exit 0 only if it equals the live snapshot.
 #
 # Settings come from the environment (see compose.yaml); nothing is hard-coded.
 set -euo pipefail
@@ -99,9 +103,26 @@ index() {
   log "ready: snapshot=$snapshot generation=$generation"
 }
 
+kafka_relay() {
+  # Follows the outbox from the start of the crawl and exits once the run's published snapshot
+  # (its last outbox event) is in Kafka. Bodies are read from the coordinator's data directory.
+  exec scout kafka relay --run-id "$RUN_ID" --data-dir "$DATA" --follow \
+    --bootstrap "${SCOUT_KAFKA_BOOTSTRAP:?SCOUT_KAFKA_BOOTSTRAP must name the Kafka broker}"
+}
+
+kafka_reduce() {
+  # SCOUT_KAFKA_RECORD_DELAY_MS slows the reducer down on purpose (backpressure demo).
+  exec scout kafka reduce --run-id "$RUN_ID" --config "$CONFIG" \
+    --data-dir "${SCOUT_REPLICA_DIR:-$DATA}" --follow \
+    --record-delay-ms "${SCOUT_KAFKA_RECORD_DELAY_MS:-0}" \
+    --bootstrap "${SCOUT_KAFKA_BOOTSTRAP:?SCOUT_KAFKA_BOOTSTRAP must name the Kafka broker}"
+}
+
 case "${1:-}" in
   coordinator) coordinator ;;
   worker) worker ;;
   index) index ;;
-  *) echo "usage: stack.sh coordinator|worker|index" >&2; exit 2 ;;
+  kafka-relay) kafka_relay ;;
+  kafka-reduce) kafka_reduce ;;
+  *) echo "usage: stack.sh coordinator|worker|index|kafka-relay|kafka-reduce" >&2; exit 2 ;;
 esac

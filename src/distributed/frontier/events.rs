@@ -341,27 +341,16 @@ impl FrontierStore {
             let schema_version: i32 = row.get(2);
             let payload: String = row.get(3);
             let payload_sha256: Option<String> = row.get(4);
-            let event = match serde_json::from_str::<CrawlEvent>(&payload) {
-                Ok(event)
-                    if event.event_id() == event_id
-                        && event.crawl_run_id() == run_id
-                        && event.event_type() == event_type
-                        && i32::try_from(event.schema_version()).ok() == Some(schema_version)
-                        && payload_sha256
-                            .as_deref()
-                            .is_none_or(|expected| sha256_hex(payload.as_bytes()) == expected) =>
-                {
-                    event
-                }
-                Ok(_) => {
-                    let error = Error::storage(format!(
-                        "crawl event {event_id:?} does not match its durable envelope"
-                    ));
-                    self.record_event_failure(consumer_id, &event_id, &error.message)?;
-                    return Err(error);
-                }
+            let event = match decode_durable_event(
+                run_id,
+                &event_id,
+                &event_type,
+                schema_version,
+                &payload,
+                payload_sha256.as_deref(),
+            ) {
+                Ok(event) => event,
                 Err(error) => {
-                    let error = Error::storage(format!("decode crawl event {event_id:?}: {error}"));
                     self.record_event_failure(consumer_id, &event_id, &error.message)?;
                     return Err(error);
                 }
@@ -370,18 +359,7 @@ impl FrontierStore {
                 self.record_event_failure(consumer_id, &event_id, &error.message)?;
                 return Err(error);
             }
-            self.client
-                .execute(
-                    "INSERT INTO scout_crawl_event_checkpoints(
-                         consumer_id, event_id, attempt_count, next_attempt_at,
-                         last_error, acknowledged_at
-                     ) VALUES ($1, $2, 0, clock_timestamp(), NULL, clock_timestamp())
-                     ON CONFLICT (consumer_id, event_id) DO UPDATE
-                     SET next_attempt_at = clock_timestamp(), last_error = NULL,
-                         acknowledged_at = clock_timestamp()",
-                    &[&consumer_id, &event_id],
-                )
-                .map_err(|error| Error::storage(format!("acknowledge crawl event: {error}")))?;
+            self.acknowledge_event(consumer_id, &event_id)?;
             processed += 1;
             if matches!(event, CrawlEvent::CorpusSnapshotPublished(_)) {
                 break;
@@ -584,7 +562,28 @@ impl FrontierStore {
         Ok(true)
     }
 
-    fn record_event_failure(
+    /// Record that `consumer_id` has durably handled `event_id`.
+    pub(super) fn acknowledge_event(
+        &mut self,
+        consumer_id: &str,
+        event_id: &str,
+    ) -> Result<(), Error> {
+        self.client
+            .execute(
+                "INSERT INTO scout_crawl_event_checkpoints(
+                     consumer_id, event_id, attempt_count, next_attempt_at,
+                     last_error, acknowledged_at
+                 ) VALUES ($1, $2, 0, clock_timestamp(), NULL, clock_timestamp())
+                 ON CONFLICT (consumer_id, event_id) DO UPDATE
+                 SET next_attempt_at = clock_timestamp(), last_error = NULL,
+                     acknowledged_at = clock_timestamp()",
+                &[&consumer_id, &event_id],
+            )
+            .map_err(|error| Error::storage(format!("acknowledge crawl event: {error}")))?;
+        Ok(())
+    }
+
+    pub(super) fn record_event_failure(
         &mut self,
         consumer_id: &str,
         event_id: &str,
@@ -608,6 +607,35 @@ impl FrontierStore {
             )
             .map_err(|error| Error::storage(format!("record Crawl event retry: {error}")))?;
         Ok(())
+    }
+}
+
+/// Decode an outbox payload and check it against the row that stored it.
+pub(super) fn decode_durable_event(
+    run_id: &str,
+    event_id: &str,
+    event_type: &str,
+    schema_version: i32,
+    payload: &str,
+    payload_sha256: Option<&str>,
+) -> Result<CrawlEvent, Error> {
+    match serde_json::from_str::<CrawlEvent>(payload) {
+        Ok(event)
+            if event.event_id() == event_id
+                && event.crawl_run_id() == run_id
+                && event.event_type() == event_type
+                && i32::try_from(event.schema_version()).ok() == Some(schema_version)
+                && payload_sha256
+                    .is_none_or(|expected| sha256_hex(payload.as_bytes()) == expected) =>
+        {
+            Ok(event)
+        }
+        Ok(_) => Err(Error::storage(format!(
+            "crawl event {event_id:?} does not match its durable envelope"
+        ))),
+        Err(error) => Err(Error::storage(format!(
+            "decode crawl event {event_id:?}: {error}"
+        ))),
     }
 }
 

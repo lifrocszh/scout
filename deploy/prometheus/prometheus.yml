@@ -26,3 +26,19 @@ scrape_configs:
   - job_name: scout-serve
     static_configs:
       - targets: ["serve:9103"]
+
+  # Kafka profile only. DNS service discovery yields no target while the profile is off, so a
+  # core-only stack shows no down targets.
+  - job_name: scout-kafka-relay
+    dns_sd_configs:
+      - names: ["kafka-relay"]
+        type: A
+        port: 9104
+        refresh_interval: 2s
+
+  - job_name: scout-kafka-reducer
+    dns_sd_configs:
+      - names: ["kafka-reducer"]
+        type: A
+        port: 9105
+        refresh_interval: 2s

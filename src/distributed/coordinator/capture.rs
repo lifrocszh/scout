@@ -309,6 +309,14 @@ fn project_capture(
     Ok(())
 }
 
+/// Decode accepted capture metadata, as the coordinator stored it in Postgres (and as the Kafka
+/// log carries it), into the capture a capture spool records.
+pub(crate) fn capture_from_accepted_metadata(metadata_json: &str) -> Result<Capture, Error> {
+    let stored: StoredCapture = serde_json::from_str(metadata_json)
+        .map_err(|error| Error::storage(format!("decode accepted capture metadata: {error}")))?;
+    stored.to_crawl_capture()
+}
+
 pub(super) fn replay_accepted_captures(
     frontier: &mut FrontierStore,
     run_id: &str,

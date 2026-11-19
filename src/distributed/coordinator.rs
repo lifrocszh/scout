@@ -31,6 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tonic::{Request, Response, Status, transport::Server};
 
 mod capture;
+pub(crate) use capture::capture_from_accepted_metadata;
 mod database;
 mod frontier_gauges;
 mod results;

@@ -21,6 +21,8 @@ tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal",
 tonic = { version = "0.14.2", features = ["transport"] }
 tonic-prost = "0.14.2"
 prost = "0.14.1"
+# Pure-Rust Kafka client (MIT OR Apache-2.0); no librdkafka, no compression codecs.
+rskafka = { version = "0.6.0", default-features = false }
 toml = "0.8.23"
 usearch = "2.26.2"
 httpdate = "1.0.3"

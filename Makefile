@@ -69,8 +69,9 @@ kind-metrics-server:
 helm-lint:
 	helm lint $(CHART)
 	helm lint $(CHART) --set fixture.mode=synthetic --set worker.autoscaling.enabled=true
+	helm lint $(CHART) --set kafka.enabled=true
 	@if command -v kubeconform >/dev/null; then \
-		for flags in "" "--set fixture.mode=synthetic --set worker.autoscaling.enabled=true"; do \
+		for flags in "" "--set fixture.mode=synthetic --set worker.autoscaling.enabled=true" "--set kafka.enabled=true"; do \
 			helm template $(RELEASE) $(CHART) $$flags | kubeconform -strict -summary -kubernetes-version 1.32.0; \
 		done; \
 	else echo "kubeconform not installed: skipping schema validation"; fi

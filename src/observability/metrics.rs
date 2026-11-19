@@ -30,6 +30,8 @@ pub(crate) enum Role {
     Coordinator,
     Worker,
     Serve,
+    KafkaRelay,
+    KafkaReducer,
 }
 
 impl Role {
@@ -38,6 +40,8 @@ impl Role {
             Role::Coordinator => "coordinator",
             Role::Worker => "worker",
             Role::Serve => "serve",
+            Role::KafkaRelay => "kafka-relay",
+            Role::KafkaReducer => "kafka-reducer",
         }
     }
 
@@ -46,6 +50,8 @@ impl Role {
             Role::Coordinator => COORDINATOR_FAMILIES,
             Role::Worker => WORKER_FAMILIES,
             Role::Serve => SERVE_FAMILIES,
+            Role::KafkaRelay => KAFKA_RELAY_FAMILIES,
+            Role::KafkaReducer => KAFKA_REDUCER_FAMILIES,
         }
     }
 }
@@ -77,6 +83,19 @@ static SERVE_FAMILIES: &[&dyn Family] = &[
     &CORPUS_PAGES,
     &CORPUS_NEAR_DUPLICATE_PAGES,
     &CORPUS_EXACT_DUPLICATE_ALIASES,
+];
+
+static KAFKA_RELAY_FAMILIES: &[&dyn Family] = &[
+    &BUILD_INFO,
+    &KAFKA_RELAY_PENDING_EVENTS,
+    &KAFKA_RELAYED_RECORDS,
+    &KAFKA_RELAY_FAILURES,
+];
+static KAFKA_REDUCER_FAMILIES: &[&dyn Family] = &[
+    &BUILD_INFO,
+    &KAFKA_CONSUMER_LAG,
+    &KAFKA_CONSUMED_RECORDS,
+    &KAFKA_SNAPSHOT_PARITY,
 ];
 
 /// Coordinator RPCs that validate a lease, so each can report a fencing rejection.
@@ -116,6 +135,9 @@ pub(crate) fn seed(role: Role) {
                 PAGES_FETCHED.seed(&[outcome]);
             }
         }
+        Role::KafkaRelay => KAFKA_RELAY_FAILURES.seed(&[]),
+        // The consumed-records series carry the topic name, which only the reducer knows.
+        Role::KafkaReducer => {}
         Role::Serve => {
             for mode in SEARCH_MODES {
                 SEARCH_DURATION.seed(&[mode]);
@@ -259,6 +281,39 @@ pub(crate) static SEARCH_DURATION: Histogram = Histogram::new(
     "Time to run a search against the active Generation, by mode.",
     &["mode"],
     SEARCH_BUCKETS,
+);
+
+// ---- Kafka ingestion log (optional) ---------------------------------------------------------
+
+pub(crate) static KAFKA_RELAY_PENDING_EVENTS: Gauge = Gauge::new(
+    "scout_kafka_relay_pending_events",
+    "Outbox events of the run that the relay has not yet written to Kafka: the relay's lag.",
+    &[],
+);
+pub(crate) static KAFKA_RELAYED_RECORDS: Counter = Counter::new(
+    "scout_kafka_relayed_records_total",
+    "Records the relay wrote to Kafka, by topic. Re-sent records after a crash count again.",
+    &["topic"],
+);
+pub(crate) static KAFKA_RELAY_FAILURES: Counter = Counter::new(
+    "scout_kafka_relay_failures_total",
+    "Relay attempts that failed and will be retried (broker unavailable, missing body).",
+    &[],
+);
+pub(crate) static KAFKA_CONSUMER_LAG: Gauge = Gauge::new(
+    "scout_kafka_consumer_lag_records",
+    "Records between the reducer's next offset and the partition's high watermark.",
+    &["topic", "partition"],
+);
+pub(crate) static KAFKA_CONSUMED_RECORDS: Counter = Counter::new(
+    "scout_kafka_consumed_records_total",
+    "Records the reducer read, by topic and outcome: applied, duplicate (already applied) or other_run.",
+    &["topic", "outcome"],
+);
+pub(crate) static KAFKA_SNAPSHOT_PARITY: Gauge = Gauge::new(
+    "scout_kafka_snapshot_parity",
+    "1 when the snapshot rebuilt from the log equals the live snapshot, 0 when it differs. Absent until both exist.",
+    &[],
 );
 
 // ---- Primitives -------------------------------------------------------------------------------

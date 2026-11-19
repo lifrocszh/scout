@@ -60,6 +60,7 @@ where
         Operation::Evaluate { .. } => return run_evaluate(&cli),
         Operation::Benchmark { .. } => return run_benchmark(&cli),
         Operation::DeadLetters(command) => return run_dead_letters(&cli, command),
+        Operation::Kafka(command) => return crate::kafka::run(&cli, command),
         Operation::Crawl { .. } => {}
     }
     let run_id = new_run_id();
@@ -91,6 +92,7 @@ where
         | Operation::RecrawlPending
         | Operation::RecrawlReview { .. } => unreachable!("recrawl operation returned above"),
         Operation::DeadLetters(_) => unreachable!("dead-letter operation returned above"),
+        Operation::Kafka(_) => unreachable!("kafka operation returned above"),
         Operation::IndexBuild { .. }
         | Operation::IndexActivate { .. }
         | Operation::IndexRecover

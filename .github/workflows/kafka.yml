@@ -1,0 +1,55 @@
+name: Kafka
+
+# The optional Kafka ingestion log on the Compose stack (ADR 0003, scripts/ci/compose-kafka-checks.sh):
+# crawl with the `kafka` and `obs` profiles and a deliberately slow reducer, then check that the
+# snapshot rebuilt from Kafka equals the live one, that no capture was lost or doubled, and that
+# the reducer's lag grew and drained in Prometheus. The broker-level crash/replay test runs on
+# every PR in ci.yml (test-kafka); this one builds the image, so it runs
+#   pull request  when it touches the Kafka code, the stack or the dashboards
+#   nightly       against main
+#   dispatch      on demand
+on:
+  pull_request:
+    paths:
+      - src/kafka/**
+      - src/distributed/frontier/events.rs
+      - src/distributed/frontier/outbox_relay.rs
+      - docker/**
+      - compose.yaml
+      - Dockerfile
+      - deploy/grafana/**
+      - deploy/prometheus/**
+      - scripts/ci/compose-kafka-checks.sh
+      - .github/workflows/kafka.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-kafka:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SCOUT_IMAGE: scout:ci
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.SCOUT_IMAGE }}
+          cache-from: type=gha,scope=scout-image
+          # Only main writes the cache, so PR runs cannot evict it.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=scout-image' || '' }}
+      - name: Kafka ingestion log on Compose
+        run: scripts/ci/compose-kafka-checks.sh 2

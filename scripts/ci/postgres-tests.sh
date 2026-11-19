@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the #[ignore]d PostgreSQL-backed tests, one fresh database per test binary.
 # Usage: PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres scripts/ci/postgres-tests.sh [target...]
-# Targets are `lib` or a tests/*.rs stem; default is every binary with ignored tests.
+# Targets are `lib` or a tests/*.rs stem; default is every binary with ignored tests except the
+# kafka_* ones, which also need a broker (SCOUT_TEST_KAFKA_BOOTSTRAP) and run in CI's test-kafka job.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${PGHOST:?}" "${PGUSER:?}" "${PGPASSWORD:?}"
@@ -10,7 +11,10 @@ port="${PGPORT:-5432}"
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
   targets=(lib)
-  for file in $(grep -l '#\[ignore' tests/*.rs); do targets+=("$(basename "$file" .rs)"); done
+  for file in $(grep -l '#\[ignore' tests/*.rs); do
+    case $(basename "$file") in kafka_*) continue ;; esac
+    targets+=("$(basename "$file" .rs)")
+  done
 fi
 
 failed=()
