@@ -51,8 +51,12 @@ def slug(heading):
     return text.replace(" ", "-")
 
 
-def anchors(path, cache={}):
-    if path not in cache:
+_ANCHORS = {}
+
+
+def anchors(path):
+    """The anchors of the headings in `path` (memoized)."""
+    if path not in _ANCHORS:
         found, seen = set(), {}
         for _, line in prose_lines(path.read_text(encoding="utf-8")):
             heading = HEADING.match(line)
@@ -61,8 +65,8 @@ def anchors(path, cache={}):
                 count = seen.get(base, 0)
                 seen[base] = count + 1
                 found.add(base if count == 0 else f"{base}-{count}")
-        cache[path] = found
-    return cache[path]
+        _ANCHORS[path] = found
+    return _ANCHORS[path]
 
 
 def problems(path):

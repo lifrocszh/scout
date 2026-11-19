@@ -23,13 +23,25 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import quality, query, tables as t, transform
+from . import quality, query, transform
+from . import tables as t
 
-SNAPSHOT_WRITE_ORDER = (t.BRONZE_SNAPSHOT_RECORDS, t.SILVER_SOURCES, t.SILVER_PAGES,
-                        t.SILVER_PASSAGES, t.SILVER_PAGE_ALIASES, t.SILVER_NEAR_DUPLICATE_ORIGINS,
-                        t.SILVER_SNAPSHOTS)
-GOLD_INPUTS = (t.SILVER_SNAPSHOTS, t.SILVER_PAGES, t.SILVER_PAGE_ALIASES,
-               t.SILVER_NEAR_DUPLICATE_ORIGINS, t.SILVER_CRAWL_EVENTS)
+SNAPSHOT_WRITE_ORDER = (
+    t.BRONZE_SNAPSHOT_RECORDS,
+    t.SILVER_SOURCES,
+    t.SILVER_PAGES,
+    t.SILVER_PASSAGES,
+    t.SILVER_PAGE_ALIASES,
+    t.SILVER_NEAR_DUPLICATE_ORIGINS,
+    t.SILVER_SNAPSHOTS,
+)
+GOLD_INPUTS = (
+    t.SILVER_SNAPSHOTS,
+    t.SILVER_PAGES,
+    t.SILVER_PAGE_ALIASES,
+    t.SILVER_NEAR_DUPLICATE_ORIGINS,
+    t.SILVER_CRAWL_EVENTS,
+)
 
 
 @dataclass
@@ -47,8 +59,10 @@ class LoadReport:
         out = [f"input {self.input_ref}"]
         if not self.written:
             out.append("  no new rows (already loaded)")
-        out += [f"  {name}: +{rows} rows -> version {version}"
-                for name, (version, rows) in sorted(self.written.items())]
+        out += [
+            f"  {name}: +{rows} rows -> version {version}"
+            for name, (version, rows) in sorted(self.written.items())
+        ]
         out += [f"  {check.line()}" for check in self.checks]
         return out
 
@@ -66,9 +80,14 @@ def load_snapshot(lake, snapshot, freshness_sla_hours=None, as_of=None):
     rows, records = transform.snapshot_rows(snapshot, loaded_at)
     report = LoadReport(snapshot.input_ref)
     report.checks += quality.check_snapshot(snapshot, rows, records, lake)
-    metadata = {"load_id": str(uuid.uuid4()), "input_kind": snapshot.input_kind,
-                "input_ref": snapshot.input_ref, "run_id": snapshot.run_id,
-                "snapshot_id": snapshot.snapshot_id, "batch_id": snapshot.batch_id}
+    metadata = {
+        "load_id": str(uuid.uuid4()),
+        "input_kind": snapshot.input_kind,
+        "input_ref": snapshot.input_ref,
+        "run_id": snapshot.run_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "batch_id": snapshot.batch_id,
+    }
     for spec in SNAPSHOT_WRITE_ORDER:
         _merge(lake, spec, rows[spec], metadata, report)
     return _finish(lake, report, metadata, freshness_sla_hours, as_of or loaded_at)
@@ -90,11 +109,17 @@ def load_events(lake, source, input_ref, freshness_sla_hours=None, as_of=None):
     metadata = {}
     for run_id, run_records in sorted(by_run.items()):
         rows = transform.event_rows(run_records, loaded_at)
-        snapshot_ids = sorted({row["snapshot_id"] for row in rows[t.SILVER_CRAWL_EVENTS] if row["snapshot_id"]})
+        snapshot_ids = sorted(
+            {row["snapshot_id"] for row in rows[t.SILVER_CRAWL_EVENTS] if row["snapshot_id"]}
+        )
         transports = sorted({record.transport for record in run_records})
-        metadata = {"load_id": str(uuid.uuid4()), "input_kind": "events:" + ",".join(transports),
-                    "input_ref": input_ref, "run_id": run_id,
-                    "snapshot_id": snapshot_ids[0] if len(snapshot_ids) == 1 else None}
+        metadata = {
+            "load_id": str(uuid.uuid4()),
+            "input_kind": "events:" + ",".join(transports),
+            "input_ref": input_ref,
+            "run_id": run_id,
+            "snapshot_id": snapshot_ids[0] if len(snapshot_ids) == 1 else None,
+        }
         for spec in (t.BRONZE_CRAWL_EVENTS, t.SILVER_CRAWL_EVENTS):
             _merge(lake, spec, rows[spec], metadata, report)
     return _finish(lake, report, metadata, freshness_sla_hours, as_of or loaded_at)
@@ -114,15 +139,22 @@ def _silver_versions(lake):
 def refresh_gold(lake, metadata, report=None):
     """Rebuild Gold from analytics/sql/gold when its Silver inputs moved."""
     inputs = _silver_versions(lake)
-    current = [entry.get("scout.silver_versions") for spec in t.GOLD_TABLES
-               for entry in t.history(lake, spec)[:1]]
+    current = [
+        entry.get("scout.silver_versions")
+        for spec in t.GOLD_TABLES
+        for entry in t.history(lake, spec)[:1]
+    ]
     if len(current) == len(t.GOLD_TABLES) and all(value == inputs for value in current):
         return False
     con = query.connect(lake)
     # Gold depends on every loaded snapshot and event, not on the load that triggered the
     # refresh, so its lineage names the Silver table versions it was built from.
-    gold_metadata = {"load_id": metadata.get("load_id"), "silver_versions": inputs,
-                     "input_kind": "gold_refresh", "input_ref": inputs}
+    gold_metadata = {
+        "load_id": metadata.get("load_id"),
+        "silver_versions": inputs,
+        "input_kind": "gold_refresh",
+        "input_ref": inputs,
+    }
     for spec in t.GOLD_TABLES:
         data = con.sql(query.sql_file(f"gold/{spec.name}.sql")).to_arrow_table()
         data = data.select(spec.schema.names).cast(spec.schema)
@@ -145,15 +177,21 @@ def sync_lineage(lake):
             if isinstance(metrics, str):
                 metrics = json.loads(metrics)
             inserted = metrics.get("num_target_rows_inserted", metrics.get("num_added_rows", 0))
-            rows.append({
-                "load_id": entry["scout.load_id"],
-                "loaded_at_utc": datetime.fromtimestamp(entry["timestamp"] / 1000, timezone.utc),
-                "table_name": spec.qualified, "table_version": entry["version"],
-                "rows_inserted": int(inserted or 0),
-                "input_kind": entry.get("scout.input_kind", ""),
-                "input_ref": entry.get("scout.input_ref", ""),
-                "run_id": entry.get("scout.run_id"), "snapshot_id": entry.get("scout.snapshot_id"),
-                "batch_id": entry.get("scout.batch_id"),
-            })
+            rows.append(
+                {
+                    "load_id": entry["scout.load_id"],
+                    "loaded_at_utc": datetime.fromtimestamp(
+                        entry["timestamp"] / 1000, timezone.utc
+                    ),
+                    "table_name": spec.qualified,
+                    "table_version": entry["version"],
+                    "rows_inserted": int(inserted or 0),
+                    "input_kind": entry.get("scout.input_kind", ""),
+                    "input_ref": entry.get("scout.input_ref", ""),
+                    "run_id": entry.get("scout.run_id"),
+                    "snapshot_id": entry.get("scout.snapshot_id"),
+                    "batch_id": entry.get("scout.batch_id"),
+                }
+            )
     if rows:
         t.merge_insert(lake, t.LINEAGE_LOADS, t.to_arrow(t.LINEAGE_LOADS, rows), {})

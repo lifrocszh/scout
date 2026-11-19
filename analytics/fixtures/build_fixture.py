@@ -59,13 +59,15 @@ def words(seed, count):
 
 
 def paragraph_html(tokens, size=60):
-    return "\n".join(f"<p>{' '.join(tokens[i:i + size])}.</p>" for i in range(0, len(tokens), size))
+    return "\n".join(
+        f"<p>{' '.join(tokens[i : i + size])}.</p>" for i in range(0, len(tokens), size)
+    )
 
 
 def page(title, tokens, links=()):
     nav = "".join(f'<li><a href="{href}">{href}</a></li>' for href in links)
     return (
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
         f"<title>{title}</title></head><body><main>\n<h1>{title}</h1>\n"
         f"{paragraph_html(tokens)}\n<ul>{nav}</ul>\n</main></body></html>\n"
     )
@@ -158,7 +160,9 @@ def write_site(root, version):
 def crawl(scout, config, data_dir):
     result = subprocess.run(
         [scout, "crawl", "--config", str(config), "--data-dir", str(data_dir)],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     for line in result.stdout.splitlines():
         if line.startswith("crawl complete:"):
@@ -189,41 +193,58 @@ def synthesize_events(data_dir, snapshot_id):
 
     events = []
     for task_id, entry in enumerate(crawl_manifest["pages"], start=1):
-        events.append({"event_type": "capture_committed", "data": {
-            "event_id": event_id("capture_committed", entry["capture_id"]),
-            "schema_version": 1,
-            "crawl_run_id": run_id,
-            "source_id": entry["source_id"],
-            "task_id": task_id,
-            "committed_at_utc": crawl_manifest["completed_at_utc"],
-            "result_sha256": sha256(json.dumps(entry, sort_keys=True).encode()),
-            "content_sha256": entry["content_sha256"],
-            "body_artifact": {
-                "uri": f"crawls/{run_id}/{entry['body_file']}",
-                "sha256": entry["body_sha256"],
-                "byte_size": entry["content_bytes"],
+        events.append(
+            {
+                "event_type": "capture_committed",
+                "data": {
+                    "event_id": event_id("capture_committed", entry["capture_id"]),
+                    "schema_version": 1,
+                    "crawl_run_id": run_id,
+                    "source_id": entry["source_id"],
+                    "task_id": task_id,
+                    "committed_at_utc": crawl_manifest["completed_at_utc"],
+                    "result_sha256": sha256(json.dumps(entry, sort_keys=True).encode()),
+                    "content_sha256": entry["content_sha256"],
+                    "body_artifact": {
+                        "uri": f"crawls/{run_id}/{entry['body_file']}",
+                        "sha256": entry["body_sha256"],
+                        "byte_size": entry["content_bytes"],
+                    },
+                },
+            }
+        )
+    events.append(
+        {
+            "event_type": "crawl_completed",
+            "data": {
+                "event_id": event_id("crawl_completed", run_id),
+                "schema_version": 1,
+                "crawl_run_id": run_id,
+                "completed_at_utc": crawl_manifest["completed_at_utc"],
+                "stop_reason": crawl_manifest["summary"]["stop_reason"],
+                "config_sha256": crawl_manifest["source_config_sha256"],
             },
-        }})
-    events.append({"event_type": "crawl_completed", "data": {
-        "event_id": event_id("crawl_completed", run_id),
-        "schema_version": 1,
-        "crawl_run_id": run_id,
-        "completed_at_utc": crawl_manifest["completed_at_utc"],
-        "stop_reason": crawl_manifest["summary"]["stop_reason"],
-        "config_sha256": crawl_manifest["source_config_sha256"],
-    }})
-    events.append({"event_type": "corpus_snapshot_published", "data": {
-        "event_id": event_id("corpus_snapshot_published", snapshot_id),
-        "schema_version": 1,
-        "crawl_run_id": run_id,
-        "snapshot_id": snapshot_id,
-        "published_at_utc": snapshot["created_at_utc"],
-        "snapshot_manifest": artifact(snapshot_path, f"corpora/{snapshot_id}/snapshot-manifest.json"),
-        "crawl_manifest": artifact(crawl_path, f"crawls/{run_id}/crawl-manifest.json"),
-        "page_count": snapshot["page_count"],
-        "alias_count": snapshot["alias_count"],
-        "passage_count": snapshot["passage_count"],
-    }})
+        }
+    )
+    events.append(
+        {
+            "event_type": "corpus_snapshot_published",
+            "data": {
+                "event_id": event_id("corpus_snapshot_published", snapshot_id),
+                "schema_version": 1,
+                "crawl_run_id": run_id,
+                "snapshot_id": snapshot_id,
+                "published_at_utc": snapshot["created_at_utc"],
+                "snapshot_manifest": artifact(
+                    snapshot_path, f"corpora/{snapshot_id}/snapshot-manifest.json"
+                ),
+                "crawl_manifest": artifact(crawl_path, f"crawls/{run_id}/crawl-manifest.json"),
+                "page_count": snapshot["page_count"],
+                "alias_count": snapshot["alias_count"],
+                "passage_count": snapshot["passage_count"],
+            },
+        }
+    )
     return run_id, events
 
 
@@ -244,7 +265,9 @@ def prune(data_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--scout", default=str(ROOT / "target" / "debug" / "scout"))
     args = parser.parse_args()
     if not Path(args.scout).is_file():
@@ -274,7 +297,9 @@ def main():
             _, events = synthesize_events(DATA, snapshot_id)
             for event in events:
                 stream.write(json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n")
-    (FIXTURES / "snapshots.json").write_text(json.dumps({"snapshots": snapshots}, indent=2) + "\n", encoding="utf-8")
+    (FIXTURES / "snapshots.json").write_text(
+        json.dumps({"snapshots": snapshots}, indent=2) + "\n", encoding="utf-8"
+    )
     print("\n".join(snapshots))
     return 0
 

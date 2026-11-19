@@ -1,7 +1,6 @@
 # Databricks notebook source
 import re
 
-
 dbutils.widgets.text("catalog", "workspace")
 dbutils.widgets.text("schema", "default")
 catalog = dbutils.widgets.get("catalog")

@@ -57,9 +57,13 @@ def format_table(relation):
         return str(value)
 
     rows = [[cell(value) for value in row.values()] for row in data.to_pylist()]
-    widths = [max([len(column)] + [len(row[i]) for row in rows]) for i, column in enumerate(columns)]
+    widths = [
+        max([len(column)] + [len(row[i]) for row in rows]) for i, column in enumerate(columns)
+    ]
 
     def line(values):
         return "  ".join(value.ljust(width) for value, width in zip(values, widths)).rstrip()
 
-    return "\n".join([line(columns), line(["-" * width for width in widths])] + [line(row) for row in rows])
+    return "\n".join(
+        [line(columns), line(["-" * width for width in widths])] + [line(row) for row in rows]
+    )

@@ -46,7 +46,9 @@ def request(port, path, body=None, method=None):
     url = "http://127.0.0.1:%d%s" % (port, path)
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
-        url, data=data, method=method or ("POST" if data is not None else "GET"),
+        url,
+        data=data,
+        method=method or ("POST" if data is not None else "GET"),
         headers={"Content-Type": "application/json"} if data is not None else {},
     )
     try:
@@ -85,14 +87,22 @@ def main():
     work_dir = tempfile.mkdtemp(prefix="scout-demo-smoke-")
     proc = subprocess.Popen(
         [
-            sys.executable, str(HERE / "server.py"),
-            "--bind", "127.0.0.1:%d" % demo_port,
-            "--work-dir", work_dir,
-            "--scout-bin", str(REPO / "target" / "release" / "scout"),
-            "--data-dir", str(REPO / "data" / "real-model-10k-fast-v1"),
+            sys.executable,
+            str(HERE / "server.py"),
+            "--bind",
+            "127.0.0.1:%d" % demo_port,
+            "--work-dir",
+            work_dir,
+            "--scout-bin",
+            str(REPO / "target" / "release" / "scout"),
+            "--data-dir",
+            str(REPO / "data" / "real-model-10k-fast-v1"),
         ],
-        cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, start_new_session=True,
+        cwd=str(REPO),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
     )
     state = {"serve_started": False}
     try:
@@ -136,7 +146,10 @@ def main():
             assert status == 200, "serve/start status %s: %s" % (status, raw[:300])
             serve = as_json(raw)["serve"]
             state["serve_started"] = True
-            assert serve["state"] == "running", "serve state %s (%s)" % (serve["state"], serve["error"])
+            assert serve["state"] == "running", "serve state %s (%s)" % (
+                serve["state"],
+                serve["error"],
+            )
             assert serve["ready"] is True, "serve not ready: %s" % serve["error"]
             assert serve["port"] == serve_port, serve["port"]
             assert serve["root"] == "prebuilt", serve["root"]
@@ -161,7 +174,8 @@ def main():
 
         def t_search_keyword():
             status, raw = request(
-                demo_port, "/api/search",
+                demo_port,
+                "/api/search",
                 {"query": "ownership and borrowing", "mode": "keyword", "limit": 3},
             )
             assert status == 200, "status %s: %s" % (status, raw[:300])
@@ -212,7 +226,8 @@ def main():
             assert pre[0]["buildable"] is False, pre[0]
             assert pre[0]["generation_id"], "prebuilt snapshot has no generation_id: %s" % pre[0]
             status, raw = request(
-                demo_port, "/api/build/start",
+                demo_port,
+                "/api/build/start",
                 {"snapshot_id": pre[0]["snapshot_id"], "root": "prebuilt"},
             )
             # contract: read_only is a 503

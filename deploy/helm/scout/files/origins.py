@@ -7,6 +7,7 @@ from one pod. Origin o has PAGES pages in a tree (/p/0 links to /p/1../p/3, and 
 answers after LATENCY_MS, as a remote server would, and has distinct text, so no two are duplicates.
 robots.txt allows everything. GET /__stats on any port returns the request counts.
 """
+
 import asyncio
 import json
 import os
@@ -18,7 +19,16 @@ PAGES = int(os.environ["PAGES"])
 LATENCY = int(os.environ["LATENCY_MS"]) / 1000
 FANOUT = 3
 ROBOTS = b"User-agent: *\nAllow: /\n"
-TOPICS = ["queues", "retention", "partitions", "consumers", "offsets", "snapshots", "replication", "compaction"]
+TOPICS = [
+    "queues",
+    "retention",
+    "partitions",
+    "consumers",
+    "offsets",
+    "snapshots",
+    "replication",
+    "compaction",
+]
 requests = {"robots": 0, "pages": 0, "other": 0}
 
 
@@ -68,7 +78,9 @@ async def handle(reader, writer, origin):
 
 async def main():
     servers = [
-        await asyncio.start_server(lambda r, w, o=origin: handle(r, w, o), "0.0.0.0", BASE_PORT + origin, backlog=512)
+        await asyncio.start_server(
+            lambda r, w, o=origin: handle(r, w, o), "0.0.0.0", BASE_PORT + origin, backlog=512
+        )
         for origin in range(ORIGINS)
     ]
     print(f"serving {ORIGINS} origins on ports {BASE_PORT}-{BASE_PORT + ORIGINS - 1}", flush=True)

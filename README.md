@@ -421,6 +421,11 @@ and the [scaling report](docs/runs/reports/kubernetes-scaling-2026-11-18.md#repr
 
 Run the test suite with `cargo test --offline`.
 
+The Python (the lakehouse, `scripts/`, the demo and the tests) is linted and formatted with
+[Ruff](https://docs.astral.sh/ruff/), configured in `ruff.toml` and pinned in the `python` CI job:
+`pip install ruff==0.16.9`, then `ruff check .` and `ruff format --check .` (`ruff format .` fixes the
+formatting). `python3 scripts/ci/check_md_links.py` checks the relative links in the Markdown files.
+
 The HTTP server has no TLS or authentication. Bind it to a trusted interface or put it behind a
 trusted proxy.
 

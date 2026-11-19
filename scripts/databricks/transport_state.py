@@ -14,7 +14,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 STATE_SCHEMA = "scout.databricks-transport-state.v1"
 
 
@@ -52,10 +51,16 @@ def _env_int(name, default, minimum, maximum):
 def limits():
     return {
         "max_attempts": _env_int("SCOUT_DATABRICKS_MAX_ATTEMPTS", 3, 1, 10),
-        "retry_base_delay_seconds": _env_int("SCOUT_DATABRICKS_RETRY_BASE_DELAY_SECONDS", 2, 0, 300),
+        "retry_base_delay_seconds": _env_int(
+            "SCOUT_DATABRICKS_RETRY_BASE_DELAY_SECONDS", 2, 0, 300
+        ),
         "max_retry_delay_seconds": _env_int("SCOUT_DATABRICKS_MAX_RETRY_DELAY_SECONDS", 30, 0, 300),
-        "command_timeout_seconds": _env_int("SCOUT_DATABRICKS_COMMAND_TIMEOUT_SECONDS", 60, 1, 3600),
-        "operation_timeout_seconds": _env_int("SCOUT_DATABRICKS_OPERATION_TIMEOUT_SECONDS", 1800, 1, 86400),
+        "command_timeout_seconds": _env_int(
+            "SCOUT_DATABRICKS_COMMAND_TIMEOUT_SECONDS", 60, 1, 3600
+        ),
+        "operation_timeout_seconds": _env_int(
+            "SCOUT_DATABRICKS_OPERATION_TIMEOUT_SECONDS", 1800, 1, 86400
+        ),
     }
 
 
@@ -97,7 +102,9 @@ def make_scope(kind, operation, batch_id, volume, profile=None, workspace_path=N
 
 
 def state_root():
-    return Path(os.environ.get("SCOUT_DATABRICKS_STATE_DIR", "~/.scout/databricks-transport")).expanduser()
+    return Path(
+        os.environ.get("SCOUT_DATABRICKS_STATE_DIR", "~/.scout/databricks-transport")
+    ).expanduser()
 
 
 def _read_retry_at(value):
@@ -120,7 +127,9 @@ class TransportState:
         self.root = state_root()
         self.path = self.root / f"{self.scope_sha256}.json"
         self.lock_path = self.root / f"{self.scope_sha256}.lock"
-        self.deadline = time.monotonic() + (acquire_timeout or self.config["operation_timeout_seconds"])
+        self.deadline = time.monotonic() + (
+            acquire_timeout or self.config["operation_timeout_seconds"]
+        )
         self._lock_stream = None
         self.data = None
 
@@ -155,12 +164,17 @@ class TransportState:
             try:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                raise ValueError(f"cannot read Databricks transport state {self.path}: {error}") from error
+                raise ValueError(
+                    f"cannot read Databricks transport state {self.path}: {error}"
+                ) from error
             if not isinstance(self.data, dict) or self.data.get("schema_version") != STATE_SCHEMA:
                 raise ValueError(f"unsupported Databricks transport state at {self.path}")
             if self.data.get("scope_sha256") != self.scope_sha256:
                 raise ValueError(f"Databricks transport state scope mismatch at {self.path}")
-            if self.request_sha256 is not None and self.data.get("request_sha256") != self.request_sha256:
+            if (
+                self.request_sha256 is not None
+                and self.data.get("request_sha256") != self.request_sha256
+            ):
                 if self.data.pop("allow_request_change", False):
                     self.data["request_sha256"] = self.request_sha256
                     self.data["status"] = "ready"
@@ -168,7 +182,9 @@ class TransportState:
                     self.data["idempotency_token"] = None
                     self.save()
                 else:
-                    raise ValueError("transport request differs from durable state; use the explicit retry command")
+                    raise ValueError(
+                        "transport request differs from durable state; use the explicit retry command"
+                    )
             else:
                 self.data.pop("allow_request_change", None)
             self.data["scope"] = self.scope
@@ -217,7 +233,9 @@ class TransportState:
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.data, stream, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                json.dump(
+                    self.data, stream, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                )
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -235,13 +253,16 @@ class TransportState:
 
     def run(self, command, *, capture_output=False):
         timeout = min(self.config["command_timeout_seconds"], self.remaining())
-        return subprocess.run(command, check=True, timeout=timeout,
-                              capture_output=capture_output, text=capture_output)
+        return subprocess.run(
+            command, check=True, timeout=timeout, capture_output=capture_output, text=capture_output
+        )
 
     def _token(self):
         token = self.data.get("idempotency_token")
         if token is None:
-            material = f"{self.scope_sha256}:{self.data['request_sha256']}:{self.data['generation']}"
+            material = (
+                f"{self.scope_sha256}:{self.data['request_sha256']}:{self.data['generation']}"
+            )
             token = _sha256(material)
             self.data["idempotency_token"] = token
             self.save()
@@ -280,7 +301,9 @@ class TransportState:
                     if delay:
                         time.sleep(min(delay, self.remaining()))
                         if time.time() < retry_at:
-                            raise TimeoutError("Databricks retry is not due within the operation time bound")
+                            raise TimeoutError(
+                                "Databricks retry is not due within the operation time bound"
+                            )
                 if self.data["attempt_count"] >= self.config["max_attempts"]:
                     self.data.update(status="exhausted", next_retry_at=None)
                     self.save()
@@ -293,7 +316,11 @@ class TransportState:
                     attempt_started_at_utc=_utc_now(),
                     next_retry_at=None,
                     last_error=None,
-                    **({"idempotency_token": None} if operation == "submit" and not self.data.get("idempotency_token") else {}),
+                    **(
+                        {"idempotency_token": None}
+                        if operation == "submit" and not self.data.get("idempotency_token")
+                        else {}
+                    ),
                 )
                 token = self._token() if operation == "submit" else None
                 if attempt_id:
@@ -309,7 +336,13 @@ class TransportState:
                 self.data["active_attempt_id"] = None
                 self.save()
                 return result
-            except (OSError, subprocess.SubprocessError, TimeoutError, ValueError, RuntimeError) as error:
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                TimeoutError,
+                ValueError,
+                RuntimeError,
+            ) as error:
                 message = f"{type(error).__name__}: {error}"[:2000]
                 if self.data["attempt_count"] >= self.config["max_attempts"]:
                     self.data.update(status="exhausted", next_retry_at=None, last_error=message)
@@ -318,7 +351,8 @@ class TransportState:
                     self.data.update(
                         status="retry_wait",
                         next_retry_at=datetime.fromtimestamp(time.time() + delay, timezone.utc)
-                        .isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
                         last_error=message,
                     )
                 self.save()
@@ -327,9 +361,19 @@ class TransportState:
 
     def exhausted_message(self):
         scope = self.scope
-        command = ["python3", "scripts/databricks/transport_state.py", "retry",
-                   "--kind", scope["kind"], "--operation", scope["operation"],
-                   "--batch-id", scope["batch_id"], "--volume", scope["volume"]]
+        command = [
+            "python3",
+            "scripts/databricks/transport_state.py",
+            "retry",
+            "--kind",
+            scope["kind"],
+            "--operation",
+            scope["operation"],
+            "--batch-id",
+            scope["batch_id"],
+            "--volume",
+            scope["volume"],
+        ]
         if scope["profile"] != "DEFAULT":
             command += ["--profile", scope["profile"]]
         if scope.get("workspace_path"):
@@ -361,14 +405,18 @@ def retry_state(scope, *, new_job=False, confirmed_terminal_failure=False):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                raise ValueError(f"cannot read Databricks transport state {path}: {error}") from error
+                raise ValueError(
+                    f"cannot read Databricks transport state {path}: {error}"
+                ) from error
             if data.get("schema_version") != STATE_SCHEMA or data.get("scope_sha256") != scope_sha:
                 raise ValueError("Databricks transport state scope/schema mismatch")
             if new_job:
                 if scope["operation"] != "submit" or not confirmed_terminal_failure:
                     raise ValueError("--new-job requires submit and --confirmed-terminal-failure")
                 if data.get("status") != "submitted" or not data.get("run_id"):
-                    raise ValueError("a new job requires a recorded run_id; resume unknown submissions with the same token")
+                    raise ValueError(
+                        "a new job requires a recorded run_id; resume unknown submissions with the same token"
+                    )
                 data.update(
                     generation=data.get("generation", 0) + 1,
                     status="ready",
@@ -383,19 +431,31 @@ def retry_state(scope, *, new_job=False, confirmed_terminal_failure=False):
                 )
             else:
                 if data.get("status") != "exhausted":
-                    raise ValueError("operator retry is available only after bounded attempts are exhausted")
-                data.update(status="ready", attempt_count=0, next_retry_at=None,
-                            active_attempt_id=None, last_error=None)
+                    raise ValueError(
+                        "operator retry is available only after bounded attempts are exhausted"
+                    )
+                data.update(
+                    status="ready",
+                    attempt_count=0,
+                    next_retry_at=None,
+                    active_attempt_id=None,
+                    last_error=None,
+                )
                 if scope["operation"] == "upload":
-                    data.update(generation=data.get("generation", 0) + 1,
-                                remote_attempt_id=None, published_path=None)
+                    data.update(
+                        generation=data.get("generation", 0) + 1,
+                        remote_attempt_id=None,
+                        published_path=None,
+                    )
             data.update(config)
             data["updated_at_utc"] = _utc_now()
             fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=root)
             try:
                 os.fchmod(fd, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(data, stream, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                    json.dump(
+                        data, stream, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                    )
                     stream.write("\n")
                     stream.flush()
                     os.fsync(stream.fileno())
@@ -417,26 +477,35 @@ def retry_state(scope, *, new_job=False, confirmed_terminal_failure=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    retry = commands.add_parser("retry", help="resume an exhausted upload or idempotent job submission")
+    retry = commands.add_parser(
+        "retry", help="resume an exhausted upload or idempotent job submission"
+    )
     retry.add_argument("--kind", choices=("snapshot", "event"), required=True)
     retry.add_argument("--operation", choices=("upload", "submit"), required=True)
     retry.add_argument("--batch-id", required=True)
     retry.add_argument("--volume", required=True)
     retry.add_argument("--profile")
     retry.add_argument("--workspace-path")
-    retry.add_argument("--new-job", action="store_true", help="start another run with a new idempotency token")
-    retry.add_argument("--confirmed-terminal-failure", action="store_true",
-                       help="confirm the previous Databricks run is terminal and failed")
+    retry.add_argument(
+        "--new-job", action="store_true", help="start another run with a new idempotency token"
+    )
+    retry.add_argument(
+        "--confirmed-terminal-failure",
+        action="store_true",
+        help="confirm the previous Databricks run is terminal and failed",
+    )
     args = parser.parse_args()
     if (args.operation == "submit") != bool(args.workspace_path):
         parser.error("--workspace-path is required for submit and forbidden for upload")
     if args.confirmed_terminal_failure and not args.new_job:
         parser.error("--confirmed-terminal-failure requires --new-job")
     try:
-        scope = make_scope(args.kind, args.operation, args.batch_id, args.volume,
-                           args.profile, args.workspace_path)
-        retry_state(scope, new_job=args.new_job,
-                    confirmed_terminal_failure=args.confirmed_terminal_failure)
+        scope = make_scope(
+            args.kind, args.operation, args.batch_id, args.volume, args.profile, args.workspace_path
+        )
+        retry_state(
+            scope, new_job=args.new_job, confirmed_terminal_failure=args.confirmed_terminal_failure
+        )
         print("Databricks transport retry armed; rerun the original upload or run command.")
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(2, f"error: {error}\n")

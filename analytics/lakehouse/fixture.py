@@ -25,8 +25,10 @@ def snapshot_ids(data_dir=DATA_DIR):
 
 
 def latest_snapshot_at(data_dir=DATA_DIR):
-    created = [json.loads(path.read_text(encoding="utf-8"))["created_at_utc"]
-               for path in Path(data_dir).glob("corpora/*/snapshot-manifest.json")]
+    created = [
+        json.loads(path.read_text(encoding="utf-8"))["created_at_utc"]
+        for path in Path(data_dir).glob("corpora/*/snapshot-manifest.json")
+    ]
     return max(parse_utc(value) for value in created)
 
 
@@ -38,8 +40,11 @@ def fixture_as_of(data_dir=DATA_DIR):
 def _reseal_pages(snapshot_dir, rewrite):
     """Rewrite pages.jsonl and update its checksum in the snapshot manifest."""
     pages = snapshot_dir / "pages.jsonl"
-    lines = [json.dumps(rewrite(json.loads(line)), ensure_ascii=False, separators=(",", ":"))
-             for line in pages.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [
+        json.dumps(rewrite(json.loads(line)), ensure_ascii=False, separators=(",", ":"))
+        for line in pages.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     pages.write_text("\n".join(lines) + "\n", encoding="utf-8")
     manifest_path = snapshot_dir / "snapshot-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -80,11 +85,14 @@ def broken_copy(kind, target):
 def load_all(lake, data_dir=DATA_DIR, events=EVENTS, freshness_sla_hours=None, as_of=None):
     """Load every fixture snapshot, then its events. Returns the load reports."""
     from . import load
+
     reports = []
     for snapshot_id in snapshot_ids(data_dir):
         snapshot = sources.snapshot_from_data_dir(data_dir, snapshot_id)
         reports.append(load.load_snapshot(lake, snapshot, freshness_sla_hours, as_of))
-    reports.append(load.load_events(lake, sources.JsonlEventSource(events), str(events),
-                                    freshness_sla_hours, as_of))
+    reports.append(
+        load.load_events(
+            lake, sources.JsonlEventSource(events), str(events), freshness_sla_hours, as_of
+        )
+    )
     return reports
-
