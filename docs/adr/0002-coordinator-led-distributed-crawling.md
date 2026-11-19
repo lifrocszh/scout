@@ -74,4 +74,4 @@ Supporting multiple coordinators would require explicit worker registration and 
 - [Worker registration, claims, and task loop](../../src/distributed/worker.rs)
 - [Durable frontier and request policy](../../src/distributed/frontier.rs)
 - [Protocol definition](../../proto/coordinator.proto)
-- [Coordination notes](../docs/coordination.md)
+- [Design notes: leases, the Postgres frontier, and delivery guarantees](../design.md)

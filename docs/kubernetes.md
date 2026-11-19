@@ -117,6 +117,20 @@ discovery, so the Grafana dashboard in `deploy/grafana` works unchanged and no P
 needed. A finished coordinator stops serving `/metrics` (`coordinator.metricsLingerSeconds` keeps it
 up for a last scrape).
 
+The alert rules in [`deploy/prometheus/alerts.yml`](../deploy/prometheus/alerts.yml) (what each means
+and what to do: [runbook](runbook.md#alerts)) work on those job names. `prometheus-k8s.yml` loads them
+with `rule_files: [alerts.yml]`, so Prometheus needs both files in one directory, for example a
+ConfigMap mounted at `/etc/prometheus`:
+
+```bash
+kubectl -n monitoring create configmap prometheus-config \
+  --from-file=prometheus.yml=deploy/prometheus/prometheus-k8s.yml \
+  --from-file=alerts.yml=deploy/prometheus/alerts.yml
+```
+
+One number depends on your release: `ScoutWorkersBelowExpected` compares with 3 workers, the chart's
+default `worker.replicas`; change it in `alerts.yml` if you scale differently.
+
 ## CI
 
 `ci.yml` lints and schema-validates the chart on every pull request (`make helm-lint`).

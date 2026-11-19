@@ -1,4 +1,5 @@
 """Tests for scripts/ci/search_quality.py (the search-quality gate's helper)."""
+
 import contextlib
 import importlib.util
 import io
@@ -141,7 +142,11 @@ class CommandTest(unittest.TestCase):
 
     def test_compare_without_a_baseline_says_how_to_create_one(self):
         code, _, err = self.run_main(
-            "compare", "--baseline", str(self.dir / "none.json"), "--results", self.write("r.json", BASELINE)
+            "compare",
+            "--baseline",
+            str(self.dir / "none.json"),
+            "--results",
+            self.write("r.json", BASELINE),
         )
         self.assertEqual(code, 1)
         self.assertIn("--update-baseline", err)
@@ -158,7 +163,12 @@ class CommandTest(unittest.TestCase):
         report = {
             "query_count": 64,
             "metrics": {
-                "keyword": {"ndcg_at_10": 0.828412345, "mrr_at_10": 0.8, "recall_at_10": 0.95, "recall_at_100": 1.0},
+                "keyword": {
+                    "ndcg_at_10": 0.828412345,
+                    "mrr_at_10": 0.8,
+                    "recall_at_10": 0.95,
+                    "recall_at_100": 1.0,
+                },
                 "other": {"ndcg_at_10": 1.0, "mrr_at_10": 1.0, "recall_at_10": 1.0},
             },
         }
@@ -177,24 +187,45 @@ class CommandTest(unittest.TestCase):
         )
         (eval_dir / "metadata.json").write_text('{"evaluation_id": "fixture"}')
         event = lambda path, page_id: json.dumps(  # noqa: E731
-            {"event": "page.admitted", "data": {"final_url": "http://h:1" + path, "page_id": page_id}}
+            {
+                "event": "page.admitted",
+                "data": {"final_url": "http://h:1" + path, "page_id": page_id},
+            }
         )
         crawl = self.dir / "crawl.jsonl"
         crawl.write_text("noise that is not json\n" + event("/rust/a.html", "id-a") + "\n")
         original = sq.EVAL_DIR
         sq.EVAL_DIR = eval_dir
         self.addCleanup(setattr, sq, "EVAL_DIR", original)
-        common = ["package", "--crawl-log", str(crawl), "--origin", "http://h:1", "--snapshot", "snap",
-                  "--generation", "gen", "--model-digest", "digest", "--out", str(self.dir / "pkg")]
+        common = [
+            "package",
+            "--crawl-log",
+            str(crawl),
+            "--origin",
+            "http://h:1",
+            "--snapshot",
+            "snap",
+            "--generation",
+            "gen",
+            "--model-digest",
+            "digest",
+            "--out",
+            str(self.dir / "pkg"),
+        ]
 
         code, _, err = self.run_main(*common)
         self.assertEqual(code, 1)
         self.assertIn("/rust/b.html", err)
 
-        crawl.write_text(event("/rust/a.html", "id-a") + "\n" + event("/rust/b.html", "id-b") + "\n")
+        crawl.write_text(
+            event("/rust/a.html", "id-a") + "\n" + event("/rust/b.html", "id-b") + "\n"
+        )
         code, _, _ = self.run_main(*common)
         self.assertEqual(code, 0)
-        rows = [json.loads(line) for line in (self.dir / "pkg" / "judgments.jsonl").read_text().splitlines()]
+        rows = [
+            json.loads(line)
+            for line in (self.dir / "pkg" / "judgments.jsonl").read_text().splitlines()
+        ]
         self.assertEqual([row["page_id"] for row in rows], ["id-a", "id-b"])
         metadata = json.loads((self.dir / "pkg" / "metadata.json").read_text())
         self.assertEqual(

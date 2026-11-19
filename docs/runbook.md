@@ -4,7 +4,7 @@ What each failure looks like, how to confirm it, and what to do. Every scenario 
 injected by the failure-injection suite (`scripts/chaos/run.sh`, issue #10): the counter
 changes, log events and recovery times below were observed in those runs. The dashboard panels
 are where those counters are plotted; the suite reads the metrics, not Grafana. The design they rely on (leases, fencing,
-idempotent results) is in [design.md](design.md).
+idempotent results) is in [design.md](design.md). The Prometheus alerts for them are under [Alerts](#alerts).
 
 The short version: none of the failures below needs a manual step on Compose. Leases expire
 and are reclaimed, late writes from a lost lease are fenced, and the coordinator and workers
@@ -180,6 +180,138 @@ Workers cannot reach the coordinator at all.
   crawl finishing.
 - **The run is `failed`.** The coordinator marks it so when stored captures fail verification on
   restart. It cannot resume; crawl again with a new run ID.
+
+## Alerts
+
+[`deploy/prometheus/alerts.yml`](../deploy/prometheus/alerts.yml) holds the Prometheus alert rules. The
+Compose `obs` profile loads it (they show on Prometheus's Alerts page, http://127.0.0.1:9090/alerts);
+for Kubernetes mount it next to `prometheus-k8s.yml` ([kubernetes.md](kubernetes.md#metrics)). Scout
+ships no Alertmanager: add an `alerting:` block to the Prometheus config to be notified. The rules use
+only the metrics listed in the README and the `up` series of the scrape jobs.
+
+| Alert | Severity | Fires when |
+| --- | --- | --- |
+| [ScoutCrawlStalled](#scoutcrawlstalled) | critical | tasks are pending or leased, but no result was accepted for 10 minutes |
+| [ScoutDeadLetterQueueGrowing](#scoutdeadletterqueuegrowing) | warning | the dead-letter queue grew in the last 15 minutes |
+| [ScoutWorkersBelowExpected](#scoutworkersbelowexpected) | warning | fewer than 3 workers answer their scrape for 5 minutes during a crawl |
+| [ScoutWorkerTargetDown](#scoutworkertargetdown) | warning | a worker target does not answer its scrape for 5 minutes during a crawl |
+| [ScoutCoordinatorDown](#scoutcoordinatordown) | critical | the coordinator does not answer its scrape for 2 minutes |
+| [ScoutServeDown](#scoutservedown) | critical | the search API, scraped successfully within the last day, does not answer for 2 minutes |
+| [ScoutSearchErrorRateHigh](#scoutsearcherrorratehigh) | warning | over 5% of a mode's searches fail for 5 minutes (at least 20 searches in 5 minutes) |
+| [ScoutKafkaRelayLagHigh](#scoutkafkarelaylaghigh) | warning | over 1000 outbox events wait for the Kafka relay for 10 minutes (Kafka only) |
+
+"During a crawl" means the coordinator reports pending or leased tasks, so a finished crawl is
+silent. Two numbers are specific to a deployment and marked `EDIT` in the file: the expected worker
+count (3, the default of `--scale worker=3` and `worker.replicas`) and the relay lag. Edit the file and
+restart Prometheus (`docker compose --profile obs restart prometheus`). The unit tests in
+`alerts_test.yml` run with `scripts/ci/prometheus-rules.sh` (Docker, or `PROMTOOL=<binary>`), and in
+CI; the Compose smoke test checks that Prometheus loads and evaluates every rule.
+
+### ScoutCrawlStalled
+
+Work is waiting, and nothing is finishing. The causes are the failures above, seen from the outside.
+
+- **Check.** The *Scrape targets up* panel (or `up`) for a missing coordinator or workers; then
+  the frontier query under [Where to look](#where-to-look): are tasks `leased` with expired deadlines
+  (no live worker), or only `pending`? `rate(scout_task_claims_total[5m])` at zero means workers are not
+  claiming (no workers, coordinator or Postgres unreachable); claims without completions mean tasks
+  fail or run slowly (`scout_task_failures_total`, `scout_pages_fetched_total{outcome!="success"}`).
+  `scout_origin_backoff_milliseconds` and `scout_origin_throttle_responses_total` high for the
+  Source's origin means the site is slowing the crawl down on purpose.
+- **Do.** No worker: [ScoutWorkersBelowExpected](#scoutworkersbelowexpected). The coordinator is gone:
+  [Coordinator crash](#coordinator-crash). Claims stopped but both are up:
+  [Postgres paused or unresponsive](#postgres-paused-or-unresponsive) or
+  [Network partition](#network-partition-between-workers-and-coordinator). A throttled origin: raise
+  `min_start_spacing_ms` or lower the origin's concurrency in `sources.toml` (see
+  [crawl-behaviour.md](crawl-behaviour.md)); the crawl is slow, not broken.
+
+### ScoutDeadLetterQueueGrowing
+
+Tasks used up their attempts (`max_attempts`, default 4) and became `failed`; the run completes without
+those pages. The alert resolves 15 minutes after the last one, even if the queue is not empty.
+
+- **Check.** `scout dlq list --run-id <run>` and each task's `last_error`; the *Dead-letter queue* panel is
+  `scout_frontier_tasks{status="failed"}`. A burst of lease expirations (*Lease expirations*) before it
+  means workers or Postgres were struggling; a steady trickle with HTTP errors in `last_error` means
+  the pages themselves fail.
+- **Do.** Fix the cause, then `scout dlq requeue --run-id <run> --all` ([When recovery does not
+  happen](#when-recovery-does-not-happen)). Requeueing pages that fail for their own reasons (a 404,
+  a robots-disallowed path) only dead-letters them again.
+
+### ScoutWorkersBelowExpected
+
+Fewer workers answer their scrape than the 3 written in the rule, while there is work. The crawl still
+completes with fewer workers, only slower.
+
+- **Check.** Compose: `docker compose ps -a worker`; a worker that exited non-zero is restarted ten
+  times, then left down (see [When recovery does not happen](#when-recovery-does-not-happen)).
+  Kubernetes: `kubectl -n scout get pods -l app.kubernetes.io/component=worker` (Pending: no room on
+  the nodes; CrashLoopBackOff or OOMKilled: `kubectl logs` and `describe pod`). A worker that exits
+  with `transport error` lost the coordinator ([Coordinator crash](#coordinator-crash)).
+- **Do.** Fix why they are down. If the smaller number is intended (a different `--scale`, `worker.replicas`,
+  or the autoscaler's `minReplicas`), change the `3` in `alerts.yml`.
+
+### ScoutWorkerTargetDown
+
+A worker is a scrape target but does not answer `/metrics`: starting, crash-looping or wedged. It fires per
+worker, so the labels name it (`instance`, and `pod` on Kubernetes). A worker that has disappeared from
+service discovery is not a target, and only ScoutWorkersBelowExpected sees it.
+
+- **Check.** Its logs; a pod that is Running but not Ready (`kubectl get pods`) has lost its
+  coordinator, since a worker is ready while the coordinator answers its heartbeat. Prometheus cannot
+  see readiness: Scout exports no readiness metric.
+- **Do.** As ScoutWorkersBelowExpected. A rolling update or `kubectl delete pod` shows briefly; it
+  stays within the 5 minutes of `for` unless the replacement does not start.
+
+### ScoutCoordinatorDown
+
+Nothing claims or completes tasks while the coordinator is down, and workers exit and restart as
+their calls fail.
+
+- **Check.** Compose: `docker compose ps -a coordinator`. `Exited (0)` is a finished crawl, not a
+  failure: the coordinator exits when the run completes, so this alert also fires a few minutes after
+  every Compose crawl (Kubernetes restarts it). Anything else: `docker compose logs coordinator`,
+  `kubectl -n scout logs deploy/scout-coordinator --previous`, and `SELECT status FROM
+  scout_crawl_runs` (`active` resumes, `failed` does not).
+- **Do.** [Coordinator crash](#coordinator-crash). A deleted coordinator pod stops being a scrape
+  target instead of going down, so this alert does not see it; ScoutCrawlStalled does.
+
+### ScoutServeDown
+
+`scout serve` answered scrapes within the last day and stopped; searches fail.
+
+- **Check.** `curl http://127.0.0.1:8080/v1/readyz` (Compose; `503 not_ready` means no valid active
+  Generation, not a dead process) and `docker compose logs serve`. `scout index verify --data-dir
+  <dir>` checks the Generation on disk.
+- **Do.** Restart the process (Compose restarts it unless stopped). If it starts but reports not ready,
+  rebuild or re-activate a Generation (`scout index recover`, then `scout index build` and `activate`). The
+  alert stays silent for a `serve` that was never up in the last day, which is every Compose stack until
+  the crawl and the index build finish: check `docker compose ps` for that case.
+
+### ScoutSearchErrorRateHigh
+
+Searches that ran against the active Generation returned an error: `scout_search_requests_total{outcome="error"}`.
+The label `mode` says which. Malformed requests (HTTP 400) are not counted, and neither is text with
+Tantivy syntax in it: keyword queries are plain text and cannot be a syntax error.
+
+- **Check.** `sum by (mode, outcome) (rate(scout_search_requests_total[5m]))` for the mode, then repeat
+  a search in it: `curl -X POST http://127.0.0.1:8080/v1/search -H 'content-type: application/json' -d
+  '{"query":"test","mode":"hybrid"}'`. `error.code` and `error.message` in the response say why (the
+  per-request `search.completed` events in `<data-dir>/logs` hold only the status). The usual cause is
+  a mode the Generation does not have: `hybrid` (the API's default) or `semantic` on a keyword-only
+  index. The next is the embedding model failing to load for `semantic` and `hybrid` (the cache in
+  `<data-dir>/models`, or no network on the first query).
+- **Do.** Send `"mode":"keyword"` to a keyword-only index, or build a hybrid Generation
+  (`scout index build --mode hybrid`) and activate it. For embedding errors, check the model cache.
+  Searches with no active Generation are `scout_http_requests_total{route="search",status="503"}`, and
+  a server at capacity is `{route="overloaded"}`: neither is counted here.
+
+### ScoutKafkaRelayLagHigh
+
+The relay is more than 1000 events behind the outbox for 10 minutes. Only with the `kafka` profile or
+`kafka.enabled=true`; the crawl is not affected. See [Kafka ingestion log](#kafka-ingestion-log-optional):
+"Relay lag grows". In short: Kafka is unreachable or a body file is missing, `scout_kafka_relay_failures_total` counts
+the retries, and the relay resumes by itself when the broker is back.
 
 ## Kafka ingestion log (optional)
 

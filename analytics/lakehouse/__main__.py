@@ -8,20 +8,28 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import fixture, load, quality, query, sources, tables as t
+from . import fixture, load, quality, query, sources
+from . import tables as t
 from .transform import parse_utc
 
 DEFAULT_LAKE = "data/lakehouse"
 
 
 def add_lake(parser):
-    parser.add_argument("--lake", default=DEFAULT_LAKE, help=f"lakehouse root (default {DEFAULT_LAKE})")
+    parser.add_argument(
+        "--lake", default=DEFAULT_LAKE, help=f"lakehouse root (default {DEFAULT_LAKE})"
+    )
 
 
 def add_freshness(parser):
-    parser.add_argument("--freshness-sla-hours", type=float,
-                        help="fail when an Origin's newest snapshot is older than this")
-    parser.add_argument("--as-of", type=parse_utc, help="clock for the freshness rule (RFC 3339, default now)")
+    parser.add_argument(
+        "--freshness-sla-hours",
+        type=float,
+        help="fail when an Origin's newest snapshot is older than this",
+    )
+    parser.add_argument(
+        "--as-of", type=parse_utc, help="clock for the freshness rule (RFC 3339, default now)"
+    )
 
 
 def print_report(report):
@@ -61,8 +69,10 @@ def cmd_query(args):
     elif args.file:
         statements = [(args.file, Path(args.file).read_text(encoding="utf-8"))]
     else:
-        statements = [(str(path.relative_to(query.SQL_DIR.parent.parent)), path.read_text(encoding="utf-8"))
-                      for path in query.example_files()]
+        statements = [
+            (str(path.relative_to(query.SQL_DIR.parent.parent)), path.read_text(encoding="utf-8"))
+            for path in query.example_files()
+        ]
     for label, sql in statements:
         print(f"-- {label}")
         print(query.format_table(con.sql(sql)))
@@ -83,8 +93,15 @@ def cmd_demo(args):
     print("reload (must add nothing):")
     for report in fixture.load_all(lake, data_dir, events, args.freshness_sla_hours, as_of):
         if report.inserted:
-            raise quality.QualityError([quality.CheckResult(
-                "idempotent.reload", False, f"{report.input_ref} inserted {report.inserted} rows again")])
+            raise quality.QualityError(
+                [
+                    quality.CheckResult(
+                        "idempotent.reload",
+                        False,
+                        f"{report.input_ref} inserted {report.inserted} rows again",
+                    )
+                ]
+            )
         print(f"  {report.input_ref}: no new rows")
     args.lake, args.sql, args.file = lake, None, None
     cmd_query(args)
@@ -92,17 +109,28 @@ def cmd_demo(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="python3 -m analytics.lakehouse", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="python3 -m analytics.lakehouse",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     snap = commands.add_parser("load-snapshot", help="load Corpus snapshots (idempotent)")
     add_lake(snap)
     where = snap.add_mutually_exclusive_group(required=True)
     where.add_argument("--data-dir", help="Scout data directory")
-    where.add_argument("--batch-dir", help="published snapshot batch (scripts/databricks/snapshot_batch.py export)")
-    snap.add_argument("--snapshot-id", action="append", help="with --data-dir; repeatable (default: all, oldest first)")
-    snap.add_argument("--near-duplicates", help="with --batch-dir: the crawl's near-duplicates.json")
+    where.add_argument(
+        "--batch-dir", help="published snapshot batch (scripts/databricks/snapshot_batch.py export)"
+    )
+    snap.add_argument(
+        "--snapshot-id",
+        action="append",
+        help="with --data-dir; repeatable (default: all, oldest first)",
+    )
+    snap.add_argument(
+        "--near-duplicates", help="with --batch-dir: the crawl's near-duplicates.json"
+    )
     add_freshness(snap)
     snap.set_defaults(run=cmd_load_snapshot)
 
@@ -110,7 +138,9 @@ def main(argv=None):
     add_lake(events)
     where = events.add_mutually_exclusive_group(required=True)
     where.add_argument("--jsonl", help="`scout events consume` output; - for stdin")
-    where.add_argument("--batch-dir", help="a published `scout events export` batch, or a directory of them")
+    where.add_argument(
+        "--batch-dir", help="a published `scout events export` batch, or a directory of them"
+    )
     add_freshness(events)
     events.set_defaults(run=cmd_load_events)
 
@@ -119,7 +149,9 @@ def main(argv=None):
     add_freshness(check)
     check.set_defaults(run=cmd_check)
 
-    run_query = commands.add_parser("query", help="run SQL with DuckDB (default: analytics/sql/examples)")
+    run_query = commands.add_parser(
+        "query", help="run SQL with DuckDB (default: analytics/sql/examples)"
+    )
     add_lake(run_query)
     what = run_query.add_mutually_exclusive_group()
     what.add_argument("--sql", help="one SQL statement")
@@ -128,7 +160,9 @@ def main(argv=None):
 
     demo = commands.add_parser("demo", help="fixture crawl -> tables -> checks -> example queries")
     demo.add_argument("--lake", help="keep the lake here (default: a temporary directory)")
-    demo.add_argument("--broken", choices=fixture.BREAKAGES, help="break the fixture on purpose; must exit 1")
+    demo.add_argument(
+        "--broken", choices=fixture.BREAKAGES, help="break the fixture on purpose; must exit 1"
+    )
     demo.add_argument("--freshness-sla-hours", type=float, default=24.0)
     demo.set_defaults(run=cmd_demo)
 

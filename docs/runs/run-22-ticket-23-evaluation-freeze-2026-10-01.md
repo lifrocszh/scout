@@ -1,5 +1,7 @@
 # Run 22: Ticket 23 evaluation freeze and relevance metrics
 
+> The evidence files named below are kept locally; raw run output is not committed (see `.gitignore`).
+
 Date: 2026-10-01
 
 Status: Ticket 23 complete under the project owner's LLM-assisted review
@@ -11,7 +13,7 @@ human ratings or human ground truth.
 The project owner directed that Ticket 23 use LLM review instead of
 independent human review and reported reviewing the LLM-generated reviews. The
 review record is in
-[`owner-review-record.json`](run-22-ticket-23-evaluation-freeze-2026-10-01/owner-review-record.json).
+`owner-review-record.json` (`run-22-ticket-23-evaluation-freeze-2026-10-01/owner-review-record.json`).
 No row-specific overrides were supplied, so the reviewed recommendations are
 used as final grades. Existing package identities were preserved; both frozen
 packages have their own IDs.
@@ -42,7 +44,7 @@ Both packages retain the same frozen 64-query workload, SHA-256
 | 10k `scout-10k-rebuild-page-64-v1` | `c95780b8b0b54fe663f10945094a663b4f81b85ace707e542fb9b62679a99e3d` | `6956d309e0e24b90acc90370dff1500711a3f36f69f0f0adbbac837196fb07f6` | 64 |
 
 The package materializer and exact review inputs are recorded in
-[`materialize-evaluations.py`](run-22-ticket-23-evaluation-freeze-2026-10-01/materialize-evaluations.py).
+`materialize-evaluations.py` (`run-22-ticket-23-evaluation-freeze-2026-10-01/materialize-evaluations.py`).
 It checks the active Generation pointers, Page membership in each frozen
 Corpus, query/judgment coverage, and the private Run 17 ID mapping before
 writing either package.
@@ -72,9 +74,9 @@ reviewed LLM labels only.
 ## Execution records
 
 - 2k evaluation run: `run-125ce07ba72a25c2eaab4b5efac796ffd7bd076989701975e6d5b8820e73f34b`.
-  Full report: [`two-k-evaluation-report.json`](run-22-ticket-23-evaluation-freeze-2026-10-01/two-k-evaluation-report.json), SHA-256 `328a9c3528b649bd43b640a34f6b4ab0a54c8d6cccaa152fdcc05e1e1d2066f1`.
+  Full report: `two-k-evaluation-report.json` (`run-22-ticket-23-evaluation-freeze-2026-10-01/two-k-evaluation-report.json`), SHA-256 `328a9c3528b649bd43b640a34f6b4ab0a54c8d6cccaa152fdcc05e1e1d2066f1`.
 - 10k evaluation run: `run-e77558b3e992637e00d05e589847fa8338bcdc58ae011fbc029f86db77bfbf7f`.
-  Full report: [`ten-k-evaluation-report.json`](run-22-ticket-23-evaluation-freeze-2026-10-01/ten-k-evaluation-report.json), SHA-256 `a5b1cddea20f81fdf4b9f28cb873552af80a2e1a51f5c60481811da658983d79`.
+  Full report: `ten-k-evaluation-report.json` (`run-22-ticket-23-evaluation-freeze-2026-10-01/ten-k-evaluation-report.json`), SHA-256 `a5b1cddea20f81fdf4b9f28cb873552af80a2e1a51f5c60481811da658983d79`.
 - Release CLI rebuilt with `--features openvino-gpu --locked` so the evaluator accepts a single LLM reviewer only when owner review is explicitly recorded in package provenance.
 - No tests were run.
 

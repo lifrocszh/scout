@@ -1,0 +1,17 @@
+# Ruff for the Python in this repository: the lakehouse (analytics/), the CI, benchmark and
+# Databricks scripts (scripts/), the demo and the tests. The `python` CI job runs
+#
+#   ruff check . && ruff format --check .
+#
+# with the version pinned in .github/workflows/ci.yml; locally `uvx ruff@<that version> check .`
+# (or `pip install ruff==<version>`), and `ruff format .` to fix the formatting.
+target-version = "py312"
+line-length = 100
+
+# Databricks notebooks (scripts/databricks) get these from the runtime.
+builtins = ["dbutils", "spark"]
+
+[lint]
+# Syntax errors, pyflakes (unused imports and variables, undefined names), the import and statement
+# rules of pycodestyle, and import sorting. Line length is the formatter's job, not a lint rule.
+select = ["E4", "E7", "E9", "F", "I"]

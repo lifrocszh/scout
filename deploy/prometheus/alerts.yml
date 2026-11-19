@@ -1,0 +1,152 @@
+# Prometheus alert rules for Scout. Every rule uses only metrics Scout exports (README.md,
+# "Observability") and the `up` series of the scrape jobs named in prometheus.yml and
+# prometheus-k8s.yml, so one file serves Compose and Kubernetes.
+#
+#   Compose: the `obs` profile mounts this file next to prometheus.yml (compose.yaml).
+#   Kubernetes: put it next to prometheus-k8s.yml (docs/kubernetes.md, "Metrics").
+#
+# Each alert is explained, with what to do about it, in docs/runbook.md ("Alerts"). The unit tests
+# are alerts_test.yml. CI checks both with promtool (scripts/ci/prometheus-rules.sh); locally:
+#
+#   scripts/ci/prometheus-rules.sh
+#
+# Scout ships no Alertmanager. Without one the alerts show on Prometheus's Alerts page; to get
+# notifications, add an `alerting:` block to the Prometheus config that points at yours.
+#
+# Two things need the numbers of your deployment, and are marked "EDIT" below: the expected number
+# of workers, and the relay lag that counts as high.
+#
+# Alerts about a running crawl only fire while the coordinator reports unfinished tasks
+# (pending or leased). A finished crawl, in Compose where the processes then exit, is silent.
+groups:
+  - name: scout-crawl
+    rules:
+      # Tasks are waiting or running, yet none has been accepted for ten minutes (and still not two
+      # minutes later). A healthy crawl accepts a result every few seconds, however slowly the
+      # Sources let it go; a task's lease is a minute with the default request timeout. A counter
+      # reset from a coordinator restart is neither progress nor a stall: increase() handles it.
+      - alert: ScoutCrawlStalled
+        expr: |
+          sum(increase(scout_task_completions_total{outcome="accepted"}[10m])) == 0
+          and on()
+          sum(scout_frontier_tasks{status=~"pending|leased"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The crawl has not accepted a page in 10 minutes"
+          description: "Tasks are pending or leased but no worker result was accepted for 10 minutes. See the stalled-crawl alert in the runbook."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutcrawlstalled"
+
+      # The dead-letter queue is the tasks that used up their attempts (`status="failed"`; see
+      # `scout dlq list`). Any rise within 15 minutes alerts; it resolves 15 minutes after the last
+      # one, whether or not the queue was emptied with `scout dlq requeue`.
+      - alert: ScoutDeadLetterQueueGrowing
+        expr: delta(scout_frontier_tasks{status="failed"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tasks are being dead-lettered"
+          description: "The dead-letter queue grew in the last 15 minutes: tasks used up their attempts and the run will complete without those pages."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutdeadletterqueuegrowing"
+
+      # EDIT: 3 is the default of both `docker compose up --scale worker=3` and the chart's
+      # `worker.replicas`. Use your worker count, or the autoscaler's `minReplicas`.
+      # `or vector(0)` makes the alert fire when no worker is scraped at all.
+      - alert: ScoutWorkersBelowExpected
+        expr: |
+          (count(up{job="scout-worker"} == 1) or vector(0)) < 3
+          and on()
+          sum(scout_frontier_tasks{status=~"pending|leased"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fewer crawl workers are up than expected"
+          description: "Fewer than 3 workers have answered their scrape for 5 minutes while the crawl still has work. Change the 3 in alerts.yml if you run another number of workers."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutworkersbelowexpected"
+
+      # A worker that is scraped but not answering: it is starting, crash-looping or wedged. A worker
+      # that has vanished from service discovery (a deleted pod, a stopped container) is not a
+      # target any more and only shows in ScoutWorkersBelowExpected.
+      - alert: ScoutWorkerTargetDown
+        expr: |
+          up{job="scout-worker"} == 0
+          and on()
+          sum(scout_frontier_tasks{status=~"pending|leased"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A crawl worker has not answered its scrape for 5 minutes"
+          description: "A worker is a scrape target but does not answer /metrics: it is not ready or is restarting."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutworkertargetdown"
+
+      # Under Compose the coordinator exits 0 when the crawl completes, which looks the same:
+      # `docker compose ps -a coordinator` tells them apart. A deleted coordinator pod stops being
+      # a target, so its `up` series disappears instead of reaching 0.
+      - alert: ScoutCoordinatorDown
+        expr: up{job="scout-coordinator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The coordinator is down"
+          description: "The coordinator has not answered its scrape for 2 minutes. Workers cannot claim or report tasks until it is back."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutcoordinatordown"
+
+  - name: scout-serve
+    rules:
+      # Only after the search API has been scraped successfully within the last day: under Compose
+      # `serve` starts after the crawl and the index build, and until then its target is down
+      # (never up, so no alert). Down for more than a day, the alert resolves.
+      - alert: ScoutServeDown
+        expr: |
+          up{job="scout-serve"} == 0
+          and
+          max_over_time(up{job="scout-serve"}[1d]) == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The search API is down"
+          description: "scout serve answered scrapes within the last day and has not answered for 2 minutes. Searches fail."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutservedown"
+
+      # Failed searches over all searches, per mode. `outcome="error"` counts searches that ran
+      # against the active Generation and returned an error: a mode the Generation lacks (hybrid on
+      # a keyword-only index), a failed index read. A malformed request (HTTP 400) and a server
+      # with no active Generation fail before any search and are not counted; the latter shows as
+      # `scout_http_requests_total{route="search",status="503"}`.
+      # Needs 20 searches in 5 minutes, so one failed request on a quiet API does not alert.
+      - alert: ScoutSearchErrorRateHigh
+        expr: |
+          (
+            sum by (mode) (rate(scout_search_requests_total{outcome="error"}[5m]))
+            / sum by (mode) (rate(scout_search_requests_total[5m]))
+          ) > 0.05
+          and
+          sum by (mode) (increase(scout_search_requests_total[5m])) >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of {{ $labels.mode }} searches fail"
+          description: "Over 5% of searches in {{ $labels.mode }} mode returned an error for 5 minutes."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutsearcherrorratehigh"
+
+  # Only with the Compose `kafka` profile or the chart's `kafka.enabled=true`. Without them the
+  # relay exports nothing, so the alert has no series and never fires.
+  - name: scout-kafka
+    rules:
+      # EDIT: 1000 pending events is minutes of crawling at the default rates; a relay that keeps
+      # up stays near zero. Raise it if your crawl deliberately outruns the relay.
+      - alert: ScoutKafkaRelayLagHigh
+        expr: scout_kafka_relay_pending_events > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Kafka relay is more than 1000 events behind"
+          description: "More than 1000 outbox events have waited for the Kafka relay for 10 minutes. The crawl is not affected; the replica is."
+          runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutkafkarelaylaghigh"

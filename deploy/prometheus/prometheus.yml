@@ -7,6 +7,10 @@ global:
   scrape_interval: 2s
   evaluation_interval: 15s
 
+# Alert rules, mounted next to this file by compose.yaml. See docs/runbook.md, "Alerts".
+rule_files:
+  - alerts.yml
+
 scrape_configs:
   # One coordinator. It exits when the crawl completes, so its target goes down
   # afterwards; the series it exposed stay queryable.

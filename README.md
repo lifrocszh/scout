@@ -156,6 +156,27 @@ Modes are `keyword`, `semantic`, and `hybrid`. Results group matching passages b
 the page URL, title, heading, and snippet. Other endpoints: `GET /v1/healthz`, `GET /v1/readyz`,
 and `GET /v1/generation`.
 
+### Keyword queries
+
+The query is plain text. `keyword` search, and the keyword half of `hybrid`, match its words
+against the page title, heading and body, rank by BM25 with the Generation's field boosts, and
+rank a page higher the more of the words it contains. Nothing in the text is an operator, so no
+query is rejected as a syntax error: `std::fs`, `--verbose`, `foo:bar`, `Vec::retain` and an
+unbalanced `"` all search for their words.
+
+- A word with punctuation inside it (`std::fs`, `rust-analyzer`) matches its parts as a phrase:
+  adjacent and in order.
+- Double quotes mark a phrase: `"consumer group" rebalance`. An unterminated quote runs to the end
+  of the query. This is the only syntax.
+- `AND`, `OR`, `NOT`, `IN`, `+word`, `-word`, `field:word`, `*`, `~`, ranges and regular
+  expressions are ordinary text. `rust AND python` matches pages with `rust` or `python` (or the
+  word `and`), `-word` does not exclude, and `title:rust` does not filter by field. Use the
+  `source` request field to filter by Source.
+- Text without any word (`---`, `::`) matches nothing in keyword search: an empty `results` list,
+  status 200.
+
+The `semantic` half of `hybrid` embeds the text as written.
+
 ## Search quality
 
 CI fails a PR that makes ranking worse. The `search-quality` job crawls a 64-page fixture corpus
@@ -306,6 +327,11 @@ adaptive backoff, near-duplicate rate per origin), DB pool wait, search latency 
 it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start. Prometheus
 (Apache-2.0) and Grafana OSS (AGPL-3.0) run as unmodified upstream images, pinned in `compose.yaml`.
 
+Prometheus also loads the alert rules in `deploy/prometheus/alerts.yml` (stalled crawl, dead-letter
+queue growing, workers missing, coordinator or search API down, search errors, Kafka relay lag). They
+show on its Alerts page, http://127.0.0.1:9090/alerts; Scout ships no Alertmanager. What each alert
+means and what to do about it is in [docs/runbook.md](docs/runbook.md#alerts).
+
 | Metric | Type | Process | Meaning |
 | --- | --- | --- | --- |
 | `scout_pages_fetched_total{outcome}` | counter | worker | Page fetches: `success`, `http_error`, `transport_error`, `body_error` |
@@ -394,6 +420,11 @@ and the [scaling report](docs/runs/reports/kubernetes-scaling-2026-11-18.md#repr
 ## Development
 
 Run the test suite with `cargo test --offline`.
+
+The Python (the lakehouse, `scripts/`, the demo and the tests) is linted and formatted with
+[Ruff](https://docs.astral.sh/ruff/), configured in `ruff.toml` and pinned in the `python` CI job:
+`pip install ruff==0.16.9`, then `ruff check .` and `ruff format --check .` (`ruff format .` fixes the
+formatting). `python3 scripts/ci/check_md_links.py` checks the relative links in the Markdown files.
 
 The HTTP server has no TLS or authentication. Bind it to a trusted interface or put it behind a
 trusted proxy.

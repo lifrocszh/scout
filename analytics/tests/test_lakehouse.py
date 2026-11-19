@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from analytics.lakehouse import __main__ as cli  # noqa: E402
-from analytics.lakehouse import fixture, load, quality, query, sources, tables as t, transform  # noqa: E402
+from analytics.lakehouse import fixture, load, quality, query, sources, transform  # noqa: E402
+from analytics.lakehouse import tables as t  # noqa: E402
 
 
 def counts(lake):
@@ -48,33 +49,69 @@ def write_event_batch(directory, run_id, payloads, consumer_id="lakehouse-test",
     entries = []
     for payload in payloads:
         event = json.loads(payload)
-        entries.append(("crawl_event", event["data"]["event_id"], event["event_type"],
-                        event["data"].get("source_id"), payload))
+        entries.append(
+            (
+                "crawl_event",
+                event["data"]["event_id"],
+                event["event_type"],
+                event["data"].get("source_id"),
+                payload,
+            )
+        )
     for number in range(quarantine):
-        entries.append(("quarantine", f"broken-{number}", "capture_committed", None,
-                        json.dumps({"reason": "unsupported or invalid crawl event payload"})))
+        entries.append(
+            (
+                "quarantine",
+                f"broken-{number}",
+                "capture_committed",
+                None,
+                json.dumps({"reason": "unsupported or invalid crawl event payload"}),
+            )
+        )
     record_ids = [entry[1] for entry in entries]
-    identity = "\0".join((schema, run_id, consumer_id, str(max_records), str(max_bytes), "\0".join(record_ids)))
+    identity = "\0".join(
+        (schema, run_id, consumer_id, str(max_records), str(max_bytes), "\0".join(record_ids))
+    )
     batch_id = "batch-" + hashlib.sha256(identity.encode()).hexdigest()
     lines = []
     for record_type, record_id, event_type, source_id, record_json in entries:
-        lines.append(json.dumps({
-            "schema_version": schema, "batch_id": batch_id, "crawl_run_id": run_id,
-            "record_type": record_type, "record_id": record_id, "source_id": source_id,
-            "event_type": event_type, "event_schema_version": 1,
-            "event_created_at_utc": "2026-11-18T00:00:00Z",
-            "payload_sha256": hashlib.sha256(record_json.encode()).hexdigest()
-            if record_type == "crawl_event" else None,
-            "record_json": record_json,
-        }, separators=(",", ":")))
+        lines.append(
+            json.dumps(
+                {
+                    "schema_version": schema,
+                    "batch_id": batch_id,
+                    "crawl_run_id": run_id,
+                    "record_type": record_type,
+                    "record_id": record_id,
+                    "source_id": source_id,
+                    "event_type": event_type,
+                    "event_schema_version": 1,
+                    "event_created_at_utc": "2026-11-18T00:00:00Z",
+                    "payload_sha256": hashlib.sha256(record_json.encode()).hexdigest()
+                    if record_type == "crawl_event"
+                    else None,
+                    "record_json": record_json,
+                },
+                separators=(",", ":"),
+            )
+        )
     records = ("\n".join(lines) + "\n").encode()
-    manifest = json.dumps({
-        "schema_version": schema, "batch_id": batch_id, "crawl_run_id": run_id,
-        "consumer_id": consumer_id, "records_file": "records.jsonl",
-        "records_sha256": hashlib.sha256(records).hexdigest(), "records_bytes": len(records),
-        "record_count": len(entries), "quarantine_count": quarantine,
-        "max_records": max_records, "max_batch_bytes": max_bytes,
-    }, indent=2).encode()
+    manifest = json.dumps(
+        {
+            "schema_version": schema,
+            "batch_id": batch_id,
+            "crawl_run_id": run_id,
+            "consumer_id": consumer_id,
+            "records_file": "records.jsonl",
+            "records_sha256": hashlib.sha256(records).hexdigest(),
+            "records_bytes": len(records),
+            "record_count": len(entries),
+            "quarantine_count": quarantine,
+            "max_records": max_records,
+            "max_batch_bytes": max_bytes,
+        },
+        indent=2,
+    ).encode()
     batch = Path(directory) / run_id / batch_id
     batch.mkdir(parents=True)
     (batch / "records.jsonl").write_bytes(records)
@@ -100,7 +137,9 @@ class FixtureQueries(unittest.TestCase):
         cls.work = tempfile.TemporaryDirectory(prefix="scout-lakehouse-test-")
         cls.lake = str(Path(cls.work.name) / "lake")
         cls.snapshots = fixture.snapshot_ids()
-        cls.reports = fixture.load_all(cls.lake, freshness_sla_hours=24, as_of=fixture.fixture_as_of())
+        cls.reports = fixture.load_all(
+            cls.lake, freshness_sla_hours=24, as_of=fixture.fixture_as_of()
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -112,31 +151,58 @@ class FixtureQueries(unittest.TestCase):
             self.assertTrue(all(check.passed for check in report.checks), report.lines())
 
     def test_silver_rows_match_the_snapshot_manifests(self):
-        found = rows(self.lake, "SELECT snapshot_id, page_count, passage_count, alias_count FROM silver_snapshots")
+        found = rows(
+            self.lake,
+            "SELECT snapshot_id, page_count, passage_count, alias_count FROM silver_snapshots",
+        )
         self.assertEqual({row["snapshot_id"] for row in found}, set(self.snapshots))
         for row in found:
-            manifest = json.loads((fixture.DATA_DIR / "corpora" / row["snapshot_id"]
-                                   / "snapshot-manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual((row["page_count"], row["passage_count"], row["alias_count"]),
-                             (manifest["page_count"], manifest["passage_count"], manifest["alias_count"]))
+            manifest = json.loads(
+                (
+                    fixture.DATA_DIR / "corpora" / row["snapshot_id"] / "snapshot-manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                (row["page_count"], row["passage_count"], row["alias_count"]),
+                (manifest["page_count"], manifest["passage_count"], manifest["alias_count"]),
+            )
 
     def test_change_rate_between_the_two_crawls(self):
-        found = {row["source_id"]: row for row in rows(
-            self.lake, "SELECT * FROM gold_snapshot_changes WHERE previous_snapshot_id IS NOT NULL")}
+        found = {
+            row["source_id"]: row
+            for row in rows(
+                self.lake,
+                "SELECT * FROM gold_snapshot_changes WHERE previous_snapshot_id IS NOT NULL",
+            )
+        }
         docs, reference = found["docs"], found["reference"]
         # docs: upgrade removed, configure-legacy added, index and configure edited, install unchanged.
-        self.assertEqual((docs["added"], docs["removed"], docs["changed"], docs["unchanged"]), (1, 1, 2, 1))
+        self.assertEqual(
+            (docs["added"], docs["removed"], docs["changed"], docs["unchanged"]), (1, 1, 2, 1)
+        )
         self.assertAlmostEqual(docs["change_rate"], 2 / 3)
         self.assertAlmostEqual(docs["churn_rate"], 4 / 5)
         # reference: cli.html became an alias of the identical cli-mirror.html; index edited.
-        self.assertEqual((reference["added"], reference["removed"], reference["changed"],
-                          reference["unchanged"]), (1, 1, 1, 1))
+        self.assertEqual(
+            (
+                reference["added"],
+                reference["removed"],
+                reference["changed"],
+                reference["unchanged"],
+            ),
+            (1, 1, 1, 1),
+        )
         self.assertEqual(docs["previous_snapshot_id"], self.snapshots[0])
         self.assertEqual(docs["snapshot_id"], self.snapshots[1])
 
     def test_duplicate_rates_per_origin(self):
-        found = {row["origin"]: row for row in rows(
-            self.lake, f"SELECT * FROM gold_duplicate_rates WHERE snapshot_id = '{self.snapshots[1]}'")}
+        found = {
+            row["origin"]: row
+            for row in rows(
+                self.lake,
+                f"SELECT * FROM gold_duplicate_rates WHERE snapshot_id = '{self.snapshots[1]}'",
+            )
+        }
         docs, reference = found["http://127.0.0.1:18111"], found["http://127.0.0.1:18112"]
         self.assertEqual((docs["pages"], docs["near_duplicate_pages"]), (4, 1))
         self.assertAlmostEqual(docs["near_duplicate_rate"], 0.25)
@@ -145,7 +211,9 @@ class FixtureQueries(unittest.TestCase):
 
     def test_freshness_by_origin(self):
         found = rows(self.lake, "SELECT * FROM gold_origin_freshness ORDER BY origin")
-        self.assertEqual([row["origin"] for row in found], ["http://127.0.0.1:18111", "http://127.0.0.1:18112"])
+        self.assertEqual(
+            [row["origin"] for row in found], ["http://127.0.0.1:18111", "http://127.0.0.1:18112"]
+        )
         for row in found:
             self.assertEqual(row["latest_snapshot_id"], self.snapshots[1])
             self.assertEqual(row["snapshot_count"], 2)
@@ -155,7 +223,9 @@ class FixtureQueries(unittest.TestCase):
         con = query.connect(self.lake)
         for path in query.example_files():
             with self.subTest(path.name):
-                self.assertGreater(con.sql(path.read_text(encoding="utf-8")).to_arrow_table().num_rows, 0)
+                self.assertGreater(
+                    con.sql(path.read_text(encoding="utf-8")).to_arrow_table().num_rows, 0
+                )
 
     def test_lineage_names_run_and_snapshot_of_every_version(self):
         lineage = rows(self.lake, "SELECT * FROM lineage_loads")
@@ -168,8 +238,11 @@ class FixtureQueries(unittest.TestCase):
         snapshot_rows = [row for row in lineage if row["table_name"] == "silver_snapshots"]
         self.assertEqual({row["snapshot_id"] for row in snapshot_rows}, set(self.snapshots))
         for row in snapshot_rows:
-            run_id = json.loads((fixture.DATA_DIR / "corpora" / row["snapshot_id"]
-                                 / "snapshot-manifest.json").read_text(encoding="utf-8"))["run_id"]
+            run_id = json.loads(
+                (
+                    fixture.DATA_DIR / "corpora" / row["snapshot_id"] / "snapshot-manifest.json"
+                ).read_text(encoding="utf-8")
+            )["run_id"]
             self.assertEqual(row["run_id"], run_id)
             self.assertTrue(row["batch_id"].startswith("batch-"))
         gold = [row for row in lineage if row["table_name"].startswith("gold_")]
@@ -203,12 +276,17 @@ class Idempotency(LakehouseTest):
         snapshot_id = fixture.snapshot_ids()[0]
         exports = Path(self.work.name) / "exports"
         batch = sources.snapshot_batch.export_snapshot(fixture.DATA_DIR, snapshot_id, exports)
-        run_id = json.loads((fixture.DATA_DIR / "corpora" / snapshot_id / "snapshot-manifest.json")
-                            .read_text(encoding="utf-8"))["run_id"]
+        run_id = json.loads(
+            (fixture.DATA_DIR / "corpora" / snapshot_id / "snapshot-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["run_id"]
         report_path = fixture.DATA_DIR / "crawls" / run_id / "near-duplicates.json"
         first = load.load_snapshot(self.lake, sources.snapshot_from_batch(batch, report_path))
         self.assertGreater(first.inserted, 0)
-        second = load.load_snapshot(self.lake, sources.snapshot_from_data_dir(fixture.DATA_DIR, snapshot_id))
+        second = load.load_snapshot(
+            self.lake, sources.snapshot_from_data_dir(fixture.DATA_DIR, snapshot_id)
+        )
         self.assertEqual(second.inserted, 0)
 
     def test_event_batches_and_jsonl_are_the_same_rows(self):
@@ -220,7 +298,9 @@ class Idempotency(LakehouseTest):
             write_event_batch(batches, run_id, payloads, quarantine=1)
         report = load.load_events(self.lake, sources.EventBatchSource(batches), str(batches))
         total = sum(len(payloads) for payloads in by_run.values())
-        self.assertEqual(report.inserted, 2 * total)  # Bronze and Silver; the quarantine row is skipped
+        self.assertEqual(
+            report.inserted, 2 * total
+        )  # Bronze and Silver; the quarantine row is skipped
         self.assertEqual(t.read(self.lake, t.SILVER_CRAWL_EVENTS).num_rows, total)
         transports = set(t.read(self.lake, t.BRONZE_CRAWL_EVENTS).column("transport").to_pylist())
         self.assertEqual(transports, {"event_batch"})
@@ -233,12 +313,19 @@ class Idempotency(LakehouseTest):
         # run reproduced the fixture's v2 snapshot ID, so its published event must match it.
         fixture.load_all(self.lake)
         outbox = fixture.FIXTURES / "outbox"
-        first = load.load_events(self.lake, sources.EventBatchSource(outbox / "crawl-event-batches"), "batches")
+        first = load.load_events(
+            self.lake, sources.EventBatchSource(outbox / "crawl-event-batches"), "batches"
+        )
         self.assertEqual(first.written["silver_crawl_events"][1], 10)
-        again = load.load_events(self.lake, sources.JsonlEventSource(outbox / "events.jsonl"), "jsonl")
+        again = load.load_events(
+            self.lake, sources.JsonlEventSource(outbox / "events.jsonl"), "jsonl"
+        )
         self.assertEqual(again.inserted, 0)
-        published = rows(self.lake, "SELECT crawl_run_id, snapshot_id FROM silver_crawl_events "
-                                    "WHERE event_type = 'corpus_snapshot_published'")
+        published = rows(
+            self.lake,
+            "SELECT crawl_run_id, snapshot_id FROM silver_crawl_events "
+            "WHERE event_type = 'corpus_snapshot_published'",
+        )
         self.assertEqual(len({row["crawl_run_id"] for row in published}), 3)
         self.assertEqual({row["snapshot_id"] for row in published}, set(fixture.snapshot_ids()))
 
@@ -248,18 +335,26 @@ class Idempotency(LakehouseTest):
         for spec in t.GOLD_TABLES:
             shutil.rmtree(spec.path(self.lake))
         reports = fixture.load_all(self.lake)
-        self.assertEqual([report.inserted for report in reports if "silver_pages" in report.written], [])
+        self.assertEqual(
+            [report.inserted for report in reports if "silver_pages" in report.written], []
+        )
         self.assertIn("gold_snapshot_changes", reports[0].written)
-        self.assertEqual(t.read(self.lake, t.GOLD_SNAPSHOT_CHANGES).sort_by("source_id").to_pylist(), expected)
+        self.assertEqual(
+            t.read(self.lake, t.GOLD_SNAPSHOT_CHANGES).sort_by("source_id").to_pylist(), expected
+        )
 
     def test_lineage_is_rebuilt_from_delta_commit_metadata(self):
         fixture.load_all(self.lake)
-        expected = sorted((row["table_name"], row["table_version"], row["snapshot_id"] or "")
-                          for row in t.read(self.lake, t.LINEAGE_LOADS).to_pylist())
+        expected = sorted(
+            (row["table_name"], row["table_version"], row["snapshot_id"] or "")
+            for row in t.read(self.lake, t.LINEAGE_LOADS).to_pylist()
+        )
         shutil.rmtree(t.LINEAGE_LOADS.path(self.lake))
         load.sync_lineage(self.lake)
-        found = sorted((row["table_name"], row["table_version"], row["snapshot_id"] or "")
-                       for row in t.read(self.lake, t.LINEAGE_LOADS).to_pylist())
+        found = sorted(
+            (row["table_name"], row["table_version"], row["snapshot_id"] or "")
+            for row in t.read(self.lake, t.LINEAGE_LOADS).to_pylist()
+        )
         self.assertEqual(found, expected)
 
 
@@ -276,7 +371,10 @@ class BrokenInputs(LakehouseTest):
         loaded = set(t.read(self.lake, t.SILVER_SNAPSHOTS).column("snapshot_id").to_pylist())
         self.assertEqual(loaded, {fixture.snapshot_ids()[0]})
         broken_id = fixture.snapshot_ids()[1]
-        self.assertNotIn(broken_id, set(t.read(self.lake, t.BRONZE_SNAPSHOT_RECORDS).column("snapshot_id").to_pylist()))
+        self.assertNotIn(
+            broken_id,
+            set(t.read(self.lake, t.BRONZE_SNAPSHOT_RECORDS).column("snapshot_id").to_pylist()),
+        )
 
     def test_conflicting_event_redelivery_fails(self):
         data_dir, events, as_of = self.broken("event-conflict")
@@ -324,7 +422,9 @@ class BrokenInputs(LakehouseTest):
         fixture.load_all(self.lake)
         lines = fixture.EVENTS.read_text(encoding="utf-8").splitlines()
         events = [json.loads(line) for line in lines]
-        published = next(event for event in events if event["event_type"] == "corpus_snapshot_published")
+        published = next(
+            event for event in events if event["event_type"] == "corpus_snapshot_published"
+        )
         published["data"]["page_count"] += 1
         published["data"]["event_id"] = "event-lying-about-counts"
         lying = Path(self.work.name) / "lying.jsonl"
@@ -336,7 +436,9 @@ class BrokenInputs(LakehouseTest):
     def test_a_snapshot_id_cannot_change_its_manifest(self):
         snapshot = sources.snapshot_from_data_dir(fixture.DATA_DIR, fixture.snapshot_ids()[0])
         load.load_snapshot(self.lake, snapshot)
-        altered = replace(snapshot, manifest=dict(snapshot.manifest, source_snapshot_manifest_sha256="f" * 64))
+        altered = replace(
+            snapshot, manifest=dict(snapshot.manifest, source_snapshot_manifest_sha256="f" * 64)
+        )
         with self.assertRaises(quality.QualityError) as caught:
             load.load_snapshot(self.lake, altered)
         self.assertIn("immutable.snapshot", failed_rules(caught.exception))
@@ -393,7 +495,10 @@ class InputRules(unittest.TestCase):
 
     def test_near_duplicate_report_of_another_snapshot(self):
         rows_, _ = self.staged()
-        other = replace(self.snapshot, near_duplicates=dict(self.snapshot.near_duplicates, snapshot_id="snapshot-x"))
+        other = replace(
+            self.snapshot,
+            near_duplicates=dict(self.snapshot.near_duplicates, snapshot_id="snapshot-x"),
+        )
         self.assertFalse(quality.rule_near_duplicate_lineage(other, rows_).passed)
 
     def test_origin_matches_rust_origin_key(self):
@@ -425,20 +530,35 @@ class Cli(unittest.TestCase):
     def test_load_check_and_query_commands(self):
         with tempfile.TemporaryDirectory() as work:
             lake = str(Path(work) / "lake")
-            self.assertEqual(self.run_cli("load-snapshot", "--lake", lake, "--data-dir", str(fixture.DATA_DIR))[0], 0)
-            self.assertEqual(self.run_cli("load-events", "--lake", lake, "--jsonl", str(fixture.EVENTS))[0], 0)
+            self.assertEqual(
+                self.run_cli("load-snapshot", "--lake", lake, "--data-dir", str(fixture.DATA_DIR))[
+                    0
+                ],
+                0,
+            )
+            self.assertEqual(
+                self.run_cli("load-events", "--lake", lake, "--jsonl", str(fixture.EVENTS))[0], 0
+            )
             as_of = (fixture.fixture_as_of()).isoformat()
-            code, out, _ = self.run_cli("check", "--lake", lake, "--freshness-sla-hours", "24", "--as-of", as_of)
+            code, out, _ = self.run_cli(
+                "check", "--lake", lake, "--freshness-sla-hours", "24", "--as-of", as_of
+            )
             self.assertEqual(code, 0)
             self.assertIn("PASS freshness.sla_24h", out)
             stale = (fixture.fixture_as_of() + timedelta(days=3)).isoformat()
-            code, _, _ = self.run_cli("check", "--lake", lake, "--freshness-sla-hours", "24", "--as-of", stale)
+            code, _, _ = self.run_cli(
+                "check", "--lake", lake, "--freshness-sla-hours", "24", "--as-of", stale
+            )
             self.assertEqual(code, 1)
-            code, out, _ = self.run_cli("query", "--lake", lake, "--sql", "SELECT COUNT(*) AS pages FROM silver_pages")
+            code, out, _ = self.run_cli(
+                "query", "--lake", lake, "--sql", "SELECT COUNT(*) AS pages FROM silver_pages"
+            )
             self.assertEqual(code, 0)
             self.assertIn("14", out)
             missing = str(Path(work) / "missing")
-            self.assertEqual(self.run_cli("load-snapshot", "--lake", lake, "--data-dir", missing)[0], 2)
+            self.assertEqual(
+                self.run_cli("load-snapshot", "--lake", lake, "--data-dir", missing)[0], 2
+            )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 
 from pyspark.sql import functions as F
 
-
 RUN_ID = re.compile(r"^run-[a-f0-9]{64}$")
 SNAPSHOT_ID = re.compile(r"^snapshot-[a-f0-9]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -45,10 +44,19 @@ SNAPSHOT_GOLD_VIEWS = (
 # one version per logical event.
 # Preserve event identity, source time, payload hash, and original JSON.
 EVENT_TABLES = (
-    ("scout_crawl_event_records", (
-        "batch_id", "line_number", "disposition", "disposition_reason",
-        "manifest_sha256", "records_sha256", "raw_line", "ingested_at_utc",
-    )),
+    (
+        "scout_crawl_event_records",
+        (
+            "batch_id",
+            "line_number",
+            "disposition",
+            "disposition_reason",
+            "manifest_sha256",
+            "records_sha256",
+            "raw_line",
+            "ingested_at_utc",
+        ),
+    ),
     ("scout_crawl_event_identity", ("batch_id", "first_seen_at_utc")),
     ("scout_provisional_capture_observations", ("batch_id",)),
     ("scout_reconciliation_complete_events", ("batch_id", "disposition")),
@@ -62,9 +70,13 @@ DELIVERY_PROJECTIONS = {
 # These ages/latencies use query or ingestion time. Keep source event times,
 # counts, statuses, and provenance.
 EVENT_GOLD_VIEWS = (
-    ("gold_provisional_crawl_run_status", (
-        "latest_event_age_seconds", "max_event_to_ingestion_latency_seconds",
-    )),
+    (
+        "gold_provisional_crawl_run_status",
+        (
+            "latest_event_age_seconds",
+            "max_event_to_ingestion_latency_seconds",
+        ),
+    ),
     ("gold_provisional_source_capture_summary", ("latest_capture_age_seconds",)),
 )
 
@@ -107,14 +119,20 @@ for label, value in (
     ("replay_schema", replay_schema),
 ):
     require(IDENTIFIER.fullmatch(value) is not None, f"invalid {label}")
-require((baseline_catalog, baseline_schema) != (replay_catalog, replay_schema),
-        "baseline and replay must use separate schemas")
+require(
+    (baseline_catalog, baseline_schema) != (replay_catalog, replay_schema),
+    "baseline and replay must use separate schemas",
+)
 require(RUN_ID.fullmatch(crawl_run_id) is not None, "invalid crawl_run_id")
 require(SNAPSHOT_ID.fullmatch(snapshot_id) is not None, "invalid snapshot_id")
 if report_uri:
-    require(report_uri.startswith("dbfs:/Volumes/") and report_uri.endswith(".json")
-            and ".." not in report_uri and "\n" not in report_uri,
-            "report_uri must be a new .json file in a Unity Catalog Volume")
+    require(
+        report_uri.startswith("dbfs:/Volumes/")
+        and report_uri.endswith(".json")
+        and ".." not in report_uri
+        and "\n" not in report_uri,
+        "report_uri must be a new .json file in a Unity Catalog Volume",
+    )
 
 
 def qualified(catalog, schema, name):
@@ -142,67 +160,108 @@ def values(frame, column):
 def check_batch_gates(catalog, schema):
     event_batches = spark.table(qualified(catalog, schema, "scout_crawl_event_batches"))
     event_runs = values(event_batches, "crawl_run_id")
-    require(event_runs == [crawl_run_id],
-            f"{catalog}.{schema} must contain only crawl run {crawl_run_id}; found {event_runs}")
-    event_summary = event_batches.agg(
-        F.count(F.lit(1)).alias("batch_count"),
-        F.sum(F.when(F.col("status") != "complete", 1).otherwise(0)).alias("incomplete_count"),
-        F.sum(F.when(F.col("expected_record_count") != F.col("ingested_record_count"), 1).otherwise(0)).alias("count_mismatch"),
-        F.sum(F.coalesce(F.col("quarantine_count"), F.lit(0))).alias("quarantine_count"),
-        F.sum(F.coalesce(F.col("conflict_count"), F.lit(0))).alias("conflict_count"),
-        F.sum(F.coalesce(F.col("expected_record_count"), F.lit(0))).alias("expected_record_count"),
-        F.sum(F.coalesce(F.col("ingested_record_count"), F.lit(0))).alias("ingested_record_count"),
-    ).first().asDict()
+    require(
+        event_runs == [crawl_run_id],
+        f"{catalog}.{schema} must contain only crawl run {crawl_run_id}; found {event_runs}",
+    )
+    event_summary = (
+        event_batches.agg(
+            F.count(F.lit(1)).alias("batch_count"),
+            F.sum(F.when(F.col("status") != "complete", 1).otherwise(0)).alias("incomplete_count"),
+            F.sum(
+                F.when(
+                    F.col("expected_record_count") != F.col("ingested_record_count"), 1
+                ).otherwise(0)
+            ).alias("count_mismatch"),
+            F.sum(F.coalesce(F.col("quarantine_count"), F.lit(0))).alias("quarantine_count"),
+            F.sum(F.coalesce(F.col("conflict_count"), F.lit(0))).alias("conflict_count"),
+            F.sum(F.coalesce(F.col("expected_record_count"), F.lit(0))).alias(
+                "expected_record_count"
+            ),
+            F.sum(F.coalesce(F.col("ingested_record_count"), F.lit(0))).alias(
+                "ingested_record_count"
+            ),
+        )
+        .first()
+        .asDict()
+    )
     event_summary = {key: int(value or 0) for key, value in event_summary.items()}
     require(event_summary["batch_count"] > 0, f"{catalog}.{schema} has no event batches")
-    require(event_summary["incomplete_count"] == 0, f"{catalog}.{schema} has incomplete event batches")
+    require(
+        event_summary["incomplete_count"] == 0, f"{catalog}.{schema} has incomplete event batches"
+    )
     require(event_summary["count_mismatch"] == 0, f"{catalog}.{schema} has event count mismatches")
-    require(event_summary["quarantine_count"] == 0, f"{catalog}.{schema} has quarantined event rows")
-    require(event_summary["conflict_count"] == 0, f"{catalog}.{schema} has event identity conflicts")
+    require(
+        event_summary["quarantine_count"] == 0, f"{catalog}.{schema} has quarantined event rows"
+    )
+    require(
+        event_summary["conflict_count"] == 0, f"{catalog}.{schema} has event identity conflicts"
+    )
 
     snapshot_batches = spark.table(qualified(catalog, schema, "scout_ingestion_batches"))
     snapshot_ids = values(snapshot_batches, "snapshot_id")
-    require(snapshot_ids == [snapshot_id],
-            f"{catalog}.{schema} must contain only snapshot {snapshot_id}; found {snapshot_ids}")
-    snapshot_summary = snapshot_batches.agg(
-        F.count(F.lit(1)).alias("batch_count"),
-        F.sum(F.when(F.col("status") != "complete", 1).otherwise(0)).alias("incomplete_count"),
-        F.countDistinct("batch_id").alias("distinct_batch_count"),
-        F.countDistinct("manifest_sha256").alias("manifest_variants"),
-        F.countDistinct("records_sha256").alias("records_variants"),
-        F.countDistinct("source_snapshot_manifest_sha256").alias("source_manifest_variants"),
-        F.countDistinct("crawl_manifest_sha256").alias("crawl_manifest_variants"),
-    ).first().asDict()
+    require(
+        snapshot_ids == [snapshot_id],
+        f"{catalog}.{schema} must contain only snapshot {snapshot_id}; found {snapshot_ids}",
+    )
+    snapshot_summary = (
+        snapshot_batches.agg(
+            F.count(F.lit(1)).alias("batch_count"),
+            F.sum(F.when(F.col("status") != "complete", 1).otherwise(0)).alias("incomplete_count"),
+            F.countDistinct("batch_id").alias("distinct_batch_count"),
+            F.countDistinct("manifest_sha256").alias("manifest_variants"),
+            F.countDistinct("records_sha256").alias("records_variants"),
+            F.countDistinct("source_snapshot_manifest_sha256").alias("source_manifest_variants"),
+            F.countDistinct("crawl_manifest_sha256").alias("crawl_manifest_variants"),
+        )
+        .first()
+        .asDict()
+    )
     snapshot_summary = {key: int(value or 0) for key, value in snapshot_summary.items()}
     require(snapshot_summary["batch_count"] > 0, f"{catalog}.{schema} has no snapshot batch")
-    require(snapshot_summary["incomplete_count"] == 0, f"{catalog}.{schema} has incomplete snapshot batches")
-    require(snapshot_summary["distinct_batch_count"] == 1
-            and snapshot_summary["manifest_variants"] == 1
-            and snapshot_summary["records_variants"] == 1
-            and snapshot_summary["source_manifest_variants"] == 1
-            and snapshot_summary["crawl_manifest_variants"] == 1,
-            f"{catalog}.{schema} has conflicting snapshot batch provenance")
+    require(
+        snapshot_summary["incomplete_count"] == 0,
+        f"{catalog}.{schema} has incomplete snapshot batches",
+    )
+    require(
+        snapshot_summary["distinct_batch_count"] == 1
+        and snapshot_summary["manifest_variants"] == 1
+        and snapshot_summary["records_variants"] == 1
+        and snapshot_summary["source_manifest_variants"] == 1
+        and snapshot_summary["crawl_manifest_variants"] == 1,
+        f"{catalog}.{schema} has conflicting snapshot batch provenance",
+    )
     return {"event_batches": event_summary, "snapshot_batches": snapshot_summary}
 
 
 def assert_authoritative(catalog, schema):
     reconciliation = scoped_frame(catalog, schema, "gold_crawl_snapshot_reconciliation")
     rows = reconciliation.limit(2).collect()
-    require(len(rows) == 1,
-            f"{catalog}.{schema} must have exactly one reconciliation row for the selected run/snapshot")
+    require(
+        len(rows) == 1,
+        f"{catalog}.{schema} must have exactly one reconciliation row for the selected run/snapshot",
+    )
     row = rows[0].asDict()
-    require(row.get("authority_status") == "authoritative",
-            f"{catalog}.{schema} reconciliation is not authoritative: {row.get('authority_status')}")
-    require(row.get("metadata_variant_count") == 1 and row.get("manifest_valid") == 1,
-            f"{catalog}.{schema} snapshot metadata or manifest gate failed: "
-            f"metadata_variant_count={row.get('metadata_variant_count')}, "
-            f"manifest_valid={row.get('manifest_valid')}")
-    require(row.get("matching_publication_event_count", 0) > 0,
-            f"{catalog}.{schema} lacks a matching completed snapshot publication event")
-    require(row.get("capture_event_count") == row.get("expected_capture_count")
-            and row.get("distinct_task_count") == row.get("capture_event_count")
-            and row.get("missing_task_count") == 0,
-            f"{catalog}.{schema} capture identity gate failed")
+    require(
+        row.get("authority_status") == "authoritative",
+        f"{catalog}.{schema} reconciliation is not authoritative: {row.get('authority_status')}",
+    )
+    require(
+        row.get("metadata_variant_count") == 1 and row.get("manifest_valid") == 1,
+        f"{catalog}.{schema} snapshot metadata or manifest gate failed: "
+        f"metadata_variant_count={row.get('metadata_variant_count')}, "
+        f"manifest_valid={row.get('manifest_valid')}",
+    )
+    require(
+        row.get("matching_publication_event_count", 0) > 0,
+        f"{catalog}.{schema} lacks a matching completed snapshot publication event",
+    )
+    require(
+        row.get("capture_event_count") == row.get("expected_capture_count")
+        and row.get("distinct_task_count") == row.get("capture_event_count")
+        and row.get("missing_task_count") == 0,
+        f"{catalog}.{schema} capture identity gate failed",
+    )
 
     pages = scoped_frame(catalog, schema, "gold_authoritative_page_observations")
     aliases = scoped_frame(catalog, schema, "gold_authoritative_page_alias_observations")
@@ -210,22 +269,36 @@ def assert_authoritative(catalog, schema):
     rejected = scoped_frame(catalog, schema, "gold_crawl_rejected_task_observations")
     page_count = pages.count()
     alias_count = aliases.count()
-    capture_statuses = {item["reconciliation_status"]: int(item["count"])
-                        for item in captures.groupBy("reconciliation_status").count().collect()}
-    rejected_statuses = {item["reconciliation_status"]: int(item["count"])
-                         for item in rejected.groupBy("reconciliation_status").count().collect()}
+    capture_statuses = {
+        item["reconciliation_status"]: int(item["count"])
+        for item in captures.groupBy("reconciliation_status").count().collect()
+    }
+    rejected_statuses = {
+        item["reconciliation_status"]: int(item["count"])
+        for item in rejected.groupBy("reconciliation_status").count().collect()
+    }
     capture_count = sum(capture_statuses.values())
-    require(page_count == row.get("expected_page_count"),
-            f"{catalog}.{schema} authoritative Page count differs from its snapshot manifest")
-    require(alias_count == row.get("expected_alias_count"),
-            f"{catalog}.{schema} authoritative alias count differs from its snapshot manifest")
-    require(capture_count == row.get("expected_capture_count"),
-            f"{catalog}.{schema} capture reconciliation row count differs from its Crawl Manifest")
-    require(set(capture_statuses) <= {
-        "authoritative_admitted", "authoritative_alias", "authoritative_superseded"
-    }, f"{catalog}.{schema} has provisional or unmatched capture reconciliation rows")
-    require(set(rejected_statuses) <= {"authoritative_rejected_task"},
-            f"{catalog}.{schema} has provisional rejected-task rows")
+    require(
+        page_count == row.get("expected_page_count"),
+        f"{catalog}.{schema} authoritative Page count differs from its snapshot manifest",
+    )
+    require(
+        alias_count == row.get("expected_alias_count"),
+        f"{catalog}.{schema} authoritative alias count differs from its snapshot manifest",
+    )
+    require(
+        capture_count == row.get("expected_capture_count"),
+        f"{catalog}.{schema} capture reconciliation row count differs from its Crawl Manifest",
+    )
+    require(
+        set(capture_statuses)
+        <= {"authoritative_admitted", "authoritative_alias", "authoritative_superseded"},
+        f"{catalog}.{schema} has provisional or unmatched capture reconciliation rows",
+    )
+    require(
+        set(rejected_statuses) <= {"authoritative_rejected_task"},
+        f"{catalog}.{schema} has provisional rejected-task rows",
+    )
     return {
         "authority_status": row["authority_status"],
         "expected_capture_count": int(row["expected_capture_count"]),
@@ -264,34 +337,54 @@ def compare_table(name, excluded=(), run_scoped=True):
     # compare as row multisets. Delivery projections can repeat logical events
     # across batches. Validate each identity has one substantive row version,
     # then compare distinct full logical rows for those projections.
-    left_json = left.select(F.to_json(F.struct(*[F.col(column) for column in columns]),
-                                      options={"ignoreNullFields": "false"}).alias("logical_row"))
-    right_json = right.select(F.to_json(F.struct(*[F.col(column) for column in columns]),
-                                       options={"ignoreNullFields": "false"}).alias("logical_row"))
+    left_json = left.select(
+        F.to_json(
+            F.struct(*[F.col(column) for column in columns]), options={"ignoreNullFields": "false"}
+        ).alias("logical_row")
+    )
+    right_json = right.select(
+        F.to_json(
+            F.struct(*[F.col(column) for column in columns]), options={"ignoreNullFields": "false"}
+        ).alias("logical_row")
+    )
     physical_delivery_rows = None
     if name in DELIVERY_PROJECTIONS:
         identity_columns = DELIVERY_PROJECTIONS[name]
-        require(set(identity_columns).issubset(columns),
-                f"{name} delivery comparison is missing its logical identity columns")
+        require(
+            set(identity_columns).issubset(columns),
+            f"{name} delivery comparison is missing its logical identity columns",
+        )
         physical_delivery_rows = {"baseline": left.count(), "replay": right.count()}
         left_deliveries = left.withColumn(
-            "logical_row", F.to_json(F.struct(*[F.col(column) for column in columns]),
-                                      options={"ignoreNullFields": "false"})
+            "logical_row",
+            F.to_json(
+                F.struct(*[F.col(column) for column in columns]),
+                options={"ignoreNullFields": "false"},
+            ),
         ).select(*identity_columns, "logical_row")
         right_deliveries = right.withColumn(
-            "logical_row", F.to_json(F.struct(*[F.col(column) for column in columns]),
-                                      options={"ignoreNullFields": "false"})
+            "logical_row",
+            F.to_json(
+                F.struct(*[F.col(column) for column in columns]),
+                options={"ignoreNullFields": "false"},
+            ),
         ).select(*identity_columns, "logical_row")
         deliveries = left_deliveries.unionByName(right_deliveries)
         null_identity = " OR ".join(f"`{column}` IS NULL" for column in identity_columns)
-        require(deliveries.where(F.expr(null_identity)).limit(1).count() == 0,
-                f"{name} delivery comparison found a null logical event identity")
-        conflicting_versions = deliveries.groupBy(*identity_columns).agg(
-            F.countDistinct("logical_row").alias("substantive_row_versions")
-        ).where(F.col("substantive_row_versions") != 1)
+        require(
+            deliveries.where(F.expr(null_identity)).limit(1).count() == 0,
+            f"{name} delivery comparison found a null logical event identity",
+        )
+        conflicting_versions = (
+            deliveries.groupBy(*identity_columns)
+            .agg(F.countDistinct("logical_row").alias("substantive_row_versions"))
+            .where(F.col("substantive_row_versions") != 1)
+        )
         version_sample = [row.asDict() for row in conflicting_versions.limit(3).collect()]
-        require(not version_sample,
-                f"logical event identity has conflicting substantive deliveries: {version_sample}")
+        require(
+            not version_sample,
+            f"logical event identity has conflicting substantive deliveries: {version_sample}",
+        )
         left_json = left_json.dropDuplicates(["logical_row"])
         right_json = right_json.dropDuplicates(["logical_row"])
     paired = left_json.withColumn("_side", F.lit("baseline")).unionByName(
@@ -301,11 +394,17 @@ def compare_table(name, excluded=(), run_scoped=True):
         F.sum(F.when(F.col("_side") == "baseline", 1).otherwise(0)).alias("baseline_count"),
         F.sum(F.when(F.col("_side") == "replay", 1).otherwise(0)).alias("replay_count"),
     )
-    summary = grouped.agg(
-        F.sum("baseline_count").alias("baseline_rows"),
-        F.sum("replay_count").alias("replay_rows"),
-        F.sum(F.when(F.col("baseline_count") != F.col("replay_count"), 1).otherwise(0)).alias("differing_row_values"),
-    ).first().asDict()
+    summary = (
+        grouped.agg(
+            F.sum("baseline_count").alias("baseline_rows"),
+            F.sum("replay_count").alias("replay_rows"),
+            F.sum(F.when(F.col("baseline_count") != F.col("replay_count"), 1).otherwise(0)).alias(
+                "differing_row_values"
+            ),
+        )
+        .first()
+        .asDict()
+    )
     baseline_rows = int(summary.get("baseline_rows") or 0)
     replay_rows = int(summary.get("replay_rows") or 0)
     differing = int(summary.get("differing_row_values") or 0)
@@ -330,9 +429,12 @@ def compare_table(name, excluded=(), run_scoped=True):
             "identity_version_gate": "one full substantive row per logical event identity",
         }
     if not result["equal"]:
-        result["mismatch_sample"] = [row.asDict() for row in grouped.where(
-            F.col("baseline_count") != F.col("replay_count")
-        ).limit(3).collect()]
+        result["mismatch_sample"] = [
+            row.asDict()
+            for row in grouped.where(F.col("baseline_count") != F.col("replay_count"))
+            .limit(3)
+            .collect()
+        ]
     require(result["equal"], f"logical replay mismatch in {name}: {result}")
     return result
 
@@ -341,8 +443,10 @@ baseline_gates = check_batch_gates(baseline_catalog, baseline_schema)
 replay_gates = check_batch_gates(replay_catalog, replay_schema)
 baseline_authority = assert_authoritative(baseline_catalog, baseline_schema)
 replay_authority = assert_authoritative(replay_catalog, replay_schema)
-require(baseline_authority == replay_authority,
-        "baseline and replay reconciliation authority/count summaries differ")
+require(
+    baseline_authority == replay_authority,
+    "baseline and replay reconciliation authority/count summaries differ",
+)
 
 comparisons = []
 for table_name, excluded in SNAPSHOT_TABLES + SNAPSHOT_GOLD_VIEWS:
@@ -355,7 +459,9 @@ for table_name in RECONCILIATION_VIEWS:
 report = {
     "schema_version": "scout.analytics-replay-verification.v1",
     "status": "passed",
-    "verified_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "verified_at_utc": datetime.now(timezone.utc)
+    .isoformat(timespec="seconds")
+    .replace("+00:00", "Z"),
     "crawl_run_id": crawl_run_id,
     "snapshot_id": snapshot_id,
     "baseline_schema": f"{baseline_catalog}.{baseline_schema}",

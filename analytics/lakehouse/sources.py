@@ -90,7 +90,9 @@ def snapshot_from_batch(batch_dir, near_duplicates=None):
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise SourceError(f"snapshot batch {batch_dir} is invalid: {error}") from error
     report = _read_near_duplicates(Path(near_duplicates) if near_duplicates else None)
-    return SnapshotInput(manifest, _read_envelopes(batch_dir), report, "snapshot_batch", str(batch_dir))
+    return SnapshotInput(
+        manifest, _read_envelopes(batch_dir), report, "snapshot_batch", str(batch_dir)
+    )
 
 
 def snapshot_from_data_dir(data_dir, snapshot_id):
@@ -100,11 +102,18 @@ def snapshot_from_data_dir(data_dir, snapshot_id):
         try:
             batch_dir = snapshot_batch.export_snapshot(data_dir, snapshot_id, staging)
         except (OSError, ValueError, KeyError, TypeError) as error:
-            raise SourceError(f"snapshot {snapshot_id} in {data_dir} is invalid: {error}") from error
+            raise SourceError(
+                f"snapshot {snapshot_id} in {data_dir} is invalid: {error}"
+            ) from error
         loaded = snapshot_from_batch(batch_dir)
     report_path = data_dir / "crawls" / loaded.run_id / "near-duplicates.json"
-    return SnapshotInput(loaded.manifest, loaded.envelopes, _read_near_duplicates(report_path),
-                         "data_dir", f"{data_dir}#{snapshot_id}")
+    return SnapshotInput(
+        loaded.manifest,
+        loaded.envelopes,
+        _read_near_duplicates(report_path),
+        "data_dir",
+        f"{data_dir}#{snapshot_id}",
+    )
 
 
 def snapshot_ids(data_dir):
@@ -138,8 +147,7 @@ class CrawlEventRecord:
 class EventSource(Protocol):
     """Anything that yields crawl events. Delivery may be at least once."""
 
-    def records(self) -> Iterator[CrawlEventRecord]:
-        ...
+    def records(self) -> Iterator[CrawlEventRecord]: ...
 
 
 class JsonlEventSource:
@@ -191,7 +199,9 @@ class EventBatchSource:
                 if envelope.get("record_type") != "crawl_event":
                     continue
                 yield CrawlEventRecord(
-                    envelope["record_json"], "event_batch", f"{manifest['batch_id']}:{number}",
+                    envelope["record_json"],
+                    "event_batch",
+                    f"{manifest['batch_id']}:{number}",
                     declared={
                         "event_id": envelope.get("record_id"),
                         "event_type": envelope.get("event_type"),

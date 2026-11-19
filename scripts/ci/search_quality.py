@@ -11,6 +11,7 @@ only shapes its input and output.
 
 Standard library only, so the gate needs nothing beyond Python 3.
 """
+
 import argparse
 import json
 import os
@@ -114,7 +115,9 @@ def compare(baseline, results, max_drop, modes=None):
         if old is None and new is None:
             continue
         if old is None:
-            problems.append(f"{mode}: results have no baseline (update it deliberately, see docs/search-quality-gate.md)")
+            problems.append(
+                f"{mode}: results have no baseline (update it deliberately, see docs/search-quality-gate.md)"
+            )
             continue
         if new is None:
             problems.append(f"{mode}: baseline has it but the results do not")
@@ -158,7 +161,9 @@ def format_table(rows, max_drop, markdown=False):
 
 def cmd_compare(args):
     if not Path(args.baseline).is_file():
-        fail(f"no baseline at {args.baseline}; create it with scripts/ci/search-quality.sh --update-baseline")
+        fail(
+            f"no baseline at {args.baseline}; create it with scripts/ci/search-quality.sh --update-baseline"
+        )
     baseline = json.loads(Path(args.baseline).read_text())
     results = json.loads(Path(args.results).read_text())
     modes = args.modes.split(",") if args.modes else None
@@ -189,13 +194,17 @@ def cmd_baseline(args):
     results = json.loads(Path(args.results).read_text())
     missing = [mode for mode in MODES if mode not in results["modes"]]
     if missing:
-        fail(f"results lack {', '.join(missing)}; rebuild with SEARCH_QUALITY_MODE=hybrid before updating the baseline")
+        fail(
+            f"results lack {', '.join(missing)}; rebuild with SEARCH_QUALITY_MODE=hybrid before updating the baseline"
+        )
     write_json(BASELINE, results)
     print(f"baseline: wrote {BASELINE}")
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     package = sub.add_parser("package")

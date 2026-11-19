@@ -7,7 +7,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-
 SCHEMA = "scout.databricks-crawl-event-ingestion-receipt.v1"
 
 

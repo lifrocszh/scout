@@ -1,5 +1,7 @@
 # Run 13: BGE OpenVINO GPU repeat and Ticket 31 serving checkpoint
 
+> The evidence files named below are kept locally; raw run output is not committed (see `.gitignore`).
+
 **Classification:** 2k checkpoint evidence
 **Status:** Build, activation, verification, Evaluation, HTTP smoke, and guarded benchmark completed. Benchmark flagged concurrency 2 as unstable.
 
@@ -43,14 +45,14 @@ Concurrency 2 produced higher observed median throughput, but its spread crosses
 
 ## Evidence and limits
 
-- [Guarded benchmark config](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark.toml)
-- [Preflight lock and resource gate](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/launch-preflight.json)
-- [Locked benchmark plan](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/plan.json)
-- [Benchmark report](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/report.json)
-- [Per-pass samples](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/samples.jsonl)
-- [Scout resource summary](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/resource-summary.json)
-- [Independent guard summary](run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/external-resource-summary.json)
+- Guarded benchmark config (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark.toml`)
+- Preflight lock and resource gate (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/launch-preflight.json`)
+- Locked benchmark plan (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/plan.json`)
+- Benchmark report (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/report.json`)
+- Per-pass samples (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/samples.jsonl`)
+- Scout resource summary (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/benchmark-output/resource-summary.json`)
+- Independent guard summary (`run-13-openvino-gpu-2k-repeatability-2026-09-27/serving-benchmark/external-resource-summary.json`)
 - [Three-run repeatability comparison](openvino-gpu-2k-repeatability-2026-09-27.json)
-- [Ticket 31](../../.scratch/scout/issues/31-measure-activated-search-across-concurrency-levels.md)
+- Ticket 31 (`../../.scratch/scout/issues/31-measure-activated-search-across-concurrency-levels.md`)
 
 The three builds match on build profile, semantic artifact, Evaluation metrics, and top-10 Page identities. Keyword artifacts and Generation manifest digests differ, so whole-Generation byte identity is not established. Relevance labels remain provisional. Ticket 31 stays partial until its 10k checkpoint is complete; ADR-0001's final MVP performance baseline still requires a real 100,000-Page Corpus.

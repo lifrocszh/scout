@@ -1,0 +1,291 @@
+# Unit tests for alerts.yml: `promtool test rules deploy/prometheus/alerts_test.yml`, which
+# scripts/ci/prometheus-rules.sh runs in CI. Series values use promtool's expanding notation:
+# `0+10x3` is 0 10 20 30, `1x4` is five 1s, one sample per `interval`.
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+
+tests:
+  # ---- ScoutCrawlStalled ----------------------------------------------------------------------
+  - name: crawl stalls while tasks remain
+    interval: 1m
+    input_series:
+      # Four results accepted in the first three minutes, none after.
+      - series: 'scout_task_completions_total{outcome="accepted"}'
+        values: '0+10x3 30x40'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '40x43'
+      - series: 'scout_frontier_tasks{status="leased"}'
+        values: '3x43'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ScoutCrawlStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScoutCrawlStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "The crawl has not accepted a page in 10 minutes"
+              description: "Tasks are pending or leased but no worker result was accepted for 10 minutes. See the stalled-crawl alert in the runbook."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutcrawlstalled"
+
+  - name: a finished crawl is not a stall
+    interval: 1m
+    input_series:
+      - series: 'scout_task_completions_total{outcome="accepted"}'
+        values: '0+10x3 30x40'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '0x43'
+      - series: 'scout_frontier_tasks{status="leased"}'
+        values: '0x43'
+      - series: 'scout_frontier_tasks{status="succeeded"}'
+        values: '40x43'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ScoutCrawlStalled
+        exp_alerts: []
+
+  - name: a crawl that keeps accepting pages is not a stall
+    interval: 1m
+    input_series:
+      - series: 'scout_task_completions_total{outcome="accepted"}'
+        values: '0+5x43'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '40x43'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ScoutCrawlStalled
+        exp_alerts: []
+
+  # ---- ScoutDeadLetterQueueGrowing ------------------------------------------------------------
+  - name: tasks are dead-lettered
+    interval: 1m
+    input_series:
+      # Two tasks join the dead-letter queue at minute 11.
+      - series: 'scout_frontier_tasks{status="failed",job="scout-coordinator",instance="coordinator:9101"}'
+        values: '0x10 2x50'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ScoutDeadLetterQueueGrowing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ScoutDeadLetterQueueGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              status: failed
+              job: scout-coordinator
+              instance: "coordinator:9101"
+            exp_annotations:
+              summary: "Tasks are being dead-lettered"
+              description: "The dead-letter queue grew in the last 15 minutes: tasks used up their attempts and the run will complete without those pages."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutdeadletterqueuegrowing"
+      # The queue still holds two tasks, but it has stopped growing.
+      - eval_time: 40m
+        alertname: ScoutDeadLetterQueueGrowing
+        exp_alerts: []
+
+  # ---- ScoutWorkersBelowExpected, ScoutWorkerTargetDown ---------------------------------------
+  - name: one worker is lost during the crawl
+    interval: 1m
+    input_series:
+      - series: 'up{job="scout-worker",instance="worker-1:9102"}'
+        values: '1x60'
+      - series: 'up{job="scout-worker",instance="worker-2:9102"}'
+        values: '1x60'
+      - series: 'up{job="scout-worker",instance="worker-3:9102"}'
+        values: '1x10 0x50'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '30x61'
+      - series: 'scout_frontier_tasks{status="leased"}'
+        values: '3x61'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ScoutWorkersBelowExpected
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: ScoutWorkerTargetDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScoutWorkersBelowExpected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Fewer crawl workers are up than expected"
+              description: "Fewer than 3 workers have answered their scrape for 5 minutes while the crawl still has work. Change the 3 in alerts.yml if you run another number of workers."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutworkersbelowexpected"
+      - eval_time: 20m
+        alertname: ScoutWorkerTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: scout-worker
+              instance: "worker-3:9102"
+            exp_annotations:
+              summary: "A crawl worker has not answered its scrape for 5 minutes"
+              description: "A worker is a scrape target but does not answer /metrics: it is not ready or is restarting."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutworkertargetdown"
+
+  - name: no worker answers its scrape
+    interval: 1m
+    input_series:
+      - series: 'up{job="scout-worker",instance="worker-1:9102"}'
+        values: '1x10 0x50'
+      - series: 'up{job="scout-worker",instance="worker-2:9102"}'
+        values: '1x10 0x50'
+      - series: 'up{job="scout-worker",instance="worker-3:9102"}'
+        values: '1x10 0x50'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '30x61'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ScoutWorkersBelowExpected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Fewer crawl workers are up than expected"
+              description: "Fewer than 3 workers have answered their scrape for 5 minutes while the crawl still has work. Change the 3 in alerts.yml if you run another number of workers."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutworkersbelowexpected"
+
+  - name: workers that left when the crawl ended are not an alert
+    interval: 1m
+    input_series:
+      - series: 'up{job="scout-worker",instance="worker-1:9102"}'
+        values: '1x10 0x50'
+      - series: 'up{job="scout-worker",instance="worker-2:9102"}'
+        values: '1x10 0x50'
+      - series: 'up{job="scout-worker",instance="worker-3:9102"}'
+        values: '1x10 0x50'
+      - series: 'scout_frontier_tasks{status="pending"}'
+        values: '0x61'
+      - series: 'scout_frontier_tasks{status="leased"}'
+        values: '0x61'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ScoutWorkersBelowExpected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScoutWorkerTargetDown
+        exp_alerts: []
+
+  # ---- ScoutCoordinatorDown -------------------------------------------------------------------
+  - name: the coordinator stops answering
+    interval: 1m
+    input_series:
+      - series: 'up{job="scout-coordinator",instance="coordinator:9101"}'
+        values: '1x10 0x50'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ScoutCoordinatorDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScoutCoordinatorDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: scout-coordinator
+              instance: "coordinator:9101"
+            exp_annotations:
+              summary: "The coordinator is down"
+              description: "The coordinator has not answered its scrape for 2 minutes. Workers cannot claim or report tasks until it is back."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutcoordinatordown"
+
+  # ---- ScoutServeDown -------------------------------------------------------------------------
+  - name: serve goes down after it was up
+    interval: 1m
+    input_series:
+      # Not started for the first 11 minutes (the crawl and index build), up for 11, then down.
+      - series: 'up{job="scout-serve",instance="serve:9103"}'
+        values: '0x10 1x10 0x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ScoutServeDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: ScoutServeDown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ScoutServeDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: scout-serve
+              instance: "serve:9103"
+            exp_annotations:
+              summary: "The search API is down"
+              description: "scout serve answered scrapes within the last day and has not answered for 2 minutes. Searches fail."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutservedown"
+
+  # ---- ScoutSearchErrorRateHigh ---------------------------------------------------------------
+  - name: keyword searches fail, hybrid searches do not
+    interval: 1m
+    input_series:
+      - series: 'scout_search_requests_total{mode="keyword",outcome="ok",job="scout-serve",instance="serve:9103"}'
+        values: '0+100x40'
+      - series: 'scout_search_requests_total{mode="keyword",outcome="error",job="scout-serve",instance="serve:9103"}'
+        values: '0+20x40'
+      - series: 'scout_search_requests_total{mode="hybrid",outcome="ok",job="scout-serve",instance="serve:9103"}'
+        values: '0+100x40'
+      - series: 'scout_search_requests_total{mode="hybrid",outcome="error",job="scout-serve",instance="serve:9103"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ScoutSearchErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              mode: keyword
+            exp_annotations:
+              summary: "More than 5% of keyword searches fail"
+              description: "Over 5% of searches in keyword mode returned an error for 5 minutes."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutsearcherrorratehigh"
+
+  - name: a quiet API with failing searches does not alert
+    interval: 1m
+    input_series:
+      # Half the searches fail, but there are only two a minute.
+      - series: 'scout_search_requests_total{mode="keyword",outcome="ok",job="scout-serve",instance="serve:9103"}'
+        values: '0+1x40'
+      - series: 'scout_search_requests_total{mode="keyword",outcome="error",job="scout-serve",instance="serve:9103"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ScoutSearchErrorRateHigh
+        exp_alerts: []
+
+  # ---- ScoutKafkaRelayLagHigh -----------------------------------------------------------------
+  - name: the Kafka relay falls behind
+    interval: 1m
+    input_series:
+      - series: 'scout_kafka_relay_pending_events{job="scout-kafka-relay",instance="kafka-relay:9104"}'
+        values: '0x5 5000x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ScoutKafkaRelayLagHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ScoutKafkaRelayLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: scout-kafka-relay
+              instance: "kafka-relay:9104"
+            exp_annotations:
+              summary: "The Kafka relay is more than 1000 events behind"
+              description: "More than 1000 outbox events have waited for the Kafka relay for 10 minutes. The crawl is not affected; the replica is."
+              runbook_url: "https://github.com/lifrocszh/scout/blob/main/docs/runbook.md#scoutkafkarelaylaghigh"
+
+  - name: no Kafka metrics, no Kafka alert
+    interval: 1m
+    input_series:
+      # The core stack: the relay is not running, so its series do not exist.
+      - series: 'up{job="scout-serve",instance="serve:9103"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ScoutKafkaRelayLagHigh
+        exp_alerts: []
