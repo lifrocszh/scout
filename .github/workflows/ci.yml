@@ -138,6 +138,16 @@ jobs:
       - run: python3 -B tests/search_quality_test.py
       - run: python3 -B tests/scaling_benchmark_test.py
 
+  # Prometheus alert rules (deploy/prometheus/alerts.yml): `promtool check` of the configs and rules and
+  # `promtool test rules` of alerts_test.yml, with the prom/prometheus image the Compose obs profile
+  # runs. The Compose smoke test then checks that Prometheus loads the rules and evaluates them.
+  prometheus-rules:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/ci/prometheus-rules.sh
+
   # Local lakehouse (docs/lakehouse.md): tests, then the fixture crawl -> Delta tables -> data
   # quality -> example DuckDB queries, then every deliberately broken fixture, which must trip
   # a data-quality rule (exit 1, not a crash).

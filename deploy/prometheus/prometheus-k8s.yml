@@ -10,6 +10,11 @@ global:
   scrape_interval: 5s
   evaluation_interval: 15s
 
+# Alert rules (docs/runbook.md, "Alerts"). Mount alerts.yml next to this file, for example from a
+# ConfigMap in the same volume as the config; Prometheus fails to start if the file is missing.
+rule_files:
+  - alerts.yml
+
 scrape_configs:
   - job_name: scout
     kubernetes_sd_configs:

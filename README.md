@@ -327,6 +327,11 @@ adaptive backoff, near-duplicate rate per origin), DB pool wait, search latency 
 it, and the Prometheus data source, from `deploy/grafana/provisioning/` on start. Prometheus
 (Apache-2.0) and Grafana OSS (AGPL-3.0) run as unmodified upstream images, pinned in `compose.yaml`.
 
+Prometheus also loads the alert rules in `deploy/prometheus/alerts.yml` (stalled crawl, dead-letter
+queue growing, workers missing, coordinator or search API down, search errors, Kafka relay lag). They
+show on its Alerts page, http://127.0.0.1:9090/alerts; Scout ships no Alertmanager. What each alert
+means and what to do about it is in [docs/runbook.md](docs/runbook.md#alerts).
+
 | Metric | Type | Process | Meaning |
 | --- | --- | --- | --- |
 | `scout_pages_fetched_total{outcome}` | counter | worker | Page fetches: `success`, `http_error`, `transport_error`, `body_error` |

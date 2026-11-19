@@ -56,6 +56,19 @@ for _ in $(seq 1 30); do
 done
 curl -fsS "$prom/-/ready" >/dev/null || fail "Prometheus is not ready at $prom"
 
+# Prometheus loaded deploy/prometheus/alerts.yml and every alert rule evaluates without error. A rule
+# stays "unknown" until its group's first evaluation (evaluation_interval, 15 s). Whether an alert
+# fires is covered by the promtool unit tests (scripts/ci/prometheus-rules.sh), not here.
+expected_alerts=$(grep -c '^ *- alert:' deploy/prometheus/alerts.yml)
+loaded=0
+for _ in $(seq 1 40); do
+  loaded=$(curl -fsS "$prom/api/v1/rules" | jq '[.data.groups[].rules[] | select(.type == "alerting" and .health == "ok")] | length' 2>/dev/null || echo 0)
+  [ "$loaded" = "$expected_alerts" ] && break
+  sleep 2
+done
+[ "$loaded" = "$expected_alerts" ] || fail "Prometheus evaluates $loaded of the $expected_alerts alert rules in alerts.yml without error"
+pass "all $expected_alerts alert rules are loaded and evaluate"
+
 # The fixture has 11 crawlable pages and one more that only the sitemap lists.
 wait_for_at_least "tasks claimed" 11 "sum(max_over_time(scout_task_claims_total[$window]))"
 wait_for_at_least "task results accepted" 11 "sum(max_over_time(scout_task_completions_total{outcome=\"accepted\"}[$window]))"

@@ -17,7 +17,8 @@
 #   obs   Prometheus + Grafana scraping every Scout process:
 #           docker compose --profile obs up --scale worker=3
 #         Grafana: http://127.0.0.1:3000 (dashboard "Scout overview").
-#         Prometheus: http://127.0.0.1:9090. The fixture crawl ends in seconds, so
+#         Prometheus: http://127.0.0.1:9090, with the alert rules of deploy/prometheus/alerts.yml
+#         on its Alerts page (docs/runbook.md, "Alerts"). The fixture crawl ends in seconds, so
 #         keep the processes up for a last scrape with SCOUT_METRICS_LINGER_SECS=10.
 #   kafka Apache Kafka (KRaft, one node), the outbox relay and a reducer that rebuilds the
 #         snapshot from Kafka alone and checks it against the live one (ADR 0003, #13):
@@ -195,6 +196,7 @@ services:
       - --storage.tsdb.retention.time=3d
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
