@@ -42,9 +42,9 @@ human judgments, so `metadata.json` declares `judgment_provenance.fixture_by_con
 flag lets `scout evaluate` accept one judge, and is meant for this fixture only; real packages
 still need two judges or an owner-reviewed LLM reviewer.
 
-Keep queries free of Tantivy query syntax (`:`, `"`, a leading `-`, brackets). Keyword search
-passes the text straight to the query parser, so `Vec::retain` is a syntax error and aborts the
-whole evaluation.
+Queries are plain text, so any text works in `queries.jsonl`, `::` and quotes included (see
+"Keyword queries" in the README). Quoted phrases are the one syntax; they change the ranking, so
+leave them out unless a query is meant to test one.
 
 ## Updating the baseline on purpose
 

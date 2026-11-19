@@ -156,6 +156,27 @@ Modes are `keyword`, `semantic`, and `hybrid`. Results group matching passages b
 the page URL, title, heading, and snippet. Other endpoints: `GET /v1/healthz`, `GET /v1/readyz`,
 and `GET /v1/generation`.
 
+### Keyword queries
+
+The query is plain text. `keyword` search, and the keyword half of `hybrid`, match its words
+against the page title, heading and body, rank by BM25 with the Generation's field boosts, and
+rank a page higher the more of the words it contains. Nothing in the text is an operator, so no
+query is rejected as a syntax error: `std::fs`, `--verbose`, `foo:bar`, `Vec::retain` and an
+unbalanced `"` all search for their words.
+
+- A word with punctuation inside it (`std::fs`, `rust-analyzer`) matches its parts as a phrase:
+  adjacent and in order.
+- Double quotes mark a phrase: `"consumer group" rebalance`. An unterminated quote runs to the end
+  of the query. This is the only syntax.
+- `AND`, `OR`, `NOT`, `IN`, `+word`, `-word`, `field:word`, `*`, `~`, ranges and regular
+  expressions are ordinary text. `rust AND python` matches pages with `rust` or `python` (or the
+  word `and`), `-word` does not exclude, and `title:rust` does not filter by field. Use the
+  `source` request field to filter by Source.
+- Text without any word (`---`, `::`) matches nothing in keyword search: an empty `results` list,
+  status 200.
+
+The `semantic` half of `hybrid` embeds the text as written.
+
 ## Search quality
 
 CI fails a PR that makes ranking worse. The `search-quality` job crawls a 64-page fixture corpus

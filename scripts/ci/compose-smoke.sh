@@ -122,6 +122,14 @@ top=$(search 'rebalance consumer group' | jq -r '.results[0].url')
 [ "$top" = "$fixture/tutorials/scaling-consumers.html" ] || fail "unexpected top result for 'rebalance consumer group': $top"
 pass "keyword search finds the scaling tutorial first"
 
+# The query is plain text: Tantivy syntax characters are searched for, not parsed, so none of these
+# is an HTTP 400 (the curl in search() would fail) or an empty result.
+for query in '--rebalance' 'rebalance: (consumers' 'consumers "rebalance'; do
+  count=$(search "$query" | jq -r '.results | length')
+  [ "$count" -ge 1 ] || fail "plain-text query '$query' returned no results"
+done
+pass "keyword search treats syntax characters as text"
+
 # Only the sitemap lists this page, so finding it shows sitemap discovery works.
 hit=$(search 'gunnera' | jq -r '.results[0].url')
 [ "$hit" = "$fixture/archive/changelog.html" ] || fail "sitemap-only page not indexed: $hit"
